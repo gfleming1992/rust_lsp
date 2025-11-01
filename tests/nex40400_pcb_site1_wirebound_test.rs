@@ -18,7 +18,10 @@ mod tests {
         println!("✓ Successfully parsed NEX40400_PCB_SITE1_WIREBOUND.xml");
         println!("  Root element: {}", root.name);
         println!("  Number of child elements: {}", root.children.len());
-        println!("\nParsed structure:");
-        print_xml_tree(&root, 0);
+        #[cfg(debug_assertions)]
+        {
+            println!("\nParsed structure:");
+            print_xml_tree(&root, 0);
+        }
     }
 }

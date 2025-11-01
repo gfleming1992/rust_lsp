@@ -50,9 +50,12 @@ mod tests {
         }
         
         // Optional: Print the full tree structure for inspection
-        // Uncomment to see the entire parsed structure
-         println!("\nFull parsed structure:");
-         print_xml_tree(&root, 0);
+        // Only printed in debug mode to avoid release mode overhead
+        #[cfg(debug_assertions)]
+        {
+            println!("\nFull parsed structure:");
+            print_xml_tree(&root, 0);
+        }
     }
 
     /// Alternative test that demonstrates inspecting parsed content
