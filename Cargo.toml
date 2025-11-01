@@ -1,0 +1,13 @@
+[package]
+name = "rust_extension"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quick-xml = "0.31"
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1.0"
+
+[lib]
+name = "rust_extension"
+path = "src/lib.rs"
