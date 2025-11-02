@@ -4,6 +4,9 @@
 *.rmeta
 Cargo.lock
 
+# Generated output
+/output/
+
 # Debug files
 *.txt
 *.pdb
