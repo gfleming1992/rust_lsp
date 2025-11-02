@@ -17,8 +17,9 @@ mod tests {
         let xml_path = "tests/pic_programmerB.xml";
         
         // Parse the XML file using the library function
-        // This will return a Result - either the parsed root node or an error
+        let start = Instant::now();
         let result = parse_xml_file(xml_path);
+        let elapsed = start.elapsed();
         
         // Assert that parsing was successful
         // If this fails, the test will print the error message
@@ -44,6 +45,7 @@ mod tests {
         println!("  Root element: {}", root.name);
         println!("  Revision: {}", revision);
         println!("  Number of child elements: {}", root.children.len());
+        println!("Parsing time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
         
         // Print the first few elements to show the tree structure
         if !root.children.is_empty() {

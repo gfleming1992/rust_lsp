@@ -5,7 +5,8 @@
 
 use crate::parse_xml::XmlNode;
 use anyhow::{Result, Context};
-use std::fs;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 /// Serializes an XmlNode and all its descendants to an XML string
@@ -17,9 +18,10 @@ use std::path::Path;
 /// # Returns
 /// A formatted XML string representation of the node tree
 pub fn xml_node_to_string(node: &XmlNode, indent_level: usize) -> String {
-    let mut output = String::new();
-    serialize_node(node, indent_level, &mut output);
-    output
+    let mut buffer = Vec::with_capacity(1024);
+    buffer.extend_from_slice(b"<?xml version=\"1.0\"?>\n");
+    write_node_pretty(node, &mut buffer, indent_level).expect("serialization failed");
+    String::from_utf8(buffer).expect("serialized XML was not valid UTF-8")
 }
 
 /// Serializes an XmlNode tree to a file on disk
@@ -31,9 +33,11 @@ pub fn xml_node_to_string(node: &XmlNode, indent_level: usize) -> String {
 /// # Returns
 /// Result indicating success or error
 pub fn xml_node_to_file<P: AsRef<Path>>(node: &XmlNode, file_path: P) -> Result<()> {
-    let content = xml_node_to_string(node, 0);
-    fs::write(&file_path, content)
-        .context("Failed to write XML file")?;
+    let file = File::create(&file_path).context("Failed to create XML file")?;
+    let mut writer = BufWriter::with_capacity(1024 * 64, file);
+    writer.write_all(b"<?xml version=\"1.0\"?>\n").context("Failed to write XML declaration")?;
+    write_node_pretty(node, &mut writer, 0).context("Failed to serialize XML")?;
+    writer.flush().context("Failed to flush XML writer")?;
     Ok(())
 }
 
@@ -45,114 +49,159 @@ pub fn xml_node_to_file<P: AsRef<Path>>(node: &XmlNode, file_path: P) -> Result<
 /// # Returns
 /// A compact XML string without extra whitespace
 pub fn xml_node_to_compact_string(node: &XmlNode) -> String {
-    let mut output = String::new();
-    serialize_node_compact(node, &mut output);
-    output
+    let mut buffer = Vec::with_capacity(1024);
+    buffer.extend_from_slice(b"<?xml version=\"1.0\"?>\n");
+    write_node_compact(node, &mut buffer).expect("serialization failed");
+    String::from_utf8(buffer).expect("serialized XML was not valid UTF-8")
 }
 
 /// Internal recursive function to serialize a node with formatting
-fn serialize_node(node: &XmlNode, indent_level: usize, output: &mut String) {
-    let indent = "  ".repeat(indent_level);
-    
-    // Opening tag with attributes
-    output.push_str(&indent);
-    output.push('<');
-    output.push_str(&node.name);
-    
+fn write_node_pretty<W: Write>(node: &XmlNode, writer: &mut W, indent_level: usize) -> io::Result<()> {
+    write_indent(writer, indent_level)?;
+    writer.write_all(b"<")?;
+    writer.write_all(node.name.as_bytes())?;
+
     for (key, value) in &node.attributes {
-        output.push(' ');
-        output.push_str(key);
-        output.push_str("=\"");
-        output.push_str(&escape_xml_attr(value));
-        output.push('"');
+        writer.write_all(b" ")?;
+        writer.write_all(key.as_bytes())?;
+        writer.write_all(b"=\"")?;
+        write_escaped_attr(writer, value)?;
+        writer.write_all(b"\"")?;
     }
-    
-    // Handle content: if there are children or text, open tag and add content
-    if !node.children.is_empty() || !node.text_content.trim().is_empty() {
-        output.push_str(">\n");
-        
-        // Add text content if present and non-empty
-        if !node.text_content.trim().is_empty() {
-            output.push_str(&indent);
-            output.push_str("  ");
-            output.push_str(&escape_xml_text(&node.text_content.trim()));
-            output.push('\n');
-        }
-        
-        // Recursively serialize children
-        for child in &node.children {
-            serialize_node(child, indent_level + 1, output);
-        }
-        
-        // Closing tag
-        output.push_str(&indent);
-        output.push_str("</");
-        output.push_str(&node.name);
-        output.push_str(">\n");
-    } else {
-        // Self-closing tag for empty elements
-        output.push_str(" />\n");
+
+    let text = node.text_content.trim();
+    let has_text = !text.is_empty();
+    if node.children.is_empty() && !has_text {
+        writer.write_all(b" />\n")?;
+        return Ok(());
     }
+
+    writer.write_all(b">\n")?;
+
+    if has_text {
+        write_indent(writer, indent_level + 1)?;
+        write_escaped_text(writer, text)?;
+        writer.write_all(b"\n")?;
+    }
+
+    for child in &node.children {
+        write_node_pretty(child, writer, indent_level + 1)?;
+    }
+
+    write_indent(writer, indent_level)?;
+    writer.write_all(b"</")?;
+    writer.write_all(node.name.as_bytes())?;
+    writer.write_all(b">\n")?;
+    Ok(())
 }
 
 /// Internal recursive function to serialize a node without formatting
-fn serialize_node_compact(node: &XmlNode, output: &mut String) {
-    output.push('<');
-    output.push_str(&node.name);
-    
+fn write_node_compact<W: Write>(node: &XmlNode, writer: &mut W) -> io::Result<()> {
+    writer.write_all(b"<")?;
+    writer.write_all(node.name.as_bytes())?;
+
     for (key, value) in &node.attributes {
-        output.push(' ');
-        output.push_str(key);
-        output.push_str("=\"");
-        output.push_str(&escape_xml_attr(value));
-        output.push('"');
+        writer.write_all(b" ")?;
+        writer.write_all(key.as_bytes())?;
+        writer.write_all(b"=\"")?;
+        write_escaped_attr(writer, value)?;
+        writer.write_all(b"\"")?;
     }
-    
-    if !node.children.is_empty() || !node.text_content.trim().is_empty() {
-        output.push('>');
-        
-        if !node.text_content.trim().is_empty() {
-            output.push_str(&escape_xml_text(&node.text_content.trim()));
-        }
-        
-        for child in &node.children {
-            serialize_node_compact(child, output);
-        }
-        
-        output.push_str("</");
-        output.push_str(&node.name);
-        output.push('>');
-    } else {
-        output.push_str(" />");
+
+    let text = node.text_content.trim();
+    let has_text = !text.is_empty();
+
+    if node.children.is_empty() && !has_text {
+        writer.write_all(b" />")?;
+        return Ok(());
     }
+
+    writer.write_all(b">")?;
+
+    if has_text {
+        write_escaped_text(writer, text)?;
+    }
+
+    for child in &node.children {
+        write_node_compact(child, writer)?;
+    }
+
+    writer.write_all(b"</")?;
+    writer.write_all(node.name.as_bytes())?;
+    writer.write_all(b">")?;
+    Ok(())
+}
+
+fn write_indent<W: Write>(writer: &mut W, indent_level: usize) -> io::Result<()> {
+    for _ in 0..indent_level {
+        writer.write_all(b"  ")?;
+    }
+    Ok(())
 }
 
 /// Escapes special XML characters in attribute values
-fn escape_xml_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+fn write_escaped_attr<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
+    let mut last = 0;
+    for (idx, ch) in input.char_indices() {
+        let entity = match ch {
+            '&' => Some(b"&amp;" as &[u8]),
+            '<' => Some(b"&lt;" as &[u8]),
+            '>' => Some(b"&gt;" as &[u8]),
+            '"' => Some(b"&quot;" as &[u8]),
+            '\'' => Some(b"&apos;" as &[u8]),
+            _ => None,
+        };
+
+        if let Some(bytes) = entity {
+            if last < idx {
+                writer.write_all(input[last..idx].as_bytes())?;
+            }
+            writer.write_all(bytes)?;
+            last = idx + ch.len_utf8();
+        }
+    }
+
+    if last < input.len() {
+        writer.write_all(input[last..].as_bytes())?;
+    }
+    Ok(())
 }
 
-/// Escapes special XML characters in text content
-fn escape_xml_text(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn write_escaped_text<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
+    let mut last = 0;
+    for (idx, ch) in input.char_indices() {
+        let entity = match ch {
+            '&' => Some(b"&amp;" as &[u8]),
+            '<' => Some(b"&lt;" as &[u8]),
+            '>' => Some(b"&gt;" as &[u8]),
+            _ => None,
+        };
+
+        if let Some(bytes) = entity {
+            if last < idx {
+                writer.write_all(input[last..idx].as_bytes())?;
+            }
+            writer.write_all(bytes)?;
+            last = idx + ch.len_utf8();
+        }
+    }
+
+    if last < input.len() {
+        writer.write_all(input[last..].as_bytes())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use indexmap::IndexMap;
 
     fn create_test_node() -> XmlNode {
-        let mut attrs = HashMap::new();
+        let mut attrs = IndexMap::new();
         attrs.insert("id".to_string(), "123".to_string());
         
-        let mut child_attrs = HashMap::new();
+        let mut child_attrs = IndexMap::new();
         child_attrs.insert("name".to_string(), "test".to_string());
         
         let child = XmlNode {
@@ -187,8 +236,10 @@ mod tests {
         let node = create_test_node();
         let xml = xml_node_to_compact_string(&node);
         
-        // Compact should not have newlines
-        assert!(!xml.contains('\n'));
+        // Compact should have only the XML declaration newline
+        let lines: Vec<&str> = xml.split('\n').collect();
+        assert_eq!(lines.len(), 2); // XML declaration line + content line
+        assert!(lines[0].contains("<?xml"));
         assert!(xml.contains("root"));
         assert!(xml.contains("Hello World"));
     }
@@ -198,7 +249,7 @@ mod tests {
         let node = XmlNode {
             name: "test".to_string(),
             attributes: {
-                let mut m = HashMap::new();
+                let mut m = IndexMap::new();
                 m.insert("attr".to_string(), "value&quote\"lt<gt>".to_string());
                 m
             },
@@ -217,7 +268,7 @@ mod tests {
     fn test_empty_element() {
         let node = XmlNode {
             name: "empty".to_string(),
-            attributes: HashMap::new(),
+            attributes: IndexMap::new(),
             text_content: String::new(),
             children: vec![],
         };

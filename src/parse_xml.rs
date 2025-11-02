@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::BufReader;
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Represents a parsed XML node with its properties
 /// This is a simplified structure to demonstrate parsing
@@ -11,7 +11,7 @@ pub struct XmlNode {
     /// The name/tag of this element
     pub name: String,
     /// Map of attribute names to values
-    pub attributes: HashMap<String, String>,
+    pub attributes: IndexMap<String, String>,
     /// Text content of this node
     pub text_content: String,
     /// Child nodes
@@ -128,8 +128,8 @@ fn parse_node(reader: &mut Reader<BufReader<File>>, buf: &mut Vec<u8>, start: qu
     }
 }
 
-fn collect_attributes(attributes: quick_xml::events::attributes::Attributes<'_>) -> anyhow::Result<HashMap<String, String>> {
-    let mut map = HashMap::new();
+fn collect_attributes(attributes: quick_xml::events::attributes::Attributes<'_>) -> anyhow::Result<IndexMap<String, String>> {
+    let mut map = IndexMap::new();
     for attr in attributes {
         let attr = attr?;
         let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();

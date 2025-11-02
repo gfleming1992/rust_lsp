@@ -9,7 +9,9 @@ mod tests {
     #[test]
     fn test_teres_pcb1_a64_main_parsing() {
         let xml_path = "tests/TERES_PCB1-A64-MAIN_Rev.C.xml";
+        let start = Instant::now();
         let result = parse_xml_file(xml_path);
+        let elapsed = start.elapsed();
         assert!(result.is_ok(), "Failed to parse XML: {:?}", result.err());
         
         let root = result.unwrap();
@@ -19,6 +21,7 @@ mod tests {
         println!("✓ Successfully parsed TERES_PCB1-A64-MAIN_Rev.C.xml");
         println!("  Root element: {}", root.name);
         println!("  Number of child elements: {}", root.children.len());
+        println!("Parsing time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
         #[cfg(debug_assertions)]
         {
             println!("\nParsed structure:");
