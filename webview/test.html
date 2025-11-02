@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tessellation Test - IPC-2581 Line Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #111;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
+      }
+
+      #ui {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 6px 10px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        backdrop-filter: blur(4px);
+        font-size: 12px;
+        line-height: 1.4;
+        min-width: 280px;
+        max-height: 90vh;
+        overflow-y: auto;
+        pointer-events: auto;
+        user-select: none;
+        z-index: 100;
+      }
+
+      #ui button {
+        cursor: pointer;
+        padding: 4px 8px;
+        margin: 2px 0;
+        background: #555;
+        color: #eee;
+        border: 1px solid #666;
+        border-radius: 3px;
+      }
+
+      #ui button:hover {
+        background: #666;
+      }
+
+      #ui button.active {
+        background: #4a9eff;
+        border-color: #2a7ecf;
+      }
+
+      #testStatus {
+        margin-top: 6px;
+        padding: 6px;
+        background: rgba(74, 158, 255, 0.1);
+        border: 1px solid #4a9eff;
+        border-radius: 3px;
+        font-size: 11px;
+      }
+
+      #testStatus.error {
+        background: rgba(255, 107, 107, 0.1);
+        border-color: #ff6b6b;
+        color: #ff6b6b;
+      }
+
+      #testStatus.success {
+        background: rgba(51, 200, 51, 0.1);
+        border-color: #33c833;
+        color: #33c833;
+      }
+
+      #legend {
+        margin-top: 4px;
+        font-size: 11px;
+        line-height: 1.2;
+        color: #aaa;
+      }
+
+      #debugLog {
+        margin-top: 6px;
+        max-height: 150px;
+        overflow: auto;
+        font-size: 10px;
+        line-height: 1.2;
+        background: #000;
+        padding: 4px;
+        border: 1px solid #333;
+        font-family: monospace;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+
+      #layers {
+        margin-top: 6px;
+        max-height: 30vh;
+        overflow: auto;
+        font-size: 11px;
+        line-height: 1.3;
+      }
+
+      canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+        cursor: grab;
+      }
+
+      #coordOverlay {
+        position: fixed;
+        bottom: 4px;
+        right: 4px;
+        background: rgba(0, 0, 0, 0.75);
+        color: #fff;
+        font: 11px monospace;
+        padding: 2px 6px;
+        border: 1px solid #333;
+        border-radius: 3px;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+
+      .test-case-btn {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 2px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Test configuration -->
+    <script>
+      // Enable test mode by setting this before main.ts loads
+      window.__TESSELLATION_TEST = 'layer_LAYER_Design';
+      console.log('[TEST PAGE] Test mode enabled for layer_LAYER_Design');
+    </script>
+
+    <div id="ui">
+      <div><strong>🧪 Tessellation Test Viewer</strong></div>
+      
+      <div id="testStatus">
+        <div>Status: <span id="statusText">Initializing...</span></div>
+        <div style="margin-top: 4px; font-size: 9px; color: #888;">
+          Loading test case: <strong>layer_LAYER_Design</strong>
+        </div>
+      </div>
+
+      <div style="margin-top: 8px; border-top: 1px solid #444; padding-top: 6px;">
+        <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px;">Test Information</div>
+        <div>Parsed Lines: <span id="count">0</span></div>
+        <div>Last Width: <span id="lastWidth">-</span></div>
+        <div>Draw FPS: <span id="fps">0</span></div>
+        <div id="legend">
+          🖱️ Wheel = Zoom | Drag = Pan | LOD auto-selects by zoom
+        </div>
+      </div>
+
+      <div style="margin-top: 8px; border-top: 1px solid #444; padding-top: 6px;">
+        <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px;">Test Cases</div>
+        <button class="test-case-btn active" onclick="switchTestCase('layer_LAYER_Design')">
+          📊 Tinytapeout Design Layer
+        </button>
+        <div style="font-size: 9px; color: #888; margin-left: 4px; margin-top: -2px;">
+          From tinytapeout-demo.xml (13,800+ polylines)
+        </div>
+      </div>
+
+      <div id="debugLog" style="display: none;"></div>
+      <div id="layers"></div>
+    </div>
+
+    <canvas id="viewer" aria-label="Tessellation test preview"></canvas>
+    <div id="coordOverlay">x: -, y: -, zoom: 1.00</div>
+
+    <!-- Load main viewer with test mode enabled -->
+    <script type="module">
+      import { setupTestListeners } from "/src/tests.ts";
+      
+      // The test case name is already set above
+      console.log('[TEST PAGE] Main viewer loading with test support...');
+      
+      // Import and run main viewer
+      import("/src/main.ts");
+      
+      // Expose test switching function
+      window.switchTestCase = function(testCaseName) {
+        console.log(`[TEST PAGE] Switching to test case: ${testCaseName}`);
+        window.__TESSELLATION_TEST = testCaseName;
+        document.querySelectorAll('.test-case-btn').forEach(btn => {
+          btn.classList.remove('active');
+        });
+        event.target.classList.add('active');
+        // Reload with new test case
+        location.reload();
+      };
+      
+      // Update status
+      window.addEventListener('load', () => {
+        const statusEl = document.getElementById('statusText');
+        if (statusEl) {
+          setTimeout(() => {
+            statusEl.textContent = 'Running test...';
+            const testStatus = document.getElementById('testStatus');
+            testStatus.classList.add('success');
+          }, 500);
+        }
+      });
+      
+      // Monitor for errors
+      window.addEventListener('error', (event) => {
+        const statusEl = document.getElementById('statusText');
+        if (statusEl) {
+          statusEl.textContent = '❌ Error: ' + event.message;
+          const testStatus = document.getElementById('testStatus');
+          testStatus.classList.add('error');
+        }
+      });
+    </script>
+  </body>
+</html>

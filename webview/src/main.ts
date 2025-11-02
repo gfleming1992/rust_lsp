@@ -1,6 +1,28 @@
-import lineShaderCode from "./shaders/basic.wgsl?raw";
+import basicShaderCode from "./shaders/basic.wgsl?raw";
+import { setupTestListeners } from "./tests";
 
-type LayerColor = [number, number, number, number];
+// PCB Viewer with Multi-Shader Architecture
+// ==========================================
+// Supports 8 shader variants for optimal rendering performance:
+//
+// 1. basic.wgsl              - Simple shapes with optional per-vertex alpha (defaults to 1.0)
+// 2. instanced.wgsl          - Repeated geometry (vias, drills) - translation only
+// 3. instanced_colored.wgsl  - Repeated geometry with per-vertex alpha
+// 4. instanced_rot.wgsl      - Repeated geometry with 0°/90°/180°/270° rotation (pads)
+// 5. instanced_rot_colored.wgsl - Repeated geometry with rotation and per-vertex alpha
+// 6. batch.wgsl              - Many unique items (traces) in one draw call
+// 7. batch_instanced.wgsl    - Multiple types, each repeated (via types)
+// 8. batch_instanced_rot.wgsl - Multiple types with rotation (pad types)
+//
+// Alpha Transparency:
+// - basic.wgsl always accepts optional per-vertex alpha buffer (fills with 1.0 if not provided)
+// - Batch shaders have built-in per-item packed colors with alpha
+// - instanced_colored variants accept per-vertex alpha
+// - Example: Polygon fills at 0.5 alpha, outlines at 1.0 alpha in same layer
+//
+// Rust populates the appropriate shader arrays based on geometry analysis
+
+export type LayerColor = [number, number, number, number];
 
 interface LayerInfo {
   id: string;
@@ -9,33 +31,62 @@ interface LayerInfo {
 }
 
 // Geometry data for a specific shader type at a specific LOD level
-interface GeometryLOD {
+export interface GeometryLOD {
   vertexData: string;  // base64-encoded Float32Array binary data
   vertexCount: number;
   indexData?: string;  // Optional base64-encoded index buffer
   indexCount?: number;
   instanceData?: string;  // Optional base64-encoded instance data (for instanced shaders)
   instanceCount?: number;
+  alphaData?: string;  // Optional base64-encoded per-vertex alpha values (1 float per vertex)
+  // When alphaData is present, use the *_colored shader variant (e.g., basic_colored.wgsl)
+  // RGB comes from layer's defaultColor, only alpha varies per-vertex
+  // Example: polygon fills at 0.5 alpha, outlines at 1.0 alpha within same layer
+  // Rust should populate alphaData when different vertices need different transparency
 }
 
 // Shader-specific geometry organized by LOD (5 levels: 0=highest detail, 4=lowest)
 // Rust will pre-process geometry and populate the appropriate shader type arrays
 // based on the geometry characteristics (unique vs repeated, needs rotation, etc.)
-interface ShaderGeometry {
-  basic?: GeometryLOD[];           // For basic.wgsl - simple shapes, single draw each
+export interface ShaderGeometry {
+  basic?: GeometryLOD[];           // For basic.wgsl - simple shapes with optional per-vertex alpha
   instanced?: GeometryLOD[];       // For instanced.wgsl - repeated identical geometry (vias, drill holes)
+  instanced_colored?: GeometryLOD[]; // For instanced_colored.wgsl - repeated with per-vertex alpha
   instanced_rot?: GeometryLOD[];   // For instanced_rot.wgsl - repeated geometry with 0°/90°/180°/270° rotation (pads)
+  instanced_rot_colored?: GeometryLOD[]; // For instanced_rot_colored.wgsl - repeated with rotation and per-vertex alpha
   batch?: GeometryLOD[];           // For batch.wgsl - many unique items in one draw (PCB traces)
   batch_instanced?: GeometryLOD[]; // For batch_instanced.wgsl - multiple types, each repeated (via types)
   batch_instanced_rot?: GeometryLOD[]; // For batch_instanced_rot.wgsl - multiple types with rotation (pad types)
 }
 
-interface LayerJSON {
+export interface LayerJSON {
   layerId: string;
   layerName: string;
   defaultColor: LayerColor;
   geometry: ShaderGeometry;  // Organized by shader type, then by LOD
 }
+
+// Example: How Rust should populate geometry for a layer with polygon fills
+// {
+//   layerId: "TopCopper",
+//   defaultColor: [0.85, 0.7, 0.2, 1],  // Base RGB color for the layer
+//   geometry: {
+//     basic: [  // All simple shapes (fills and outlines)
+//       {
+//         vertexData: "...",  // Triangle vertices for fills
+//         vertexCount: 1000,
+//         alphaData: "..."    // Optional: Alpha for each vertex [0.5, 0.5, ...] (1 float per vertex)
+//                             // If omitted, defaults to 1.0 (full opacity)
+//                             // Final color = [0.85, 0.7, 0.2, alpha] per vertex
+//       },
+//       {
+//         vertexData: "...",  // Line vertices for outlines
+//         vertexCount: 500
+//         // No alphaData - defaults to alpha=1.0 (full opacity)
+//       }
+//     ]
+//   }
+// }
 
 interface StartupTimings {
   fetchStart: number;
@@ -155,6 +206,7 @@ const colorOverrides = new Map<string, LayerColor>();
 let vertices: Float32Array = new Float32Array();
 let vertexCount = 0;
 let lodBuffers: GPUBuffer[] = [];  // Array of 5 vertex buffers (one per LOD)
+let lodAlphaBuffers: (GPUBuffer | null)[] = []; // Parallel array for per-vertex alpha buffers
 let lodVertexCounts: number[] = [];  // Vertex counts per LOD
 let currentLOD = 0;  // Active LOD index (0-4)
 
@@ -327,8 +379,12 @@ function loadLayerData(layerJson: LayerJSON) {
   for (const buffer of lodBuffers) {
     buffer?.destroy();
   }
+  for (const a of lodAlphaBuffers) {
+    if (a) a.destroy();
+  }
   lodBuffers = [];
   lodVertexCounts = [];
+  lodAlphaBuffers = [];
   
   // For now, use 'basic' geometry if available (can be extended to support all shader types)
   const geometryLODs = layerJson.geometry.basic || 
@@ -368,6 +424,27 @@ function loadLayerData(layerJson: LayerJSON) {
     
     lodBuffers.push(buffer);
     lodVertexCounts.push(lod.vertexCount);
+
+    // Always create alpha buffer: use provided alphaData or fill with 1.0
+    let alphaArr: Float32Array;
+    if (lod.alphaData) {
+      const alphaBin = atob(lod.alphaData);
+      const alphaBytes = new Uint8Array(alphaBin.length);
+      for (let k = 0; k < alphaBin.length; k++) alphaBytes[k] = alphaBin.charCodeAt(k);
+      alphaArr = new Float32Array(alphaBytes.buffer);
+    } else {
+      // Fill with 1.0 (full opacity) for each vertex
+      alphaArr = new Float32Array(lod.vertexCount);
+      alphaArr.fill(1.0);
+    }
+    const alphaBuf = device.createBuffer({
+      size: alphaArr.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(alphaBuf.getMappedRange()).set(alphaArr);
+    alphaBuf.unmap();
+    lodAlphaBuffers.push(alphaBuf);
   }
   
   // Set LOD 0 as default
@@ -749,6 +826,11 @@ function render() {
   if (visible && vertexCount > 0 && vertexBuffer) {
     pass.setPipeline(pipeline);
     pass.setVertexBuffer(0, vertexBuffer);
+    // Always bind alpha buffer (contains 1.0 if alphaData not provided)
+    const alphaBuf = lodAlphaBuffers[currentLOD];
+    if (alphaBuf) {
+      pass.setVertexBuffer(1, alphaBuf);
+    }
     pass.setBindGroup(0, bindGroup);
     pass.draw(vertexCount);
   }
@@ -811,7 +893,12 @@ async function init() {
   context = ctx;
   canvasFormat = gpu.getPreferredCanvasFormat();
 
-  const shaderModule = device.createShaderModule({ code: lineShaderCode });
+  const shaderModule = device.createShaderModule({ code: basicShaderCode });
+
+  // Create a pipeline using basic.wgsl (always supports per-vertex alpha at location(1)).
+  // Vertex buffer layout includes:
+  //  - slot 0: vec2<f32> position (location 0)
+  //  - slot 1: float32 alpha (location 1) - always bound (1.0 if not provided by Rust)
   pipeline = device.createRenderPipeline({
     layout: "auto",
     vertex: {
@@ -821,13 +908,32 @@ async function init() {
         {
           arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
           attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+        },
+        {
+          // Per-vertex alpha buffer (1 float per vertex, defaults to 1.0)
+          arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
         }
       ]
     },
     fragment: {
       module: shaderModule,
       entryPoint: "fs_main",
-      targets: [{ format: canvasFormat }]
+      targets: [{
+        format: canvasFormat,
+        blend: {
+          color: {
+            srcFactor: "src-alpha",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          },
+          alpha: {
+            srcFactor: "one",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          }
+        }
+      }]
     },
     primitive: { topology: "triangle-list" }
   });
@@ -951,6 +1057,25 @@ async function init() {
   scheduleDraw();
 
   startup.parseEnd = performance.now();
+
+  // Setup test mode if enabled
+  setupTestListeners();
+
+  // Listen for messages from extension (or test API)
+  window.addEventListener("message", (event) => {
+    const data = event.data as Record<string, unknown>;
+    
+    if (data.command === "tessellationData" && data.payload) {
+      const layerJson = data.payload as LayerJSON;
+      console.log(`Received tessellation data from extension: ${layerJson.layerId}`);
+      loadLayerData(layerJson);
+      applyLayerColor(layerJson.layerId);
+      refreshLayerLegend();
+      scheduleDraw();
+    } else if (data.command === "error") {
+      console.error(`Extension error: ${data.message}`);
+    }
+  });
 
   requestAnimationFrame(loop);
 }
