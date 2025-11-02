@@ -1,9 +1,11 @@
 // Module declarations
 pub mod parse_xml;
 pub mod xml_to_sqlite;
+pub mod serialize_xml;
 
 // Re-export commonly used types and functions
 pub use parse_xml::{XmlNode, parse_xml_file};
+pub use serialize_xml::{xml_node_to_file, xml_node_to_string, xml_node_to_compact_string};
 
 /// Pretty-prints the XML tree structure
 /// Useful for debugging and understanding parsed content

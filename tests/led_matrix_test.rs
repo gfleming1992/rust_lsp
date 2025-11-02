@@ -1,5 +1,6 @@
 // Import the library functions
-use rust_extension::{parse_xml_file, print_xml_tree};
+use rust_extension::{parse_xml_file, print_xml_tree, xml_node_to_file};
+use std::time::Instant;
 
 #[cfg(test)]
 mod tests {
@@ -23,5 +24,27 @@ mod tests {
             println!("\nParsed structure:");
             print_xml_tree(&root, 0);
         }
+    }
+
+    #[test]
+    fn test_led_matrix_serialization() {
+        let xml_path = "tests/LED Matrix.xml";
+        let root = parse_xml_file(xml_path).expect("Failed to parse XML");
+        
+        let start = Instant::now();
+        let output_path = "output/LED Matrix_serialized.xml";
+        xml_node_to_file(&root, output_path).expect("Failed to serialize XML");
+        let elapsed = start.elapsed();
+        
+        println!("\n=== XML Serialization Performance ===");
+        println!("File: LED Matrix.xml");
+        println!("Serialization time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
+        println!("Output: {}", output_path);
+        
+        // Verify output file exists and has content
+        assert!(std::path::Path::new(output_path).exists(), "Output file not created");
+        let file_size = std::fs::metadata(output_path).unwrap().len();
+        println!("Output file size: {} bytes", file_size);
+        assert!(file_size > 0, "Output file is empty");
     }
 }

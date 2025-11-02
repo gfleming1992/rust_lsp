@@ -1,5 +1,6 @@
 // Import the library functions
-use rust_extension::{parse_xml_file, print_xml_tree};
+use rust_extension::{parse_xml_file, print_xml_tree, xml_node_to_file};
+use std::time::Instant;
 
 #[cfg(test)]
 mod tests {
@@ -80,6 +81,28 @@ mod tests {
         println!("Found Content element: {}", found_content);
         // Just verify we successfully parsed something meaningful
         assert!(!root.name.is_empty(), "Root should have a name");
+    }
+
+    #[test]
+    fn test_pic_programmer_b_serialization() {
+        let xml_path = "tests/pic_programmerB.xml";
+        let root = parse_xml_file(xml_path).expect("Failed to parse XML");
+        
+        let start = Instant::now();
+        let output_path = "output/pic_programmerB_serialized.xml";
+        xml_node_to_file(&root, output_path).expect("Failed to serialize XML");
+        let elapsed = start.elapsed();
+        
+        println!("\n=== XML Serialization Performance ===");
+        println!("File: pic_programmerB.xml");
+        println!("Serialization time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
+        println!("Output: {}", output_path);
+        
+        // Verify output file exists and has content
+        assert!(std::path::Path::new(output_path).exists(), "Output file not created");
+        let file_size = std::fs::metadata(output_path).unwrap().len();
+        println!("Output file size: {} bytes", file_size);
+        assert!(file_size > 0, "Output file is empty");
     }
 }
 
