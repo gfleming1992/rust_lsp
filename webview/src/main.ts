@@ -113,7 +113,6 @@ interface ViewerState {
   needsDraw: boolean;
 }
 
-const SAMPLE_LAYER_ID = "TopCopper";
 const ZOOM_SPEED = 0.005;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 500;
@@ -137,68 +136,8 @@ const BASE_PALETTE: LayerColor[] = [
   [0.9, 0.7, 0.4, 1]
 ];
 
-const LAYERS: LayerInfo[] = [
-  { id: SAMPLE_LAYER_ID, name: "Top Copper", defaultColor: [0.85, 0.7, 0.2, 1] }
-];
-
-// Helper to encode vertex data for sample
-function encodeVertexData(vertices: number[]): { vertexData: string; vertexCount: number } {
-    const float32 = new Float32Array(vertices);
-    const bytes = new Uint8Array(float32.buffer);
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-        const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-        binary += String.fromCharCode(...chunk);
-    }
-    return {
-        vertexData: btoa(binary),
-        vertexCount: vertices.length / 2
-    };
-}
-
-// Generate sample data for different LOD levels
-function generateSampleLODs(): GeometryLOD[] {
-  const lodConfigs = [
-    { lines: 10000, label: 'LOD0 (full detail)' },
-    { lines: 2500, label: 'LOD1' },
-    { lines: 625, label: 'LOD2' },
-    { lines: 156, label: 'LOD3' },
-    { lines: 39, label: 'LOD4 (coarsest)' }
-  ];
-  
-  return lodConfigs.map(({ lines, label }) => {
-    const vertices: number[] = [];
-    const gridWidth = Math.ceil(Math.sqrt(lines));
-    const gridHeight = Math.ceil(lines / gridWidth);
-    const offsetX = (gridWidth * 20) / 2;
-    const offsetY = (gridHeight * 20) / 2;
-    
-    for (let i = 0; i < lines; i++) {
-      const x = (i % gridWidth) * 20 - offsetX;
-      const y = Math.floor(i / gridWidth) * 20 - offsetY;
-      vertices.push(
-        x, y, x + 10, y, x, y + 5,           // First triangle
-        x, y + 5, x + 10, y, x + 10, y + 5  // Second triangle
-      );
-    }
-    
-    const encoded = encodeVertexData(vertices);
-    console.log(`${label}: ${lines} lines, ${encoded.vertexCount} vertices`);
-    return encoded;
-  });
-}
-
-const SAMPLE_LAYER_JSON: LayerJSON = {
-  layerId: SAMPLE_LAYER_ID,
-  layerName: "Top Copper",
-  defaultColor: [0.85, 0.7, 0.2, 1],
-  geometry: {
-    basic: generateSampleLODs()  // Using basic shader for this sample
-  }
-};
-
-const layerOrder = [...LAYERS.map((layer) => layer.id)];
+const layerInfoMap = new Map<string, LayerInfo>();
+const layerOrder: string[] = [];
 const layerColors = new Map<string, LayerColor>();
 const layerVisible = new Map<string, boolean>();
 const colorOverrides = new Map<string, LayerColor>();
@@ -280,24 +219,9 @@ function interceptConsoleLog(target: HTMLDivElement | null) {
   if (!target) {
     return;
   }
-  const originalLog = console.log.bind(console);
-  const lines: string[] = [];
-  console.log = (...args: unknown[]) => {
-    originalLog(...args);
-    const message = args.map((arg) => {
-      if (typeof arg === "string") return arg;
-      try {
-        return JSON.stringify(arg);
-      } catch (error) {
-        return String(arg);
-      }
-    }).join(" ");
-    lines.push(message);
-    while (lines.length > 200) lines.shift();
-    target.style.display = "block";
-    target.textContent = lines.join("\n");
-    target.scrollTop = target.scrollHeight;
-  };
+  // Disabled: Don't intercept console.log to UI, only log to browser console
+  // This allows AI agent to see all logs when running npm run dev
+  console.log("[LOGGING] Browser DevTools console is the primary log output");
 }
 
 function wrapCreateBuffer(gpuDevice: GPUDevice) {
@@ -316,7 +240,23 @@ function wrapCreateBuffer(gpuDevice: GPUDevice) {
 }
 
 function getLayerInfo(id: string): LayerInfo | undefined {
-  return LAYERS.find((layer) => layer.id === id);
+  return layerInfoMap.get(id);
+}
+
+function registerLayerInfo(layerJson: LayerJSON) {
+  const id = layerJson.layerId;
+  const name = layerJson.layerName || id;
+  const defaultColor = [...(layerJson.defaultColor ?? [0.8, 0.8, 0.8, 1])] as LayerColor;
+  layerInfoMap.set(id, { id, name, defaultColor });
+  if (!layerOrder.includes(id)) {
+    layerOrder.push(id);
+  }
+  if (!layerColors.has(id)) {
+    layerColors.set(id, [...defaultColor] as LayerColor);
+  }
+  if (!layerVisible.has(id)) {
+    layerVisible.set(id, true);
+  }
 }
 
 function getLayerColor(layerId: string): LayerColor {
@@ -386,11 +326,31 @@ function loadLayerData(layerJson: LayerJSON) {
   lodVertexCounts = [];
   lodAlphaBuffers = [];
   
-  // For now, use 'basic' geometry if available (can be extended to support all shader types)
-  const geometryLODs = layerJson.geometry.basic || 
-                       layerJson.geometry.instanced || 
-                       layerJson.geometry.batch || 
-                       [];
+  // Register layer metadata
+  registerLayerInfo(layerJson);
+  startup.rebuildStart = performance.now();
+  
+  // Use priority order for geometry types: prefer batch (most optimized), fall back to basic
+  const geometryPriority: Array<[keyof ShaderGeometry, GeometryLOD[] | undefined]> = [
+    ["batch", layerJson.geometry.batch],
+    ["batch_instanced", layerJson.geometry.batch_instanced],
+    ["batch_instanced_rot", layerJson.geometry.batch_instanced_rot],
+    ["instanced_rot_colored", layerJson.geometry.instanced_rot_colored],
+    ["instanced_rot", layerJson.geometry.instanced_rot],
+    ["instanced_colored", layerJson.geometry.instanced_colored],
+    ["instanced", layerJson.geometry.instanced],
+    ["basic", layerJson.geometry.basic]
+  ];
+  
+  let geometryLODs: GeometryLOD[] = [];
+  let currentShaderType: string | null = null;
+  for (const [shaderKey, lods] of geometryPriority) {
+    if (lods && lods.length) {
+      geometryLODs = lods;
+      currentShaderType = shaderKey;
+      break;
+    }
+  }
   
   if (geometryLODs.length === 0) {
     console.warn(`No geometry data found for layer ${layerJson.layerId}`);
@@ -452,11 +412,13 @@ function loadLayerData(layerJson: LayerJSON) {
   vertexBuffer = lodBuffers[0];
   vertexCount = lodVertexCounts[0];
   
-  console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels:`);
+  console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels (${currentShaderType || "unknown"} geometry):`);
   lodVertexCounts.forEach((count, i) => {
     const kb = (lodBuffers[i]?.size || 0) / 1024;
     console.log(`  LOD${i}: ${count} vertices (${kb.toFixed(2)} KB)`);
   });
+  
+  startup.rebuildEnd = performance.now();
 }
 
 function applyLayerColor(layerId: string) {
@@ -492,14 +454,8 @@ function refreshLayerLegend() {
     </div>
   `);
 
-  const entries = [...layerColors.entries()];
-  const orderMap = new Map<string, number>();
-  layerOrder.forEach((id, index) => orderMap.set(id, index));
-  entries.sort((a, b) => {
-    const ai = orderMap.get(a[0]) ?? Number.MAX_SAFE_INTEGER;
-    const bi = orderMap.get(b[0]) ?? Number.MAX_SAFE_INTEGER;
-    return ai - bi;
-  });
+  // Iterate in layer order (most recent layer first)
+  const entries = layerOrder.map((layerId) => [layerId, getLayerColor(layerId)] as const);
 
   legendParts.push(`<div>`);
   for (const [layerId, color] of entries) {
@@ -822,7 +778,7 @@ function render() {
     ]
   });
 
-  const visible = layerVisible.get(SAMPLE_LAYER_ID) !== false;
+  const visible = layerOrder.length > 0 && layerVisible.get(layerOrder[layerOrder.length - 1]) !== false;
   if (visible && vertexCount > 0 && vertexBuffer) {
     pass.setPipeline(pipeline);
     pass.setVertexBuffer(0, vertexBuffer);
@@ -939,7 +895,7 @@ async function init() {
   });
 
   loadColorOverrides();
-  loadLayerData(SAMPLE_LAYER_JSON);
+  refreshLayerLegend();
 
   uniformBuffer = device.createBuffer({
     size: uniformData.byteLength,
@@ -1045,30 +1001,19 @@ async function init() {
     scheduleDraw();
   });
 
-  for (const layer of LAYERS) {
-    getLayerColor(layer.id);
-  }
-  applyLayerColor(SAMPLE_LAYER_ID);
-  refreshLayerLegend();
-
-  if (countEl) countEl.textContent = "1";
-  if (lastWidthEl) lastWidthEl.textContent = "12";
   updateStats(true);
   scheduleDraw();
-
-  startup.parseEnd = performance.now();
-
-  // Setup test mode if enabled
-  setupTestListeners();
 
   // Listen for messages from extension (or test API)
   window.addEventListener("message", (event) => {
     const data = event.data as Record<string, unknown>;
     
     if (data.command === "tessellationData" && data.payload) {
+      startup.fetchStart = performance.now();
       const layerJson = data.payload as LayerJSON;
       console.log(`Received tessellation data from extension: ${layerJson.layerId}`);
       loadLayerData(layerJson);
+      startup.parseEnd = performance.now();
       applyLayerColor(layerJson.layerId);
       refreshLayerLegend();
       scheduleDraw();
@@ -1076,6 +1021,9 @@ async function init() {
       console.error(`Extension error: ${data.message}`);
     }
   });
+
+  // Setup test mode if enabled
+  setupTestListeners();
 
   requestAnimationFrame(loop);
 }

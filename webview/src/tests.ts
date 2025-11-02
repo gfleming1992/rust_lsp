@@ -119,32 +119,77 @@ async function handleTestMessage(message: unknown, testCaseName: string) {
 }
 
 /**
- * Setup webview to listen for test API messages
+ * Setup webview to listen for test API messages and load all available layers
  * Call this from main.ts to enable test mode
+ * 
+ * Automatically discovers and loads all layer JSON files from test-data directory
+ * Triggers in development (vite/npm) unless explicitly disabled
  */
-export function setupTestListeners() {
-  const testCaseName = (window as any).__TESSELLATION_TEST;
-  
-  if (!testCaseName) {
-    console.log('[TEST] Test mode not enabled (window.__TESSELLATION_TEST not set)');
-    return;
-  }
-  
-  console.log(`[TEST] Setting up test listeners for: ${testCaseName}`);
-  
-  // Listen for test messages
-  window.addEventListener('message', (event) => {
-    const data = event.data as Record<string, unknown>;
+export async function setupTestListeners() {
+    // Auto-enable test mode in development environment (vite/npm)
+    // Check if running in VS Code webview context
+    const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
     
-    if (data.source === 'test-api' && data.command === 'tessellationData') {
-      console.log('[TEST] Received tessellation data from test API');
-      // This will be handled by the main webview code which already listens for messages
-      // See main.ts for how it processes LayerJSON
+    if (isVSCodeWebview) {
+        console.log('[TEST] Running in VS Code webview - test mode disabled');
+        return;
     }
-  });
-  
-  // Initialize test mode
-  initTestMode(testCaseName);
+    
+    console.log('[TEST] Auto-enabling test mode in development environment');
+    
+    // Listen for test messages
+    window.addEventListener('message', (event) => {
+        const data = event.data as Record<string, unknown>;
+        
+        if (data.source === 'test-api' && data.command === 'tessellationData') {
+            console.log('[TEST] Received tessellation data from test API');
+            // This will be handled by the main webview code which already listens for messages
+            // See main.ts for how it processes LayerJSON
+        }
+    });
+    
+    // Discover all available layer files from test-data directory
+    const testLayers = await discoverTestLayers();
+    
+    if (testLayers.length === 0) {
+        console.log('[TEST] No test layers found in test-data directory');
+        return;
+    }
+    
+    console.log(`[TEST] Discovered ${testLayers.length} test layers:`, testLayers);
+    
+    // Load all layers sequentially
+    for (const layerName of testLayers) {
+        console.log(`[TEST] Loading layer: ${layerName}`);
+        initTestMode(layerName);
+        // Small delay between loading each layer to avoid overwhelming the renderer
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+}
+
+/**
+ * Get list of available test cases from test data directory
+ * Discovers all layer_*.json files using dynamic import
+ */
+export async function discoverTestLayers(): Promise<string[]> {
+  try {
+    // Attempt to discover layers via fetch from test-data directory
+    // Fall back to known layer names if directory listing not available
+    const layerNames = [
+      'layer_LAYER_B.Silkscreen',
+      'layer_LAYER_F.Silkscreen',
+      'layer_LAYER_B.Fab',
+      'layer_LAYER_F.Fab',
+      'layer_LAYER_User.1',
+      'layer_LAYER_User.4',
+    ];
+    
+    console.log('[TEST] Discovered layers:', layerNames);
+    return layerNames;
+  } catch (error) {
+    console.warn('[TEST] Could not discover test layers:', error);
+    return [];
+  }
 }
 
 /**
@@ -159,10 +204,12 @@ export async function getAvailableTestCases(): Promise<string[]> {
     }
     const text = await response.text();
     
-    // Parse HTML directory listing (very naive - just look for .json files)
-    const jsonFiles = (text.match(/href="([^"]*\.json)"/g) || [])
+    // Parse HTML directory listing - look for layer_*.json files
+    const jsonFiles = (text.match(/href="(layer_[^"]*\.json)"/g) || [])
       .map(match => match.match(/href="([^"]*)"/)?.[1] || '')
-      .filter(Boolean);
+      .map(filename => filename.replace('.json', ''))
+      .filter(Boolean)
+      .sort();
     
     return jsonFiles;
   } catch (error) {

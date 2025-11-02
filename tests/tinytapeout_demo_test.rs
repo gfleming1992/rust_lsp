@@ -98,9 +98,10 @@ mod tests {
         // Verify files were created
         assert!(layer_jsons.len() > 0, "No layers found");
         for layer_json in &layer_jsons {
-            let filename = format!("output/layer_{}.json", layer_json.layer_id.replace(":", "_"));
+            let filename = format!("webview/src/test-data/layer_{}.json", layer_json.layer_id.replace(":", "_"));
             assert!(std::path::Path::new(&filename).exists(), 
                    "Layer JSON file {} not created", filename);
+            println!("✓ Layer JSON file {} created", filename);
         }
     }
 }

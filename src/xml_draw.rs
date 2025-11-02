@@ -444,6 +444,7 @@ pub fn generate_layer_json(
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
 pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, anyhow::Error> {
     let mut layer_jsons = Vec::new();
+    let mut layers_seen = std::collections::HashSet::new();
 
     // Find Ecad node which contains all the CAD data
     let ecad_node = root
@@ -459,36 +460,76 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
         .find(|n| n.name == "CadData")
         .ok_or_else(|| anyhow::anyhow!("No CadData node found"))?;
 
-    // Recursively find all Polyline elements and group them by layer context
-    // In IPC-2581, polylines are scattered throughout the design structure
-    // We'll collect them all into a single batch for now
-    let mut all_polylines = Vec::new();
-    collect_polylines(cad_data, &mut all_polylines);
-
-    if all_polylines.is_empty() {
-        // Try finding polylines in Content/DictionaryUser as well
-        if let Some(content) = root.children.iter().find(|n| n.name == "Content") {
-            collect_polylines(content, &mut all_polylines);
-        }
-    }
-
-    if !all_polylines.is_empty() {
-        // Create a single batched layer with all polylines
-        let layer_json = generate_layer_json(
-            "LAYER:Design",
-            "Design Polylines",
-            [0.85, 0.7, 0.2, 1.0],
-            &all_polylines,
-        )?;
-
-        layer_jsons.push(layer_json);
-    }
+    // Find all LayerFeature nodes and process them
+    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen)?;
 
     Ok(layer_jsons)
 }
 
-/// Recursively collect all Polyline elements from a node and its descendants
-fn collect_polylines(node: &XmlNode, polylines: &mut Vec<Polyline>) {
+/// Recursively find LayerFeature nodes and generate LayerJSON for each unique layer
+fn collect_layer_features(
+    node: &XmlNode,
+    layer_jsons: &mut Vec<LayerJSON>,
+    layers_seen: &mut std::collections::HashSet<String>,
+) -> Result<(), anyhow::Error> {
+    // If this is a LayerFeature node, process it
+    if node.name == "LayerFeature" {
+        if let Some(layer_ref) = node.attributes.get("layerRef") {
+            if !layers_seen.contains(layer_ref) {
+                layers_seen.insert(layer_ref.clone());
+                
+                // Collect all polylines from this LayerFeature
+                let mut polylines = Vec::new();
+                collect_polylines_from_node(node, &mut polylines);
+                
+                if !polylines.is_empty() {
+                    // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
+                    let layer_name = layer_ref
+                        .split(':')
+                        .last()
+                        .unwrap_or(layer_ref)
+                        .to_string();
+                    
+                    // Generate default color based on layer type
+                    let color = get_layer_color(layer_ref);
+                    
+                    let layer_json = generate_layer_json(
+                        layer_ref,
+                        &layer_name,
+                        color,
+                        &polylines,
+                    )?;
+                    
+                    layer_jsons.push(layer_json);
+                }
+            }
+        }
+    }
+
+    // Recursively search all children
+    for child in &node.children {
+        collect_layer_features(child, layer_jsons, layers_seen)?;
+    }
+
+    Ok(())
+}
+
+/// Get a color for a layer based on its name/type
+fn get_layer_color(layer_ref: &str) -> [f32; 4] {
+    let lower = layer_ref.to_lowercase();
+    
+    match true {
+        _ if lower.contains("silkscreen") || lower.contains("silk") => [0.85, 0.7, 0.2, 1.0],
+        _ if lower.contains("copper") || lower.contains(".cu") => [0.8, 0.6, 0.2, 1.0],
+        _ if lower.contains("paste") => [0.5, 0.5, 0.5, 1.0],
+        _ if lower.contains("mask") => [0.0, 0.5, 0.0, 1.0],
+        _ if lower.contains("design") => [0.2, 0.7, 1.0, 1.0],
+        _ => [0.7, 0.7, 0.7, 1.0], // default gray
+    }
+}
+
+/// Recursively collect all Polyline elements from a specific node
+fn collect_polylines_from_node(node: &XmlNode, polylines: &mut Vec<Polyline>) {
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
         if let Ok(polyline) = parse_polyline_node(node) {
@@ -498,9 +539,11 @@ fn collect_polylines(node: &XmlNode, polylines: &mut Vec<Polyline>) {
 
     // Recursively search all children
     for child in &node.children {
-        collect_polylines(child, polylines);
+        collect_polylines_from_node(child, polylines);
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
