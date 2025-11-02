@@ -1,4 +1,4 @@
-import lineShaderCode from "./shaders/line.wgsl?raw";
+import lineShaderCode from "./shaders/basic.wgsl?raw";
 
 type LayerColor = [number, number, number, number];
 
@@ -6,6 +6,35 @@ interface LayerInfo {
   id: string;
   name: string;
   defaultColor: LayerColor;
+}
+
+// Geometry data for a specific shader type at a specific LOD level
+interface GeometryLOD {
+  vertexData: string;  // base64-encoded Float32Array binary data
+  vertexCount: number;
+  indexData?: string;  // Optional base64-encoded index buffer
+  indexCount?: number;
+  instanceData?: string;  // Optional base64-encoded instance data (for instanced shaders)
+  instanceCount?: number;
+}
+
+// Shader-specific geometry organized by LOD (5 levels: 0=highest detail, 4=lowest)
+// Rust will pre-process geometry and populate the appropriate shader type arrays
+// based on the geometry characteristics (unique vs repeated, needs rotation, etc.)
+interface ShaderGeometry {
+  basic?: GeometryLOD[];           // For basic.wgsl - simple shapes, single draw each
+  instanced?: GeometryLOD[];       // For instanced.wgsl - repeated identical geometry (vias, drill holes)
+  instanced_rot?: GeometryLOD[];   // For instanced_rot.wgsl - repeated geometry with 0°/90°/180°/270° rotation (pads)
+  batch?: GeometryLOD[];           // For batch.wgsl - many unique items in one draw (PCB traces)
+  batch_instanced?: GeometryLOD[]; // For batch_instanced.wgsl - multiple types, each repeated (via types)
+  batch_instanced_rot?: GeometryLOD[]; // For batch_instanced_rot.wgsl - multiple types with rotation (pad types)
+}
+
+interface LayerJSON {
+  layerId: string;
+  layerName: string;
+  defaultColor: LayerColor;
+  geometry: ShaderGeometry;  // Organized by shader type, then by LOD
 }
 
 interface StartupTimings {
@@ -26,7 +55,6 @@ interface ViewerState {
   panY: number;
   zoom: number;
   flipX: boolean;
-  flipY: boolean;
   dragging: boolean;
   dragButton: number | null;
   lastX: number;
@@ -62,19 +90,73 @@ const LAYERS: LayerInfo[] = [
   { id: SAMPLE_LAYER_ID, name: "Top Copper", defaultColor: [0.85, 0.7, 0.2, 1] }
 ];
 
+// Helper to encode vertex data for sample
+function encodeVertexData(vertices: number[]): { vertexData: string; vertexCount: number } {
+    const float32 = new Float32Array(vertices);
+    const bytes = new Uint8Array(float32.buffer);
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+        binary += String.fromCharCode(...chunk);
+    }
+    return {
+        vertexData: btoa(binary),
+        vertexCount: vertices.length / 2
+    };
+}
+
+// Generate sample data for different LOD levels
+function generateSampleLODs(): GeometryLOD[] {
+  const lodConfigs = [
+    { lines: 10000, label: 'LOD0 (full detail)' },
+    { lines: 2500, label: 'LOD1' },
+    { lines: 625, label: 'LOD2' },
+    { lines: 156, label: 'LOD3' },
+    { lines: 39, label: 'LOD4 (coarsest)' }
+  ];
+  
+  return lodConfigs.map(({ lines, label }) => {
+    const vertices: number[] = [];
+    const gridWidth = Math.ceil(Math.sqrt(lines));
+    const gridHeight = Math.ceil(lines / gridWidth);
+    const offsetX = (gridWidth * 20) / 2;
+    const offsetY = (gridHeight * 20) / 2;
+    
+    for (let i = 0; i < lines; i++) {
+      const x = (i % gridWidth) * 20 - offsetX;
+      const y = Math.floor(i / gridWidth) * 20 - offsetY;
+      vertices.push(
+        x, y, x + 10, y, x, y + 5,           // First triangle
+        x, y + 5, x + 10, y, x + 10, y + 5  // Second triangle
+      );
+    }
+    
+    const encoded = encodeVertexData(vertices);
+    console.log(`${label}: ${lines} lines, ${encoded.vertexCount} vertices`);
+    return encoded;
+  });
+}
+
+const SAMPLE_LAYER_JSON: LayerJSON = {
+  layerId: SAMPLE_LAYER_ID,
+  layerName: "Top Copper",
+  defaultColor: [0.85, 0.7, 0.2, 1],
+  geometry: {
+    basic: generateSampleLODs()  // Using basic shader for this sample
+  }
+};
+
 const layerOrder = [...LAYERS.map((layer) => layer.id)];
 const layerColors = new Map<string, LayerColor>();
 const layerVisible = new Map<string, boolean>();
 const colorOverrides = new Map<string, LayerColor>();
 
-const vertices = new Float32Array([
-  -300, -6,
-   300, -6,
-  -300,  6,
-  -300,  6,
-   300, -6,
-   300,  6
-]);
+let vertices: Float32Array = new Float32Array();
+let vertexCount = 0;
+let lodBuffers: GPUBuffer[] = [];  // Array of 5 vertex buffers (one per LOD)
+let lodVertexCounts: number[] = [];  // Vertex counts per LOD
+let currentLOD = 0;  // Active LOD index (0-4)
 
 const uniformData = new Float32Array(16);
 
@@ -83,7 +165,6 @@ const state: ViewerState = {
   panY: 0,
   zoom: 1,
   flipX: false,
-  flipY: false,
   dragging: false,
   dragButton: null,
   lastX: 0,
@@ -241,6 +322,66 @@ function loadColorOverrides() {
   }
 }
 
+function loadLayerData(layerJson: LayerJSON) {
+  // Destroy old buffers
+  for (const buffer of lodBuffers) {
+    buffer?.destroy();
+  }
+  lodBuffers = [];
+  lodVertexCounts = [];
+  
+  // For now, use 'basic' geometry if available (can be extended to support all shader types)
+  const geometryLODs = layerJson.geometry.basic || 
+                       layerJson.geometry.instanced || 
+                       layerJson.geometry.batch || 
+                       [];
+  
+  if (geometryLODs.length === 0) {
+    console.warn(`No geometry data found for layer ${layerJson.layerId}`);
+    return;
+  }
+  
+  // Load all LOD levels for the selected shader type
+  for (let i = 0; i < geometryLODs.length; i++) {
+    const lod = geometryLODs[i];
+    if (!lod) {
+      console.warn(`Missing LOD ${i} for layer ${layerJson.layerId}`);
+      continue;
+    }
+    
+    // Decode base64 to Float32Array
+    const binaryString = atob(lod.vertexData);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let j = 0; j < binaryString.length; j++) {
+      bytes[j] = binaryString.charCodeAt(j);
+    }
+    const lodVertices = new Float32Array(bytes.buffer);
+    
+    // Create GPU buffer for this LOD
+    const buffer = device.createBuffer({
+      size: lodVertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(buffer.getMappedRange()).set(lodVertices);
+    buffer.unmap();
+    
+    lodBuffers.push(buffer);
+    lodVertexCounts.push(lod.vertexCount);
+  }
+  
+  // Set LOD 0 as default
+  currentLOD = 0;
+  vertexBuffer = lodBuffers[0];
+  vertexCount = lodVertexCounts[0];
+  
+  console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels:`);
+  lodVertexCounts.forEach((count, i) => {
+    const kb = (lodBuffers[i]?.size || 0) / 1024;
+    console.log(`  LOD${i}: ${count} vertices (${kb.toFixed(2)} KB)`);
+  });
+}
+
 function applyLayerColor(layerId: string) {
   const color = getLayerColor(layerId);
   uniformData.set(color, 0);
@@ -271,15 +412,6 @@ function refreshLayerLegend() {
       <button type="button" data-layer-action="all" style="padding:2px 6px;">All</button>
       <button type="button" data-layer-action="none" style="padding:2px 6px;">None</button>
       <button type="button" data-layer-action="invert" style="padding:2px 6px;">Invert</button>
-    </div>
-  `);
-
-  legendParts.push(`
-    <div style="margin-bottom:6px; padding:4px; background:rgba(255,255,255,0.05); border-radius:3px;">
-      <label style="display:flex;align-items:center;gap:6px;font:11px sans-serif;cursor:pointer;">
-        <input type="checkbox" id="flipCoordinatesCheckbox" ${state.flipY ? "checked" : ""} style="margin:0" />
-        <span>Flip coordinates (match KiCAD)</span>
-      </label>
     </div>
   `);
 
@@ -321,14 +453,6 @@ function refreshLayerLegend() {
       scheduleDraw();
     });
   });
-
-  const flipCheckbox = document.getElementById("flipCoordinatesCheckbox") as HTMLInputElement | null;
-  if (flipCheckbox) {
-    flipCheckbox.addEventListener("change", (event) => {
-      state.flipY = (event.currentTarget as HTMLInputElement).checked;
-      scheduleDraw();
-    });
-  }
 
   layersEl.querySelectorAll("input[data-layer-toggle]").forEach((input) => {
     input.addEventListener("change", (event) => {
@@ -479,14 +603,13 @@ function screenToWorld(cssX: number, cssY: number): { x: number; y: number } {
   const width = Math.max(1, canvas.width);
   const height = Math.max(1, canvas.height);
   const fx = state.flipX ? -1 : 1;
-  const fy = state.flipY ? -1 : 1;
   const scaleX = (2 * state.zoom) / width;
   const scaleY = (2 * state.zoom) / height;
   const xNdc = (2 * cssX) / Math.max(1, canvas.clientWidth) - 1;
   const yNdc = 1 - (2 * cssY) / Math.max(1, canvas.clientHeight);
 
   const worldX = ((xNdc / fx + 1) / scaleX) - width / 2 - state.panX;
-  const worldY = ((1 - yNdc / fy) / scaleY) - height / 2 - state.panY;
+  const worldY = ((1 - yNdc) / scaleY) - height / 2 - state.panY;
   return { x: worldX, y: worldY };
 }
 
@@ -494,7 +617,6 @@ function updateUniforms() {
   const width = Math.max(1, canvas.width);
   const height = Math.max(1, canvas.height);
   const flipX = state.flipX ? -1 : 1;
-  const flipY = state.flipY ? -1 : 1;
   const scaleX = (2 * state.zoom) / width;
   const scaleY = (2 * state.zoom) / height;
   const offsetX = scaleX * (width / 2 + state.panX) - 1;
@@ -506,8 +628,8 @@ function updateUniforms() {
   uniformData[7] = 0;
 
   uniformData[8] = 0;
-  uniformData[9] = flipY * -scaleY;
-  uniformData[10] = flipY * offsetY;
+  uniformData[9] = -scaleY;
+  uniformData[10] = offsetY;
   uniformData[11] = 0;
 
   uniformData[12] = 0;
@@ -539,12 +661,12 @@ function configureSurface() {
 function updateCoordOverlay() {
   if (!coordOverlayEl) return;
   if (!haveMouse) {
-    coordOverlayEl.textContent = `x: -, y: -, zoom: ${state.zoom.toFixed(2)}`;
+    coordOverlayEl.textContent = `x: -, y: -, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}`;
     return;
   }
   const rect = canvas.getBoundingClientRect();
   const world = screenToWorld(lastMouseX - rect.left, lastMouseY - rect.top);
-  coordOverlayEl.textContent = `x: ${world.x.toFixed(2)}, y: ${world.y.toFixed(2)}, zoom: ${state.zoom.toFixed(2)}`;
+  coordOverlayEl.textContent = `x: ${world.x.toFixed(2)}, y: ${world.y.toFixed(2)}, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}`;
 }
 
 function fmtMs(ms: number) {
@@ -579,6 +701,16 @@ function updateStats(force = false) {
   fpsEl.innerHTML = lines.join("<br/>");
 }
 
+function selectLODForZoom(zoom: number): number {
+  // LOD thresholds based on zoom (similar to reference implementation)
+  // Higher zoom = more detail needed = lower LOD index
+  if (zoom >= 10) return 0;      // Full detail
+  if (zoom >= 5) return 1;       // 75% reduced
+  if (zoom >= 2) return 2;       // 93% reduced  
+  if (zoom >= 0.5) return 3;     // 98% reduced
+  return 4;                       // 99% reduced (coarsest)
+}
+
 function scheduleDraw() {
   state.needsDraw = true;
 }
@@ -591,6 +723,14 @@ function render() {
   configureSurface();
   updateUniforms();
   device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+  // Select LOD based on current zoom
+  const lodIndex = selectLODForZoom(state.zoom);
+  if (lodIndex !== currentLOD && lodBuffers[lodIndex]) {
+    currentLOD = lodIndex;
+    vertexBuffer = lodBuffers[lodIndex];
+    vertexCount = lodVertexCounts[lodIndex];
+  }
 
   const encoder = device.createCommandEncoder();
   const textureView = context.getCurrentTexture().createView();
@@ -606,11 +746,11 @@ function render() {
   });
 
   const visible = layerVisible.get(SAMPLE_LAYER_ID) !== false;
-  if (visible) {
+  if (visible && vertexCount > 0 && vertexBuffer) {
     pass.setPipeline(pipeline);
     pass.setVertexBuffer(0, vertexBuffer);
     pass.setBindGroup(0, bindGroup);
-    pass.draw(vertices.length / 2);
+    pass.draw(vertexCount);
   }
   pass.end();
 
@@ -692,13 +832,8 @@ async function init() {
     primitive: { topology: "triangle-list" }
   });
 
-  vertexBuffer = device.createBuffer({
-    size: vertices.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    mappedAtCreation: true
-  });
-  new Float32Array(vertexBuffer.getMappedRange()).set(vertices);
-  vertexBuffer.unmap();
+  loadColorOverrides();
+  loadLayerData(SAMPLE_LAYER_JSON);
 
   uniformBuffer = device.createBuffer({
     size: uniformData.byteLength,
@@ -789,14 +924,13 @@ async function init() {
     const width = Math.max(1, canvas.width);
     const height = Math.max(1, canvas.height);
     const fx = state.flipX ? -1 : 1;
-    const fy = state.flipY ? -1 : 1;
     const scaleX = (2 * state.zoom) / width;
     const scaleY = (2 * state.zoom) / height;
     const xNdc = (2 * cssX) / Math.max(1, canvas.clientWidth) - 1;
     const yNdc = 1 - (2 * cssY) / Math.max(1, canvas.clientHeight);
 
     state.panX = ((xNdc / fx + 1) / scaleX) - width / 2 - pivotWorld.x;
-    state.panY = ((1 - yNdc / fy) / scaleY) - height / 2 - pivotWorld.y;
+    state.panY = ((1 - yNdc) / scaleY) - height / 2 - pivotWorld.y;
 
     scheduleDraw();
   }, { passive: false });
@@ -805,7 +939,6 @@ async function init() {
     scheduleDraw();
   });
 
-  loadColorOverrides();
   for (const layer of LAYERS) {
     getLayerColor(layer.id);
   }
