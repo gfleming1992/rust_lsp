@@ -101,6 +101,15 @@ interface GPUBufferInfo {
   size: number;
 }
 
+// Minimal per-layer render data (step 1: vertices + alpha by LOD)
+interface LayerRenderData {
+  layerId: string;
+  lodBuffers: GPUBuffer[];
+  lodAlphaBuffers: (GPUBuffer | null)[];
+  lodVertexCounts: number[];
+  currentLOD: number;
+}
+
 interface ViewerState {
   panX: number;
   panY: number;
@@ -142,12 +151,9 @@ const layerColors = new Map<string, LayerColor>();
 const layerVisible = new Map<string, boolean>();
 const colorOverrides = new Map<string, LayerColor>();
 
-let vertices: Float32Array = new Float32Array();
-let vertexCount = 0;
-let lodBuffers: GPUBuffer[] = [];  // Array of 5 vertex buffers (one per LOD)
-let lodAlphaBuffers: (GPUBuffer | null)[] = []; // Parallel array for per-vertex alpha buffers
-let lodVertexCounts: number[] = [];  // Vertex counts per LOD
-let currentLOD = 0;  // Active LOD index (0-4)
+// Multi-layer support (step 1)
+const layerRenderData = new Map<string, LayerRenderData>();
+let currentLOD = 0;  // Active LOD index (0-4) shared for now
 
 const uniformData = new Float32Array(16);
 
@@ -315,17 +321,6 @@ function loadColorOverrides() {
 }
 
 function loadLayerData(layerJson: LayerJSON) {
-  // Destroy old buffers
-  for (const buffer of lodBuffers) {
-    buffer?.destroy();
-  }
-  for (const a of lodAlphaBuffers) {
-    if (a) a.destroy();
-  }
-  lodBuffers = [];
-  lodVertexCounts = [];
-  lodAlphaBuffers = [];
-  
   // Register layer metadata
   registerLayerInfo(layerJson);
   startup.rebuildStart = performance.now();
@@ -357,6 +352,11 @@ function loadLayerData(layerJson: LayerJSON) {
     return;
   }
   
+  // Build per-layer buffers (do not replace previous layers)
+  const lodBuffers: GPUBuffer[] = [];
+  const lodAlphaBuffers: (GPUBuffer | null)[] = [];
+  const lodVertexCounts: number[] = [];
+
   // Load all LOD levels for the selected shader type
   for (let i = 0; i < geometryLODs.length; i++) {
     const lod = geometryLODs[i];
@@ -407,11 +407,15 @@ function loadLayerData(layerJson: LayerJSON) {
     lodAlphaBuffers.push(alphaBuf);
   }
   
-  // Set LOD 0 as default
-  currentLOD = 0;
-  vertexBuffer = lodBuffers[0];
-  vertexCount = lodVertexCounts[0];
-  
+  // Store per-layer render data
+  layerRenderData.set(layerJson.layerId, {
+    layerId: layerJson.layerId,
+    lodBuffers,
+    lodAlphaBuffers,
+    lodVertexCounts,
+    currentLOD: 0
+  });
+
   console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels (${currentShaderType || "unknown"} geometry):`);
   lodVertexCounts.forEach((count, i) => {
     const kb = (lodBuffers[i]?.size || 0) / 1024;
@@ -759,10 +763,8 @@ function render() {
 
   // Select LOD based on current zoom
   const lodIndex = selectLODForZoom(state.zoom);
-  if (lodIndex !== currentLOD && lodBuffers[lodIndex]) {
+  if (lodIndex !== currentLOD) {
     currentLOD = lodIndex;
-    vertexBuffer = lodBuffers[lodIndex];
-    vertexCount = lodVertexCounts[lodIndex];
   }
 
   const encoder = device.createCommandEncoder();
@@ -778,17 +780,23 @@ function render() {
     ]
   });
 
-  const visible = layerOrder.length > 0 && layerVisible.get(layerOrder[layerOrder.length - 1]) !== false;
-  if (visible && vertexCount > 0 && vertexBuffer) {
+  // Draw all visible layers sequentially (shared color for now)
+  let drawn = 0;
+  for (const layerId of layerOrder) {
+    if (layerVisible.get(layerId) === false) continue;
+    const data = layerRenderData.get(layerId);
+    if (!data) continue;
+    const vb = data.lodBuffers[currentLOD] ?? data.lodBuffers[data.lodBuffers.length - 1];
+    const count = data.lodVertexCounts[currentLOD] ?? data.lodVertexCounts[data.lodVertexCounts.length - 1];
+    if (!vb || !count) continue;
+
     pass.setPipeline(pipeline);
-    pass.setVertexBuffer(0, vertexBuffer);
-    // Always bind alpha buffer (contains 1.0 if alphaData not provided)
-    const alphaBuf = lodAlphaBuffers[currentLOD];
-    if (alphaBuf) {
-      pass.setVertexBuffer(1, alphaBuf);
-    }
+    pass.setVertexBuffer(0, vb);
+    const alphaBuf = data.lodAlphaBuffers[currentLOD] ?? data.lodAlphaBuffers[data.lodAlphaBuffers.length - 1];
+    if (alphaBuf) pass.setVertexBuffer(1, alphaBuf);
     pass.setBindGroup(0, bindGroup);
-    pass.draw(vertexCount);
+    pass.draw(count);
+    drawn++;
   }
   pass.end();
 
