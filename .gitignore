@@ -7,6 +7,13 @@ Cargo.lock
 # Generated output
 /output/
 
+# reference project
+/old/
+
+# Node and WebGPU webview
+/webview/dist/
+/webview/node_modules/
+
 # Debug files
 *.txt
 *.pdb
