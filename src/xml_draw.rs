@@ -61,21 +61,29 @@ pub struct LayerPolylines {
 /// Serializable geometry LOD for JSON
 #[derive(Serialize)]
 pub struct GeometryLOD {
-    /// Base64-encoded Float32Array (x, y, x, y, ...)
+    /// Raw Float32 vertex data as number array (x, y, x, y, ...)
+    /// JavaScript will receive this directly as Float32Array without decoding
     #[serde(rename = "vertexData")]
-    pub vertex_data: String,
+    pub vertex_data: Vec<f32>,
     
     /// Number of vertices (not bytes)
     #[serde(rename = "vertexCount")]
     pub vertex_count: usize,
     
-    /// Optional base64-encoded Uint32Array indices
+    /// Optional Uint32 indices as number array
     #[serde(rename = "indexData")]
-    pub index_data: Option<String>,
+    pub index_data: Option<Vec<u32>>,
     
     /// Optional number of indices
     #[serde(rename = "indexCount")]
     pub index_count: Option<usize>,
+}
+
+/// Culling statistics for optimization reporting
+#[derive(Debug, Default)]
+pub struct CullingStats {
+    pub lod_culled: [usize; 5],
+    pub total_polylines: usize,
 }
 
 /// Shader geometry organized by type
@@ -98,6 +106,111 @@ pub struct LayerJSON {
     pub default_color: [f32; 4],
     
     pub geometry: ShaderGeometry,
+}
+
+/// Binary layer data structure for zero-copy transfer
+pub struct LayerBinary {
+    pub layer_id: String,
+    pub layer_name: String,
+    pub default_color: [f32; 4],
+    pub geometry_data: Vec<u8>,
+}
+
+impl LayerBinary {
+    /// Create binary layer data from LayerJSON
+    pub fn from_layer_json(layer: &LayerJSON) -> Self {
+        let geometry_data = serialize_geometry_binary(&layer.geometry);
+        
+        LayerBinary {
+            layer_id: layer.layer_id.clone(),
+            layer_name: layer.layer_name.clone(),
+            default_color: layer.default_color,
+            geometry_data,
+        }
+    }
+    
+    /// Write to binary file format
+    /// Format: [header][metadata][geometry_data]
+    /// Header: "IPC2581B" (8 bytes magic)
+    /// Metadata: layer_id_len(u32) + layer_id + padding + layer_name_len(u32) + layer_name + padding + color(4 x f32)
+    /// Padding ensures 4-byte alignment for Float32Array/Uint32Array views
+    /// Geometry: custom binary format
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        
+        // Magic header (8 bytes - already aligned)
+        buffer.extend_from_slice(b"IPC2581B");
+        
+        // Layer ID (length-prefixed string with padding to 4-byte boundary)
+        let id_bytes = self.layer_id.as_bytes();
+        buffer.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(id_bytes);
+        // Add padding to align to 4-byte boundary
+        let id_padding = (4 - (id_bytes.len() % 4)) % 4;
+        buffer.resize(buffer.len() + id_padding, 0);
+        
+        // Layer name (length-prefixed string with padding to 4-byte boundary)
+        let name_bytes = self.layer_name.as_bytes();
+        buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(name_bytes);
+        // Add padding to align to 4-byte boundary
+        let name_padding = (4 - (name_bytes.len() % 4)) % 4;
+        buffer.resize(buffer.len() + name_padding, 0);
+        
+        // Default color (4 x f32 - already 4-byte aligned)
+        for &c in &self.default_color {
+            buffer.extend_from_slice(&c.to_le_bytes());
+        }
+        
+        // Geometry data (already properly aligned internally)
+        buffer.extend_from_slice(&self.geometry_data);
+        
+        buffer
+    }
+}
+
+/// Serialize geometry to custom binary format
+/// Format: [num_lods: u32][lod0][lod1]...[lodN]
+/// Each LOD: [vertex_count: u32][index_count: u32][vertex_data][index_data]
+/// vertex_data: raw f32 array (x,y,x,y,...)
+/// index_data: raw u32 array
+fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    
+    let lods = match &geometry.batch {
+        Some(batch) => batch,
+        None => {
+            // No geometry - write 0 LODs
+            buffer.extend_from_slice(&0u32.to_le_bytes());
+            return buffer;
+        }
+    };
+    
+    // Number of LODs
+    buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
+    
+    for lod in lods {
+        // Vertex count
+        buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
+        
+        // Index count
+        let index_count = lod.index_count.unwrap_or(0);
+        buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+        
+        // Raw vertex data (Float32)
+        for &f in &lod.vertex_data {
+            buffer.extend_from_slice(&f.to_le_bytes());
+        }
+        
+        // Raw index data (Uint32)
+        if let Some(indices) = &lod.index_data {
+            for &idx in indices {
+                buffer.extend_from_slice(&idx.to_le_bytes());
+            }
+        }
+    }
+    
+    buffer
 }
 
 /// Extract polylines from a LayerFeatures XML node
@@ -462,6 +575,17 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
 
 /// Number of segments used for round caps (matching Polyline.js defaults)
 const ROUND_CAP_SEGMENTS: u32 = 16;
+/// Minimum screen-space width (in world units) below which we cull geometry at higher LODs
+/// Constant 0.5px screen-space threshold across all LOD levels
+/// LOD zoom ranges: LOD0(10+), LOD1(5-10), LOD2(2-5), LOD3(0.5-2), LOD4(<0.5)
+/// Formula: world_width_threshold = 0.5px / zoom_level
+const MIN_VISIBLE_WIDTH_LOD: [f32; 5] = [
+    0.0,    // LOD0: always render (zoom >= 10, highest detail)
+    0.05,   // LOD1: 0.5px / 10 = 0.05mm (zoom ~10)
+    0.10,   // LOD2: 0.5px / 5 = 0.10mm (zoom ~5)
+    0.25,   // LOD3: 0.5px / 2 = 0.25mm (zoom ~2)
+    1.00,   // LOD4: 0.5px / 0.5 = 1.00mm (zoom ~0.5)
+];
 
 /// Helper function to add a round cap at a specific position
 fn add_round_cap(
@@ -796,59 +920,13 @@ fn debug_print_polyline(
     }
 }
 
-/// Encode Float32Array to base64
-fn encode_f32_array(data: &[f32]) -> String {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    };
-    base64_encode(bytes)
-}
-
-/// Encode Uint32Array to base64
-fn encode_u32_array(data: &[u32]) -> String {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    };
-    base64_encode(bytes)
-}
-
-/// Simple base64 encoding
-fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        
-        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-        
-        result.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        result.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        
-        if chunk.len() > 1 {
-            result.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        
-        if chunk.len() > 2 {
-            result.push(TABLE[(n & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    
-    result
-}
-
 /// Generate LayerJSON for all LODs of polylines in a layer
 pub fn generate_layer_json(
     layer_id: &str,
     layer_name: &str,
     color: [f32; 4],
     polylines: &[Polyline],
+    culling_stats: &mut CullingStats,
 ) -> Result<LayerJSON, anyhow::Error> {
     let mut lod_geometries = Vec::new();
 
@@ -863,11 +941,20 @@ pub fn generate_layer_json(
     // For each LOD level, batch all polylines at that LOD
     let debug_this_layer = should_debug_layer(layer_id);
     let mut debug_header_printed = false;
+    culling_stats.total_polylines += polylines.len();
+    
     for lod_idx in 0..5 {
         let mut lod_polylines_data = Vec::new();
+        let min_width = MIN_VISIBLE_WIDTH_LOD[lod_idx];
         
         for (poly_idx, polyline) in polylines.iter().enumerate() {
             if poly_idx < all_lod_points.len() && lod_idx < all_lod_points[poly_idx].len() {
+                // Skip tessellation if line is too thin to be visible at this LOD
+                if polyline.width < min_width {
+                    culling_stats.lod_culled[lod_idx] += 1;
+                    continue;
+                }
+                
                 // Width-dependent LOD cap optimization:
                 // - Thin lines (< 0.05): butt caps from LOD 1+
                 // - Medium lines (0.05-0.2): butt caps from LOD 2+
@@ -922,11 +1009,14 @@ pub fn generate_layer_json(
             continue;
         }
 
+        let vertex_count = verts.len() / 2;
+        let index_count = indices.len();
+        
         let geometry_lod = GeometryLOD {
-            vertex_data: encode_f32_array(&verts),
-            vertex_count: verts.len() / 2,
-            index_data: Some(encode_u32_array(&indices)),
-            index_count: Some(indices.len()),
+            vertex_data: verts,
+            vertex_count,
+            index_data: Some(indices),
+            index_count: Some(index_count),
         };
 
         lod_geometries.push(geometry_lod);
@@ -937,6 +1027,16 @@ pub fn generate_layer_json(
             "=== End of {} Tessellation (200 triangles shown) ===",
             layer_name
         );
+        // Report culling stats
+        let total = polylines.len();
+        for (lod, count) in culling_stats.lod_culled.iter().enumerate() {
+            if *count > 0 {
+                println!(
+                    "  LOD{}: culled {}/{} polylines (width < {:.3})",
+                    lod, count, total, MIN_VISIBLE_WIDTH_LOD[lod]
+                );
+            }
+        }
     }
 
     let mut shader_geom = ShaderGeometry::default();
@@ -958,6 +1058,7 @@ pub fn generate_layer_json(
 pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, anyhow::Error> {
     let mut layer_jsons = Vec::new();
     let mut layers_seen = std::collections::HashSet::new();
+    let mut total_culling_stats = CullingStats::default();
 
     // Parse line descriptors from DictionaryLineDesc
     let line_descriptors = parse_line_descriptors(root);
@@ -977,7 +1078,22 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
         .ok_or_else(|| anyhow::anyhow!("No CadData node found"))?;
 
     // Find all LayerFeature nodes and process them
-    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors)?;
+    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors, &mut total_culling_stats)?;
+
+    // Print summary if we culled anything
+    if total_culling_stats.lod_culled.iter().any(|&c| c > 0) {
+        println!("\n=== Width-Based Culling Summary ===");
+        println!("Total polylines across all layers: {}", total_culling_stats.total_polylines);
+        for (lod, count) in total_culling_stats.lod_culled.iter().enumerate() {
+            if *count > 0 {
+                let percent = (*count as f32 / total_culling_stats.total_polylines as f32) * 100.0;
+                println!(
+                    "  LOD{}: {} polylines culled ({:.1}%, width < {:.3})",
+                    lod, count, percent, MIN_VISIBLE_WIDTH_LOD[lod]
+                );
+            }
+        }
+    }
 
     Ok(layer_jsons)
 }
@@ -988,6 +1104,7 @@ fn collect_layer_features(
     layer_jsons: &mut Vec<LayerJSON>,
     layers_seen: &mut std::collections::HashSet<String>,
     line_descriptors: &IndexMap<String, LineDescriptor>,
+    culling_stats: &mut CullingStats,
 ) -> Result<(), anyhow::Error> {
     // If this is a LayerFeature node, process it
     if node.name == "LayerFeature" {
@@ -1015,6 +1132,7 @@ fn collect_layer_features(
                         &layer_name,
                         color,
                         &polylines,
+                        culling_stats,
                     )?;
                     
                     layer_jsons.push(layer_json);
@@ -1025,7 +1143,7 @@ fn collect_layer_features(
 
     // Recursively search all children
     for child in &node.children {
-        collect_layer_features(child, layer_jsons, layers_seen, line_descriptors)?;
+        collect_layer_features(child, layer_jsons, layers_seen, line_descriptors, culling_stats)?;
     }
 
     Ok(())
@@ -1165,12 +1283,17 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_encode() {
-        let data: Vec<f32> = vec![1.0, 2.0, 3.0];
-        let encoded = encode_f32_array(&data);
-        assert!(!encoded.is_empty());
-        // Should be valid base64
-        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    fn test_geometry_lod_serialization() {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let lod = GeometryLOD {
+            vertex_data: data.clone(),
+            vertex_count: 2,
+            index_data: Some(vec![0, 1, 2]),
+            index_count: Some(3),
+        };
+        let json = serde_json::to_string(&lod).unwrap();
+        assert!(json.contains("vertexData"));
+        assert!(json.contains("vertexCount"));
     }
 
     #[test]

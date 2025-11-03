@@ -2,7 +2,6 @@
 use rust_extension::{parse_xml_file, print_xml_tree, xml_node_to_file, extract_and_generate_layers};
 use std::time::Instant;
 use std::fs;
-use serde_json;
 
 #[cfg(test)]
 mod tests {
@@ -72,17 +71,19 @@ mod tests {
         // Ensure output directory exists
         fs::create_dir_all("output").expect("Failed to create output directory");
         
-        // Write each layer to JSON file
+        // Write each layer to custom binary file
         let mut total_bytes = 0;
         for layer_json in &layer_jsons {
-            let filename = format!("webview/src/test-data/layer_{}.json", layer_json.layer_id.replace(":", "_"));
-            let json_str = serde_json::to_string_pretty(&layer_json)
-                .expect("Failed to serialize layer JSON");
+            let filename = format!("webview/src/test-data/layer_{}.bin", layer_json.layer_id.replace(":", "_"));
             
-            fs::write(&filename, &json_str)
+            // Convert to binary format
+            let layer_binary = rust_extension::LayerBinary::from_layer_json(&layer_json);
+            let binary_bytes = layer_binary.to_bytes();
+            
+            fs::write(&filename, &binary_bytes)
                 .expect(&format!("Failed to write {}", filename));
             
-            let file_size = json_str.len();
+            let file_size = binary_bytes.len();
             total_bytes += file_size;
             
             // Count LODs written
@@ -93,15 +94,15 @@ mod tests {
                      file_size as f32 / 1024.0);
         }
         
-        println!("\nTotal JSON written: {:.2} MB", total_bytes as f32 / 1_048_576.0);
+        println!("\nTotal binary written: {:.2} MB", total_bytes as f32 / 1_048_576.0);
         
         // Verify files were created
         assert!(layer_jsons.len() > 0, "No layers found");
         for layer_json in &layer_jsons {
-            let filename = format!("webview/src/test-data/layer_{}.json", layer_json.layer_id.replace(":", "_"));
+            let filename = format!("webview/src/test-data/layer_{}.bin", layer_json.layer_id.replace(":", "_"));
             assert!(std::path::Path::new(&filename).exists(), 
-                   "Layer JSON file {} not created", filename);
-            println!("✓ Layer JSON file {} created", filename);
+                   "Layer binary file {} not created", filename);
+            println!("✓ Layer binary file {} created", filename);
         }
     }
 }

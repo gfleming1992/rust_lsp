@@ -7,7 +7,7 @@ pub mod xml_draw;
 // Re-export commonly used types and functions
 pub use parse_xml::{XmlNode, parse_xml_file};
 pub use serialize_xml::{xml_node_to_file, xml_node_to_string, xml_node_to_compact_string};
-pub use xml_draw::{extract_and_generate_layers, LayerJSON};
+pub use xml_draw::{extract_and_generate_layers, LayerJSON, LayerBinary};
 
 /// Pretty-prints the XML tree structure
 /// Useful for debugging and understanding parsed content

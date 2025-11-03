@@ -32,9 +32,9 @@ interface LayerInfo {
 
 // Geometry data for a specific shader type at a specific LOD level
 export interface GeometryLOD {
-  vertexData: string;  // base64-encoded Float32Array binary data
+  vertexData: number[];  // Raw Float32 array (no base64 encoding needed)
   vertexCount: number;
-  indexData?: string;  // Optional base64-encoded index buffer
+  indexData?: number[];  // Raw Uint32 array (no base64 encoding needed)
   indexCount?: number;
   instanceData?: string;  // Optional base64-encoded instance data (for instanced shaders)
   instanceCount?: number;
@@ -159,6 +159,8 @@ const colorOverrides = new Map<string, LayerColor>();
 // Multi-layer support (step 1)
 const layerRenderData = new Map<string, LayerRenderData>();
 let currentLOD = 0;  // Active LOD index (0-4) shared for now
+let lastVertexCount = 0;
+let lastIndexCount = 0;
 
 const uniformData = new Float32Array(16);
 
@@ -327,6 +329,8 @@ function loadColorOverrides() {
 }
 
 function loadLayerData(layerJson: LayerJSON) {
+  const loadStart = performance.now();
+  
   // Register layer metadata
   registerLayerInfo(layerJson);
   startup.rebuildStart = performance.now();
@@ -366,6 +370,8 @@ function loadLayerData(layerJson: LayerJSON) {
   const lodIndexCounts: number[] = [];
 
   // Load all LOD levels for the selected shader type
+  let totalDecodeTime = 0;
+  let totalUploadTime = 0;
   for (let i = 0; i < geometryLODs.length; i++) {
     const lod = geometryLODs[i];
     if (!lod) {
@@ -373,15 +379,13 @@ function loadLayerData(layerJson: LayerJSON) {
       continue;
     }
     
-    // Decode base64 to Float32Array
-    const binaryString = atob(lod.vertexData);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let j = 0; j < binaryString.length; j++) {
-      bytes[j] = binaryString.charCodeAt(j);
-    }
-    const lodVertices = new Float32Array(bytes.buffer);
+    // Convert raw number array directly to Float32Array - no base64 decode needed!
+    let decodeStart = performance.now();
+    const lodVertices = new Float32Array(lod.vertexData);
+    totalDecodeTime += performance.now() - decodeStart;
     
     // Create GPU buffer for this LOD
+    const uploadStart = performance.now();
     const buffer = device.createBuffer({
       size: lodVertices.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -389,22 +393,26 @@ function loadLayerData(layerJson: LayerJSON) {
     });
     new Float32Array(buffer.getMappedRange()).set(lodVertices);
     buffer.unmap();
+    totalUploadTime += performance.now() - uploadStart;
     
     lodBuffers.push(buffer);
     lodVertexCounts.push(lod.vertexCount);
 
     // Always create alpha buffer: use provided alphaData or fill with 1.0
+    decodeStart = performance.now();
     let alphaArr: Float32Array;
     if (lod.alphaData) {
       const alphaBin = atob(lod.alphaData);
       const alphaBytes = new Uint8Array(alphaBin.length);
-      for (let k = 0; k < alphaBin.length; k++) alphaBytes[k] = alphaBin.charCodeAt(k);
+      for (let j = 0; j < alphaBin.length; j++) alphaBytes[j] = alphaBin.charCodeAt(j);
       alphaArr = new Float32Array(alphaBytes.buffer);
     } else {
       // Fill with 1.0 (full opacity) for each vertex
       alphaArr = new Float32Array(lod.vertexCount);
       alphaArr.fill(1.0);
     }
+    totalDecodeTime += performance.now() - decodeStart;
+    
     const alphaBuf = device.createBuffer({
       size: alphaArr.byteLength,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -416,10 +424,9 @@ function loadLayerData(layerJson: LayerJSON) {
 
     // Optional index buffer (use drawIndexed when present)
     if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-      const idxBin = atob(lod.indexData);
-      const idxBytes = new Uint8Array(idxBin.length);
-      for (let k = 0; k < idxBin.length; k++) idxBytes[k] = idxBin.charCodeAt(k);
-      const idxArr = new Uint32Array(idxBytes.buffer);
+      decodeStart = performance.now();
+      const idxArr = new Uint32Array(lod.indexData);
+      totalDecodeTime += performance.now() - decodeStart;
       const idxBuf = device.createBuffer({
         size: idxArr.byteLength,
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
@@ -461,7 +468,10 @@ function loadLayerData(layerJson: LayerJSON) {
     bindGroup: layerBindGroup
   });
 
-  console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels (${currentShaderType || "unknown"} geometry):`);
+  const loadEnd = performance.now();
+  const loadTime = loadEnd - loadStart;
+  const otherTime = loadTime - totalDecodeTime - totalUploadTime;
+  console.log(`Loaded layer ${layerJson.layerId} in ${loadTime.toFixed(2)}ms (decode: ${totalDecodeTime.toFixed(1)}ms, upload: ${totalUploadTime.toFixed(1)}ms, other: ${otherTime.toFixed(1)}ms) - ${lodBuffers.length} LODs (${currentShaderType || "unknown"} geometry):`);
   lodVertexCounts.forEach((count, i) => {
     const kb = (lodBuffers[i]?.size || 0) / 1024;
     const ic = (layerRenderData.get(layerJson.layerId)?.lodIndexCounts?.[i]) ?? 0;
@@ -746,13 +756,15 @@ function configureSurface() {
 
 function updateCoordOverlay() {
   if (!coordOverlayEl) return;
+  const verts = lastVertexCount > 0 ? `${(lastVertexCount / 1000).toFixed(1)}K` : '-';
+  const tris = lastIndexCount > 0 ? `${(lastIndexCount / 3000).toFixed(1)}K` : '-';
   if (!haveMouse) {
-    coordOverlayEl.textContent = `x: -, y: -, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}`;
+    coordOverlayEl.textContent = `x: -, y: -, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}, verts: ${verts}, tris: ${tris}`;
     return;
   }
   const rect = canvas.getBoundingClientRect();
   const world = screenToWorld(lastMouseX - rect.left, lastMouseY - rect.top);
-  coordOverlayEl.textContent = `x: ${world.x.toFixed(2)}, y: ${world.y.toFixed(2)}, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}`;
+  coordOverlayEl.textContent = `x: ${world.x.toFixed(2)}, y: ${world.y.toFixed(2)}, zoom: ${state.zoom.toFixed(2)}, LOD: ${currentLOD}, verts: ${verts}, tris: ${tris}`;
 }
 
 function fmtMs(ms: number) {
@@ -830,17 +842,23 @@ function render() {
 
   // Draw all visible layers sequentially (shared color for now)
   let drawn = 0;
+  let totalVertices = 0;
+  let totalIndices = 0;
   for (const layerId of layerOrder) {
     if (layerVisible.get(layerId) === false) continue;
     const data = layerRenderData.get(layerId);
     if (!data) continue;
-    const vb = data.lodBuffers[currentLOD] ?? data.lodBuffers[data.lodBuffers.length - 1];
-    const count = data.lodVertexCounts[currentLOD] ?? data.lodVertexCounts[data.lodVertexCounts.length - 1];
+    
+    // Skip if requested LOD doesn't exist for this layer (fall back to last available)
+    const actualLOD = Math.min(currentLOD, data.lodBuffers.length - 1);
+    const vb = data.lodBuffers[actualLOD];
+    const count = data.lodVertexCounts[actualLOD];
     if (!vb || !count) continue;
+    totalVertices += count;
 
     pass.setPipeline(pipeline);
     pass.setVertexBuffer(0, vb);
-    const alphaBuf = data.lodAlphaBuffers[currentLOD] ?? data.lodAlphaBuffers[data.lodAlphaBuffers.length - 1];
+    const alphaBuf = data.lodAlphaBuffers[actualLOD];
     if (alphaBuf) pass.setVertexBuffer(1, alphaBuf);
     // Update this layer's uniform buffer with its color + current matrix
     const layerColor = getLayerColor(layerId);
@@ -849,11 +867,12 @@ function render() {
 
     pass.setBindGroup(0, data.bindGroup);
     // If index buffer present for this LOD, use drawIndexed
-    const ib = data.lodIndexBuffers?.[currentLOD] ?? null;
-    const ic = data.lodIndexCounts?.[currentLOD] ?? 0;
+    const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
+    const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
     if (ib && ic > 0) {
       pass.setIndexBuffer(ib, "uint32");
       pass.drawIndexed(ic);
+      totalIndices += ic;
     } else {
       pass.draw(count);
     }
@@ -862,6 +881,9 @@ function render() {
   pass.end();
 
   device.queue.submit([encoder.finish()]);
+
+  lastVertexCount = totalVertices;
+  lastIndexCount = totalIndices;
 
   frameCount += 1;
   const now = performance.now();
@@ -884,6 +906,9 @@ function loop() {
 }
 
 async function init() {
+  const initStart = performance.now();
+  console.log('[INIT] Starting initialization...');
+  
   const canvasElement = document.getElementById("viewer");
   if (!(canvasElement instanceof HTMLCanvasElement)) {
     throw new Error("Canvas element #viewer was not found");
@@ -898,6 +923,7 @@ async function init() {
 
   interceptConsoleLog(debugLogEl);
 
+  const gpuStart = performance.now();
   const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
   if (!gpu) {
     throw new Error("WebGPU is not available in this browser");
@@ -962,6 +988,9 @@ async function init() {
     },
     primitive: { topology: "triangle-list" }
   });
+  
+  const gpuEnd = performance.now();
+  console.log(`[INIT] WebGPU initialized in ${(gpuEnd - gpuStart).toFixed(1)}ms`);
 
   loadColorOverrides();
   refreshLayerLegend();
@@ -1021,7 +1050,7 @@ async function init() {
     state.lastY = event.clientY;
     if (state.dragButton === 0 || state.dragButton === 1) {
       state.panX += dx / state.zoom;
-      state.panY += dy / state.zoom;
+      state.panY -= dy / state.zoom;  // Invert Y to match flipped coordinate system
       scheduleDraw();
     }
   });
@@ -1093,7 +1122,13 @@ async function init() {
   });
 
   // Setup test mode if enabled
+  const testStart = performance.now();
   setupTestListeners();
+  const testEnd = performance.now();
+  console.log(`[INIT] Test setup completed in ${(testEnd - testStart).toFixed(1)}ms`);
+  
+  const initEnd = performance.now();
+  console.log(`[INIT] Total initialization time: ${(initEnd - initStart).toFixed(1)}ms`);
 
   requestAnimationFrame(loop);
 }

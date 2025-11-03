@@ -3,8 +3,8 @@
  * 
  * Simulates VS Code extension API by:
  * 1. Intercepting postMessage calls from webview
- * 2. Loading corresponding <test_case_name>.json from test data
- * 3. Returning JSON through simulated message event
+ * 2. Loading corresponding <test_case_name>.bin from test data
+ * 3. Decoding custom binary format with zero-copy TypedArray views
  * 4. Rendering to canvas for visual validation
  * 
  * Usage in HTML:
@@ -18,6 +18,89 @@ type LayerJSON = Record<string, unknown>;
 
 interface MockVSCodeAPI {
   postMessage: (msg: unknown) => void;
+}
+
+/**
+ * Parse custom binary layer format
+ * Format: [header][metadata][geometry_data]
+ * Header: "IPC2581B" (8 bytes magic)
+ * Metadata: layer_id_len(u32) + layer_id + padding + layer_name_len(u32) + layer_name + padding + color(4 x f32)
+ * Geometry: [num_lods: u32][lod0][lod1]...[lodN]
+ * Each LOD: [vertex_count: u32][index_count: u32][vertex_data: f32[]](index_data: u32[])
+ */
+function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
+  const view = new DataView(buffer);
+  let offset = 0;
+  
+  // Check magic header
+  const magic = new TextDecoder().decode(new Uint8Array(buffer, offset, 8));
+  if (magic !== 'IPC2581B') {
+    throw new Error(`Invalid binary format: expected "IPC2581B", got "${magic}"`);
+  }
+  offset += 8;
+  
+  // Read layer ID
+  const idLen = view.getUint32(offset, true);
+  offset += 4;
+  const layerId = new TextDecoder().decode(new Uint8Array(buffer, offset, idLen));
+  offset += idLen;
+  // Skip padding to 4-byte boundary
+  const idPadding = (4 - (idLen % 4)) % 4;
+  offset += idPadding;
+  
+  // Read layer name
+  const nameLen = view.getUint32(offset, true);
+  offset += 4;
+  const layerName = new TextDecoder().decode(new Uint8Array(buffer, offset, nameLen));
+  offset += nameLen;
+  // Skip padding to 4-byte boundary
+  const namePadding = (4 - (nameLen % 4)) % 4;
+  offset += namePadding;
+  
+  // Read color
+  const color = [
+    view.getFloat32(offset, true),
+    view.getFloat32(offset + 4, true),
+    view.getFloat32(offset + 8, true),
+    view.getFloat32(offset + 12, true)
+  ];
+  offset += 16;
+  
+  // Read geometry data
+  const numLods = view.getUint32(offset, true);
+  offset += 4;
+  
+  const lods = [];
+  for (let i = 0; i < numLods; i++) {
+    const vertexCount = view.getUint32(offset, true);
+    offset += 4;
+    const indexCount = view.getUint32(offset, true);
+    offset += 4;
+    
+    // Zero-copy view into buffer for vertex data
+    const vertexData = Array.from(new Float32Array(buffer, offset, vertexCount * 2));
+    offset += vertexCount * 2 * 4; // 2 floats per vertex, 4 bytes per float
+    
+    // Zero-copy view into buffer for index data
+    const indexData = indexCount > 0 ? Array.from(new Uint32Array(buffer, offset, indexCount)) : undefined;
+    offset += indexCount * 4;
+    
+    lods.push({
+      vertexData,
+      vertexCount,
+      indexData,
+      indexCount
+    });
+  }
+  
+  return {
+    layerId,
+    layerName,
+    defaultColor: color,
+    geometry: {
+      batch: lods.length > 0 ? lods : undefined
+    }
+  };
 }
 
 /**
@@ -38,16 +121,13 @@ export function initTestMode(testCaseName: string) {
   // Install mock API on global window
   (window as any).vscode = mockVSCode;
   
-  // Simulate initial extension startup message
-  setTimeout(() => {
-    console.log(`[TEST] Simulating extension startup message`);
-    const startupMsg = {
-      command: 'loadLayer',
-      layerId: testCaseName,
-      timestamp: Date.now()
-    };
-    handleTestMessage(startupMsg, testCaseName);
-  }, 100);
+  // Simulate initial extension startup message immediately (no delay)
+  const startupMsg = {
+    command: 'loadLayer',
+    layerId: testCaseName,
+    timestamp: Date.now()
+  };
+  handleTestMessage(startupMsg, testCaseName);
 }
 
 /**
@@ -59,31 +139,30 @@ async function handleTestMessage(message: unknown, testCaseName: string) {
   
   if (msg.command === 'loadLayer' || msg.command === 'getTessellation') {
     try {
+      const startTime = performance.now();
       console.log(`[TEST] Loading tessellation data: ${testCaseName}`);
       
-      // Fetch the JSON file from test data directory
-      // Map test case name to JSON file path
-      const jsonPath = `/src/test-data/${testCaseName}.json`;
+      // Fetch the binary file from test data directory
+      const binaryPath = `/src/test-data/${testCaseName}.bin`;
       
-      console.log(`[TEST] Fetching from: ${jsonPath}`);
-      const response = await fetch(jsonPath);
+      console.log(`[TEST] Fetching from: ${binaryPath}`);
+      const fetchStart = performance.now();
+      const response = await fetch(binaryPath);
+      const fetchEnd = performance.now();
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch ${jsonPath}: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch ${binaryPath}: ${response.status} ${response.statusText}`);
       }
       
-      const layerJson = (await response.json()) as LayerJSON;
+      // Decode custom binary format to LayerJSON
+      const parseStart = performance.now();
+      const arrayBuffer = await response.arrayBuffer();
+      const layerJson = parseBinaryLayer(arrayBuffer);
+      const parseEnd = performance.now();
       
-      console.log(`[TEST] Successfully loaded layer:`, {
-        layerId: (layerJson as any).layerId,
-        layerName: (layerJson as any).layerName,
-        color: (layerJson as any).defaultColor,
-        hasBasicGeometry: !!(layerJson as any).geometry?.basic,
-        basicLODs: ((layerJson as any).geometry?.basic || []).length,
-        hasInstanced: !!(layerJson as any).geometry?.instanced,
-        hasBatch: !!(layerJson as any).geometry?.batch,
-        batchLODs: ((layerJson as any).geometry?.batch || []).length,
-      });
+      console.log(`[TEST] Successfully loaded layer in ${(parseEnd - startTime).toFixed(1)}ms (fetch: ${(fetchEnd - fetchStart).toFixed(1)}ms, parse: ${(parseEnd - parseStart).toFixed(1)}ms):`, layerJson);
+      
+      console.log(`[TEST] Decoded keys:`, Object.keys(layerJson));
       
       // Simulate receiving message from extension
       // This mimics the real VS Code webview message event
@@ -158,13 +237,12 @@ export async function setupTestListeners() {
     
     console.log(`[TEST] Discovered ${testLayers.length} test layers:`, testLayers);
     
-    // Load all layers sequentially
-    for (const layerName of testLayers) {
+    // Load all layers in parallel for faster startup
+    console.log(`[TEST] Loading ${testLayers.length} layers in parallel...`);
+    await Promise.all(testLayers.map(layerName => {
         console.log(`[TEST] Loading layer: ${layerName}`);
-        initTestMode(layerName);
-        // Small delay between loading each layer to avoid overwhelming the renderer
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
+        return Promise.resolve(initTestMode(layerName));
+    }));
 }
 
 /**
