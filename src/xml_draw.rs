@@ -545,9 +545,11 @@ fn tessellate_polyline(points: &[Point], width: f32, line_end: LineEnd) -> (Vec<
                 let miter_ny = avg_ny / avg_len;
                 
                 // Calculate miter length scaling
+                // Formula: miter_length = half_width / sqrt((1 + dot) / 2)
+                // Which equals: half_width * sqrt(2 / (1 + dot))
                 let dot = norm_prev.0 * norm_curr.0 + norm_prev.1 * norm_curr.1;
                 let miter_scale = if dot.abs() < 0.99 {
-                    (1.0 / (1.0 + dot)).sqrt().min(4.0) // Clamp to prevent extreme miters
+                    (2.0 / (1.0 + dot)).sqrt().min(4.0) // Correct miter formula with sqrt(2/(1+dot))
                 } else {
                     1.0
                 };
