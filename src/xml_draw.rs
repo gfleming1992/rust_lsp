@@ -774,14 +774,56 @@ fn collect_layer_features(
 fn get_layer_color(layer_ref: &str) -> [f32; 4] {
     let lower = layer_ref.to_lowercase();
     
-    match true {
-        _ if lower.contains("silkscreen") || lower.contains("silk") => [0.85, 0.7, 0.2, 1.0],
-        _ if lower.contains("copper") || lower.contains(".cu") => [0.8, 0.6, 0.2, 1.0],
-        _ if lower.contains("paste") => [0.5, 0.5, 0.5, 1.0],
-        _ if lower.contains("mask") => [0.0, 0.5, 0.0, 1.0],
-        _ if lower.contains("design") => [0.2, 0.7, 1.0, 1.0],
-        _ => [0.7, 0.7, 0.7, 1.0], // default gray
+    // Top silkscreen: pure gray
+    if (lower.contains("silkscreen") || lower.contains("silk")) && lower.contains("f.") {
+        return [0.7, 0.7, 0.7, 1.0]; // Gray
     }
+    
+    // Bottom silkscreen: yellowish tinted gray
+    if (lower.contains("silkscreen") || lower.contains("silk")) && lower.contains("b.") {
+        return [0.75, 0.73, 0.6, 1.0]; // Yellowish gray
+    }
+    
+    // Very distinct colors for other layers: top layers red, bottom layers blue
+    if lower.contains("f.") {
+        // Front/Top layers - reds to oranges
+        if lower.contains(".cu") || lower.contains("copper") {
+            return [1.0, 0.2, 0.2, 1.0]; // Bright red
+        } else if lower.contains("paste") {
+            return [1.0, 0.5, 0.5, 1.0]; // Light red
+        } else if lower.contains("mask") {
+            return [0.8, 0.0, 0.0, 1.0]; // Dark red
+        } else {
+            return [1.0, 0.3, 0.0, 1.0]; // Orange-red
+        }
+    } else if lower.contains("b.") {
+        // Back/Bottom layers - blues to cyans
+        if lower.contains(".cu") || lower.contains("copper") {
+            return [0.2, 0.2, 1.0, 1.0]; // Bright blue
+        } else if lower.contains("paste") {
+            return [0.5, 0.5, 1.0, 1.0]; // Light blue
+        } else if lower.contains("mask") {
+            return [0.0, 0.0, 0.8, 1.0]; // Dark blue
+        } else {
+            return [0.0, 0.5, 1.0, 1.0]; // Cyan-blue
+        }
+    }
+    
+    // Internal layers and other types - greens and purples
+    if lower.contains("in") || lower.contains("inner") {
+        return [0.2, 1.0, 0.2, 1.0]; // Bright green
+    }
+    
+    if lower.contains("dielectric") {
+        return [0.8, 0.6, 1.0, 1.0]; // Light purple
+    }
+    
+    // User layers - distinctive colors
+    if lower.contains("user") {
+        return [1.0, 1.0, 0.2, 1.0]; // Bright yellow
+    }
+    
+    [0.7, 0.7, 0.7, 1.0] // default gray
 }
 
 /// Recursively collect all Polyline elements from a specific node

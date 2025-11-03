@@ -2,9 +2,9 @@
   "layerId": "LAYER:B.Fab",
   "layerName": "B.Fab",
   "defaultColor": [
-    0.7,
-    0.7,
-    0.7,
+    0.0,
+    0.5,
+    1.0,
     1.0
   ],
   "geometry": {
