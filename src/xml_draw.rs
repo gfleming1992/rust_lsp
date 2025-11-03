@@ -15,6 +15,7 @@
 use crate::parse_xml::XmlNode;
 use indexmap::IndexMap;
 use serde::Serialize;
+use std::env;
 
 /// A 2D point
 #[derive(Debug, Clone, Copy)]
@@ -419,10 +420,31 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
     let dx = max_x - min_x;
     let dy = max_y - min_y;
     let diag = (dx * dx + dy * dy).sqrt().max(1.0);
+    
+    // For very short polylines (dots, small circles), limit simplification
+    // to preserve their shape at all LODs
+    let is_very_short = diag < polyline.width * 3.0;
+    
+    // CRITICAL: For polylines with many points in a small area (circles/dots),
+    // don't simplify at all - keep original points at all LODs to preserve roundness
+    let is_circle_or_dot = polyline.points.len() > 4 && is_very_short;
+    
+    if is_circle_or_dot {
+        // Preserve exact geometry for circles/dots at all LODs
+        for _ in 1..5 {
+            lods.push(polyline.points.clone());
+        }
+        return lods;
+    }
 
     // Base tolerance as fraction of bounding box diagonal
     let base_tol = diag * 0.0005;
-    let max_tol = diag * 0.02;
+    let max_tol = if is_very_short {
+        // For dots/short segments, use much tighter max tolerance
+        diag * 0.005
+    } else {
+        diag * 0.02
+    };
 
     // Generate LOD1-4 with increasing tolerance (~4x each level)
     let mut tolerance = base_tol;
@@ -439,7 +461,7 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
 }
 
 /// Number of segments used for round caps (matching Polyline.js defaults)
-const ROUND_CAP_SEGMENTS: u32 = 12;
+const ROUND_CAP_SEGMENTS: u32 = 16;
 
 /// Helper function to add a round cap at a specific position
 fn add_round_cap(
@@ -482,151 +504,217 @@ fn tessellate_polyline(points: &[Point], width: f32, line_end: LineEnd) -> (Vec<
     let mut verts = Vec::new();
     let mut indices = Vec::new();
 
-    if points.len() < 2 {
+    if points.len() < 2 || width <= 0.0 {
         return (verts, indices);
     }
 
-    let half_w = width * 0.5;
-    let n = points.len();
+    let mut work_points = points.to_vec();
+    let mut is_closed = false;
 
-    // Calculate segment directions and normals
-    let mut seg_dir = Vec::with_capacity(n - 1);
-    let mut seg_norm = Vec::with_capacity(n - 1);
-    
-    for i in 0..n - 1 {
-        let p0 = points[i];
-        let p1 = points[i + 1];
+    if work_points.len() >= 3 {
+        if let (Some(first), Some(last)) = (work_points.first().copied(), work_points.last().copied()) {
+            let close_thresh = 1e-4;
+            if (first.x - last.x).abs() < close_thresh && (first.y - last.y).abs() < close_thresh {
+                is_closed = true;
+                work_points.pop();
+            }
+        }
+    }
+
+    if work_points.len() < 2 {
+        return (verts, indices);
+    }
+
+    let n = work_points.len();
+    let half_w = width * 0.5;
+    let segment_count = if is_closed { n } else { n - 1 };
+
+    let mut seg_dir = Vec::with_capacity(segment_count);
+    let mut seg_norm = Vec::with_capacity(segment_count);
+
+    for i in 0..segment_count {
+        let p0 = work_points[i];
+        let p1 = work_points[(i + 1) % n];
         let dx = p1.x - p0.x;
         let dy = p1.y - p0.y;
         let len = (dx * dx + dy * dy).sqrt();
-        
+
         if len < 1e-12 {
             seg_dir.push((1.0, 0.0));
             seg_norm.push((0.0, 1.0));
         } else {
-            let dx_norm = dx / len;
-            let dy_norm = dy / len;
+            let inv_len = 1.0 / len;
+            let dx_norm = dx * inv_len;
+            let dy_norm = dy * inv_len;
             seg_dir.push((dx_norm, dy_norm));
             seg_norm.push((-dy_norm, dx_norm));
         }
     }
 
-    // Build left and right edge vertices with miter joins
-    let mut left = Vec::with_capacity(n);
-    let mut right = Vec::with_capacity(n);
+    let pair_from = |point: Point, normal: (f32, f32)| -> (Point, Point) {
+        (
+            Point {
+                x: point.x + normal.0 * half_w,
+                y: point.y + normal.1 * half_w,
+            },
+            Point {
+                x: point.x - normal.0 * half_w,
+                y: point.y - normal.1 * half_w,
+            },
+        )
+    };
 
-    for i in 0..n {
-        if i == 0 {
-            // First point: use first segment normal
-            let norm = seg_norm[0];
-            left.push((points[0].x + norm.0 * half_w, points[0].y + norm.1 * half_w));
-            right.push((points[0].x - norm.0 * half_w, points[0].y - norm.1 * half_w));
-        } else if i == n - 1 {
-            // Last point: use last segment normal
-            let norm = seg_norm[n - 2];
-            left.push((points[i].x + norm.0 * half_w, points[i].y + norm.1 * half_w));
-            right.push((points[i].x - norm.0 * half_w, points[i].y - norm.1 * half_w));
+    let mut pairs: Vec<(Point, Point)> = Vec::new();
+    pairs.push(pair_from(work_points[0], seg_norm[0]));
+
+    for i in 0..segment_count {
+        let end_idx = if i + 1 < n { i + 1 } else { 0 };
+        let curr_norm = seg_norm[i];
+        let end_pair = pair_from(work_points[end_idx], curr_norm);
+        pairs.push(end_pair);
+
+        if !is_closed && i == segment_count - 1 {
+            continue;
+        }
+
+        let next_norm = seg_norm[(i + 1) % segment_count];
+        let curr_dir = seg_dir[i];
+        let next_dir = seg_dir[(i + 1) % segment_count];
+        let cross = curr_dir.0 * next_dir.1 - curr_dir.1 * next_dir.0;
+
+        if cross.abs() < 1e-6 {
+            continue;
+        }
+
+        let is_left_turn = cross > 0.0;
+        let center = work_points[end_idx];
+        let next_pair = pair_from(center, next_norm);
+
+        let (outer_start, outer_end, inner_start, inner_end) = if is_left_turn {
+            (end_pair.0, next_pair.0, end_pair.1, next_pair.1)
         } else {
-            // Interior point: miter join between segments
-            let norm_prev = seg_norm[i - 1];
-            let norm_curr = seg_norm[i];
-            
-            // Average the normals for miter
-            let avg_nx = norm_prev.0 + norm_curr.0;
-            let avg_ny = norm_prev.1 + norm_curr.1;
-            let avg_len = (avg_nx * avg_nx + avg_ny * avg_ny).sqrt();
-            
-            if avg_len < 1e-6 {
-                // Degenerate case: use current normal
-                left.push((points[i].x + norm_curr.0 * half_w, points[i].y + norm_curr.1 * half_w));
-                right.push((points[i].x - norm_curr.0 * half_w, points[i].y - norm_curr.1 * half_w));
+            (end_pair.1, next_pair.1, end_pair.0, next_pair.0)
+        };
+
+        let start_angle = (outer_start.y - center.y).atan2(outer_start.x - center.x);
+        let end_angle = (outer_end.y - center.y).atan2(outer_end.x - center.x);
+        let mut sweep = end_angle - start_angle;
+
+        if is_left_turn {
+            while sweep <= 0.0 {
+                sweep += std::f32::consts::PI * 2.0;
+            }
+        } else {
+            while sweep >= 0.0 {
+                sweep -= std::f32::consts::PI * 2.0;
+            }
+        }
+
+        let angle_span = sweep.abs();
+        let segments = (angle_span / (std::f32::consts::PI / 18.0)).ceil() as u32;
+        let num_segs = segments.max(4);
+
+        for s in 1..=num_segs {
+            let t = s as f32 / num_segs as f32;
+            let ang = start_angle + sweep * t;
+            let outer_point = Point {
+                x: center.x + ang.cos() * half_w,
+                y: center.y + ang.sin() * half_w,
+            };
+            let inner_point = Point {
+                x: inner_start.x + (inner_end.x - inner_start.x) * t,
+                y: inner_start.y + (inner_end.y - inner_start.y) * t,
+            };
+
+            if is_left_turn {
+                pairs.push((outer_point, inner_point));
             } else {
-                let miter_nx = avg_nx / avg_len;
-                let miter_ny = avg_ny / avg_len;
-                
-                // Calculate miter length scaling
-                // Formula: miter_length = half_width / sqrt((1 + dot) / 2)
-                // Which equals: half_width * sqrt(2 / (1 + dot))
-                let dot = norm_prev.0 * norm_curr.0 + norm_prev.1 * norm_curr.1;
-                let miter_scale = if dot.abs() < 0.99 {
-                    (2.0 / (1.0 + dot)).sqrt().min(4.0) // Correct miter formula with sqrt(2/(1+dot))
-                } else {
-                    1.0
-                };
-                
-                let scaled_w = half_w * miter_scale;
-                left.push((points[i].x + miter_nx * scaled_w, points[i].y + miter_ny * scaled_w));
-                right.push((points[i].x - miter_nx * scaled_w, points[i].y - miter_ny * scaled_w));
+                pairs.push((inner_point, outer_point));
             }
         }
     }
 
-    // Build vertices and indices from left/right pairs
-    for i in 0..n {
-        verts.push(left[i].0);
-        verts.push(left[i].1);
-        verts.push(right[i].0);
-        verts.push(right[i].1);
+    for pair in &pairs {
+        verts.push(pair.0.x);
+        verts.push(pair.0.y);
+        verts.push(pair.1.x);
+        verts.push(pair.1.y);
     }
 
-    // Create quads between consecutive vertex pairs
-    for i in 0..n - 1 {
+    let base_pairs = pairs.len();
+    let segment_pairs = if is_closed { base_pairs } else { base_pairs.saturating_sub(1) };
+
+    for i in 0..segment_pairs {
+        let next = if i + 1 < base_pairs { i + 1 } else { 0 };
+        if !is_closed && next == 0 {
+            continue;
+        }
         let base = (i * 2) as u32;
-        // Triangle 1: left[i], left[i+1], right[i+1]
+        let next_base = (next * 2) as u32;
         indices.push(base);
-        indices.push(base + 2);
-        indices.push(base + 3);
-        // Triangle 2: left[i], right[i+1], right[i]
+        indices.push(next_base);
+        indices.push(next_base + 1);
         indices.push(base);
-        indices.push(base + 3);
+        indices.push(next_base + 1);
         indices.push(base + 1);
     }
 
-    // Add end caps based on line_end style
-    match line_end {
-        LineEnd::Round => {
-            // Add round caps at start and end using helper function
-            add_round_cap(&mut verts, &mut indices, points[0], seg_dir[0], half_w, true);
-            add_round_cap(&mut verts, &mut indices, points[n - 1], seg_dir[seg_dir.len() - 1], half_w, false);
-        }
-        LineEnd::Square => {
-            // Extend start and end by half width along segment tangents
-            let d0 = seg_dir[0];
-            let d1 = seg_dir[seg_dir.len() - 1];
+    if !is_closed {
+        match line_end {
+            LineEnd::Round => {
+                add_round_cap(
+                    &mut verts,
+                    &mut indices,
+                    work_points[0],
+                    seg_dir[0],
+                    half_w,
+                    true,
+                );
+                add_round_cap(
+                    &mut verts,
+                    &mut indices,
+                    work_points[n - 1],
+                    seg_dir[segment_count - 1],
+                    half_w,
+                    false,
+                );
+            }
+            LineEnd::Square => {
+                let start_pair = pairs[0];
+                let end_pair = pairs[pairs.len() - 1];
+                let start_dir = seg_dir[0];
+                let end_dir = seg_dir[segment_count - 1];
 
-            // Start cap
-            let s_shift_x = -d0.0 * half_w;
-            let s_shift_y = -d0.1 * half_w;
-            let v_start = (verts.len() / 2) as u32;
-            verts.push(left[0].0 + s_shift_x);
-            verts.push(left[0].1 + s_shift_y);
-            verts.push(right[0].0 + s_shift_x);
-            verts.push(right[0].1 + s_shift_y);
-            indices.push(v_start);
-            indices.push(0);
-            indices.push(1);
-            indices.push(v_start);
-            indices.push(1);
-            indices.push(v_start + 1);
+                let s_shift_x = -start_dir.0 * half_w;
+                let s_shift_y = -start_dir.1 * half_w;
+                let v_start = (verts.len() / 2) as u32;
+                verts.push(start_pair.0.x + s_shift_x);
+                verts.push(start_pair.0.y + s_shift_y);
+                verts.push(start_pair.1.x + s_shift_x);
+                verts.push(start_pair.1.y + s_shift_y);
+                indices.push(v_start);
+                indices.push(0);
+                indices.push(1);
+                indices.push(v_start);
+                indices.push(1);
+                indices.push(v_start + 1);
 
-            // End cap
-            let e_shift_x = d1.0 * half_w;
-            let e_shift_y = d1.1 * half_w;
-            let v_end = (verts.len() / 2) as u32;
-            let last_base = ((n - 1) * 2) as u32;
-            verts.push(left[n - 1].0 + e_shift_x);
-            verts.push(left[n - 1].1 + e_shift_y);
-            verts.push(right[n - 1].0 + e_shift_x);
-            verts.push(right[n - 1].1 + e_shift_y);
-            indices.push(last_base);
-            indices.push(v_end);
-            indices.push(v_end + 1);
-            indices.push(last_base);
-            indices.push(v_end + 1);
-            indices.push(last_base + 1);
-        }
-        LineEnd::Butt => {
-            // No cap extension - default behavior (already done above)
+                let e_shift_x = end_dir.0 * half_w;
+                let e_shift_y = end_dir.1 * half_w;
+                let v_end = (verts.len() / 2) as u32;
+                let last_base = ((pairs.len() - 1) * 2) as u32;
+                verts.push(end_pair.0.x + e_shift_x);
+                verts.push(end_pair.0.y + e_shift_y);
+                verts.push(end_pair.1.x + e_shift_x);
+                verts.push(end_pair.1.y + e_shift_y);
+                indices.push(last_base);
+                indices.push(v_end);
+                indices.push(v_end + 1);
+                indices.push(last_base);
+                indices.push(v_end + 1);
+                indices.push(last_base + 1);
+            }
+            LineEnd::Butt => {}
         }
     }
 
@@ -655,6 +743,57 @@ fn batch_polylines_with_styles(
     }
 
     (all_verts, all_indices)
+}
+
+fn should_debug_layer(layer_id: &str) -> bool {
+    match env::var("DEBUG_TESSELLATION_LAYER") {
+        Ok(val) => {
+            if val.trim().is_empty() {
+                true
+            } else {
+                val.split(',').any(|entry| entry.trim() == layer_id)
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn debug_print_polyline(
+    layer_id: &str,
+    points: &[Point],
+    width: f32,
+    line_end: LineEnd,
+) {
+    let (verts, indices) = tessellate_polyline(points, width, line_end);
+    println!(
+        "\nPolyline: {} points, width: {:.3}, layer: {}",
+        points.len(),
+        width,
+        layer_id
+    );
+    println!(
+        " Generated: {} triangles ({} vertices)",
+        indices.len() / 3,
+        verts.len() / 2
+    );
+
+    let mut vertex_pairs = Vec::with_capacity(verts.len() / 2);
+    for chunk in verts.chunks_exact(2) {
+        vertex_pairs.push((chunk[0], chunk[1]));
+    }
+
+    for (tri_idx, tri) in indices.chunks_exact(3).enumerate() {
+        if tri_idx >= 200 {
+            break;
+        }
+        let v0 = vertex_pairs[tri[0] as usize];
+        let v1 = vertex_pairs[tri[1] as usize];
+        let v2 = vertex_pairs[tri[2] as usize];
+        println!(
+            " Triangle {}: [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}]",
+            tri_idx, v0.0, v0.1, v1.0, v1.1, v2.0, v2.1
+        );
+    }
 }
 
 /// Encode Float32Array to base64
@@ -722,16 +861,53 @@ pub fn generate_layer_json(
     }
 
     // For each LOD level, batch all polylines at that LOD
+    let debug_this_layer = should_debug_layer(layer_id);
+    let mut debug_header_printed = false;
     for lod_idx in 0..5 {
         let mut lod_polylines_data = Vec::new();
         
         for (poly_idx, polyline) in polylines.iter().enumerate() {
             if poly_idx < all_lod_points.len() && lod_idx < all_lod_points[poly_idx].len() {
-                lod_polylines_data.push((
-                    all_lod_points[poly_idx][lod_idx].clone(),
-                    polyline.width,
-                    polyline.line_end,
-                ));
+                // Width-dependent LOD cap optimization:
+                // - Thin lines (< 0.05): butt caps from LOD 1+
+                // - Medium lines (0.05-0.2): butt caps from LOD 2+
+                // - Thick lines (> 0.2): butt caps from LOD 3+
+                let butt_lod_threshold = if polyline.width < 0.05 {
+                    1
+                } else if polyline.width < 0.2 {
+                    2
+                } else {
+                    3
+                };
+                
+                let effective_line_end = if lod_idx >= butt_lod_threshold && polyline.line_end != LineEnd::Butt {
+                    LineEnd::Butt
+                } else {
+                    polyline.line_end
+                };
+                
+                let lod_points = all_lod_points[poly_idx][lod_idx].clone();
+                if debug_this_layer && lod_idx == 0 {
+                    if !debug_header_printed {
+                        println!(
+                            "\n=== {} Polyline Tessellation (first 200 triangles) ===",
+                            layer_name
+                        );
+                        println!(
+                            " Total {} polylines: {}",
+                            layer_name,
+                            polylines.len()
+                        );
+                        debug_header_printed = true;
+                    }
+                    debug_print_polyline(
+                        layer_id,
+                        &lod_points,
+                        polyline.width,
+                        effective_line_end,
+                    );
+                }
+                lod_polylines_data.push((lod_points, polyline.width, effective_line_end));
             }
         }
 
@@ -754,6 +930,13 @@ pub fn generate_layer_json(
         };
 
         lod_geometries.push(geometry_lod);
+    }
+
+    if debug_this_layer && debug_header_printed {
+        println!(
+            "=== End of {} Tessellation (200 triangles shown) ===",
+            layer_name
+        );
     }
 
     let mut shader_geom = ShaderGeometry::default();
