@@ -23,12 +23,34 @@ pub struct Point {
     pub y: f32,
 }
 
+/// Line end style
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineEnd {
+    Round,
+    Square,
+    Butt,
+}
+
+impl Default for LineEnd {
+    fn default() -> Self {
+        LineEnd::Round
+    }
+}
+
+/// Line descriptor from DictionaryLineDesc
+#[derive(Debug, Clone)]
+pub struct LineDescriptor {
+    pub line_width: f32,
+    pub line_end: LineEnd,
+}
+
 /// Represents a single polyline
 #[derive(Debug, Clone)]
 pub struct Polyline {
     pub points: Vec<Point>,
     pub width: f32,
     pub color: [f32; 4],
+    pub line_end: LineEnd,
 }
 
 /// Represents all polylines organized by layer
@@ -82,13 +104,16 @@ pub struct LayerJSON {
 
 /// Extract polylines from a LayerFeatures XML node
 #[allow(dead_code)]
-fn extract_polylines_from_layer(layer_node: &XmlNode) -> Result<Vec<Polyline>, anyhow::Error> {
+fn extract_polylines_from_layer(
+    layer_node: &XmlNode,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
+) -> Result<Vec<Polyline>, anyhow::Error> {
     let mut polylines = Vec::new();
     
     // Find all Polyline children
     for child in &layer_node.children {
         if child.name == "Polyline" {
-            if let Ok(polyline) = parse_polyline_node(child) {
+            if let Ok(polyline) = parse_polyline_node(child, line_descriptors) {
                 polylines.push(polyline);
             }
         }
@@ -98,16 +123,23 @@ fn extract_polylines_from_layer(layer_node: &XmlNode) -> Result<Vec<Polyline>, a
 }
 
 /// Parse a single Polyline XML node
-fn parse_polyline_node(node: &XmlNode) -> Result<Polyline, anyhow::Error> {
+fn parse_polyline_node(
+    node: &XmlNode,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
+) -> Result<Polyline, anyhow::Error> {
     let mut points = Vec::new();
-    let width: f32 = node
+    let mut width: f32 = node
         .attributes
         .get("width")
         .and_then(|w| w.parse().ok())
         .unwrap_or(0.1);
-    
+    let mut line_end = LineEnd::Round;
+
     // Extract color from attributes or use default
     let color = parse_color(&node.attributes).unwrap_or([0.5, 0.5, 0.5, 1.0]);
+
+    // Look for LineDescRef to get actual width and line end
+    let mut line_desc_ref: Option<String> = None;
     
     // Extract points from various child node types
     for child in &node.children {
@@ -144,11 +176,87 @@ fn parse_polyline_node(node: &XmlNode) -> Result<Polyline, anyhow::Error> {
                     }
                 }
             }
+            "LineDescRef" => {
+                if let Some(id) = child.attributes.get("id") {
+                    line_desc_ref = Some(id.clone());
+                }
+            }
             _ => {}
         }
     }
-    
-    Ok(Polyline { points, width, color })
+
+    // Apply line descriptor if found
+    if let Some(ref_id) = line_desc_ref {
+        if let Some(descriptor) = line_descriptors.get(&ref_id) {
+            width = descriptor.line_width;
+            line_end = descriptor.line_end;
+        }
+    }
+
+    Ok(Polyline {
+        points,
+        width,
+        color,
+        line_end,
+    })
+}
+
+/// Parse line end from string
+fn parse_line_end(line_end_str: &str) -> LineEnd {
+    match line_end_str.to_uppercase().as_str() {
+        "ROUND" => LineEnd::Round,
+        "SQUARE" => LineEnd::Square,
+        "BUTT" => LineEnd::Butt,
+        _ => LineEnd::Round, // Default to round
+    }
+}
+
+/// Parse DictionaryLineDesc to extract line width and end style for each line ID
+fn parse_line_descriptors(root: &XmlNode) -> IndexMap<String, LineDescriptor> {
+    let mut line_descriptors = IndexMap::new();
+
+    // Find Content node
+    if let Some(content_node) = root.children.iter().find(|n| n.name == "Content") {
+        // Find DictionaryLineDesc
+        if let Some(dict_node) = content_node
+            .children
+            .iter()
+            .find(|n| n.name == "DictionaryLineDesc")
+        {
+            // Process each EntryLineDesc
+            for entry in &dict_node.children {
+                if entry.name == "EntryLineDesc" {
+                    if let Some(id) = entry.attributes.get("id") {
+                        // Find LineDesc child
+                        if let Some(line_desc) = entry.children.iter().find(|n| n.name == "LineDesc")
+                        {
+                            let line_width = line_desc
+                                .attributes
+                                .get("lineWidth")
+                                .and_then(|w| w.parse::<f32>().ok())
+                                .unwrap_or(0.1);
+
+                            let line_end = line_desc
+                                .attributes
+                                .get("lineEnd")
+                                .map(|s| parse_line_end(s))
+                                .unwrap_or(LineEnd::Round);
+
+                            line_descriptors.insert(
+                                id.clone(),
+                                LineDescriptor {
+                                    line_width,
+                                    line_end,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    line_descriptors
 }
 
 /// Parse color from attributes
@@ -259,7 +367,8 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
 
 /// Stroke a single polyline into vertex and index arrays
 /// Creates triangles for the line width with miter joins connecting segments
-fn tessellate_polyline(points: &[Point], width: f32) -> (Vec<f32>, Vec<u32>) {
+/// Supports different line end styles (round, square, butt)
+fn tessellate_polyline(points: &[Point], width: f32, line_end: LineEnd) -> (Vec<f32>, Vec<u32>) {
     let mut verts = Vec::new();
     let mut indices = Vec::new();
 
@@ -361,16 +470,106 @@ fn tessellate_polyline(points: &[Point], width: f32) -> (Vec<f32>, Vec<u32>) {
         indices.push(base + 1);
     }
 
+    // Add end caps based on line_end style
+    match line_end {
+        LineEnd::Round => {
+            // Add round caps at start and end
+            let segs = 12; // Number of segments for round cap (matching Polyline.js defaults)
+
+            // Start cap
+            let start_dir = seg_dir[0];
+            let start_center = points[0];
+            let fan_start_base = (verts.len() / 2) as u32;
+            verts.push(start_center.x);
+            verts.push(start_center.y);
+            
+            let start_angle = start_dir.1.atan2(start_dir.0);
+            for i in 0..=segs {
+                let t = i as f32 / segs as f32;
+                let ang = start_angle + std::f32::consts::PI / 2.0 + t * std::f32::consts::PI;
+                verts.push(start_center.x + ang.cos() * half_w);
+                verts.push(start_center.y + ang.sin() * half_w);
+            }
+            for i in 0..segs {
+                indices.push(fan_start_base);
+                indices.push(fan_start_base + 1 + i);
+                indices.push(fan_start_base + 2 + i);
+            }
+
+            // End cap
+            let end_dir = seg_dir[seg_dir.len() - 1];
+            let end_center = points[n - 1];
+            let fan_end_base = (verts.len() / 2) as u32;
+            verts.push(end_center.x);
+            verts.push(end_center.y);
+            
+            let end_angle = end_dir.1.atan2(end_dir.0);
+            for i in 0..=segs {
+                let t = i as f32 / segs as f32;
+                let ang = end_angle - std::f32::consts::PI / 2.0 + t * std::f32::consts::PI;
+                verts.push(end_center.x + ang.cos() * half_w);
+                verts.push(end_center.y + ang.sin() * half_w);
+            }
+            for i in 0..segs {
+                indices.push(fan_end_base);
+                indices.push(fan_end_base + 1 + i);
+                indices.push(fan_end_base + 2 + i);
+            }
+        }
+        LineEnd::Square => {
+            // Extend start and end by half width along segment tangents
+            let d0 = seg_dir[0];
+            let d1 = seg_dir[seg_dir.len() - 1];
+
+            // Start cap
+            let s_shift_x = -d0.0 * half_w;
+            let s_shift_y = -d0.1 * half_w;
+            let v_start = (verts.len() / 2) as u32;
+            verts.push(left[0].0 + s_shift_x);
+            verts.push(left[0].1 + s_shift_y);
+            verts.push(right[0].0 + s_shift_x);
+            verts.push(right[0].1 + s_shift_y);
+            indices.push(v_start);
+            indices.push(0);
+            indices.push(1);
+            indices.push(v_start);
+            indices.push(1);
+            indices.push(v_start + 1);
+
+            // End cap
+            let e_shift_x = d1.0 * half_w;
+            let e_shift_y = d1.1 * half_w;
+            let v_end = (verts.len() / 2) as u32;
+            let last_base = ((n - 1) * 2) as u32;
+            verts.push(left[n - 1].0 + e_shift_x);
+            verts.push(left[n - 1].1 + e_shift_y);
+            verts.push(right[n - 1].0 + e_shift_x);
+            verts.push(right[n - 1].1 + e_shift_y);
+            indices.push(last_base);
+            indices.push(v_end);
+            indices.push(v_end + 1);
+            indices.push(last_base);
+            indices.push(v_end + 1);
+            indices.push(last_base + 1);
+        }
+        LineEnd::Butt => {
+            // No cap extension - default behavior (already done above)
+        }
+    }
+
     (verts, indices)
 }
 
 /// Batch all polylines for a layer into a single vertex/index buffer
-fn batch_polylines(polylines: &[Vec<Point>], width: f32) -> (Vec<f32>, Vec<u32>) {
+/// Each polyline maintains its own width and line_end style
+fn batch_polylines_with_styles(
+    polylines_data: &[(Vec<Point>, f32, LineEnd)],
+) -> (Vec<f32>, Vec<u32>) {
     let mut all_verts = Vec::new();
     let mut all_indices = Vec::new();
 
-    for points in polylines {
-        let (verts, mut indices) = tessellate_polyline(points, width);
+    for (points, width, line_end) in polylines_data {
+        let (verts, mut indices) = tessellate_polyline(points, *width, *line_end);
         
         // Offset indices by current vertex count
         let vert_offset = all_verts.len() as u32 / 2;
@@ -451,27 +650,24 @@ pub fn generate_layer_json(
 
     // For each LOD level, batch all polylines at that LOD
     for lod_idx in 0..5 {
-        let mut lod_points = Vec::new();
+        let mut lod_polylines_data = Vec::new();
         
-        for (poly_idx, _polyline) in polylines.iter().enumerate() {
+        for (poly_idx, polyline) in polylines.iter().enumerate() {
             if poly_idx < all_lod_points.len() && lod_idx < all_lod_points[poly_idx].len() {
-                lod_points.push(all_lod_points[poly_idx][lod_idx].clone());
+                lod_polylines_data.push((
+                    all_lod_points[poly_idx][lod_idx].clone(),
+                    polyline.width,
+                    polyline.line_end,
+                ));
             }
         }
 
-        if lod_points.is_empty() {
+        if lod_polylines_data.is_empty() {
             continue;
         }
 
-        // Get representative width (use first polyline's width or average)
-        let avg_width = if !polylines.is_empty() {
-            polylines[0].width
-        } else {
-            0.1
-        };
-
         // Batch all polylines at this LOD into single vertex/index buffer
-        let (verts, indices) = batch_polylines(&lod_points, avg_width);
+        let (verts, indices) = batch_polylines_with_styles(&lod_polylines_data);
 
         if verts.is_empty() || indices.is_empty() {
             continue;
@@ -507,6 +703,9 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     let mut layer_jsons = Vec::new();
     let mut layers_seen = std::collections::HashSet::new();
 
+    // Parse line descriptors from DictionaryLineDesc
+    let line_descriptors = parse_line_descriptors(root);
+
     // Find Ecad node which contains all the CAD data
     let ecad_node = root
         .children
@@ -522,7 +721,7 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
         .ok_or_else(|| anyhow::anyhow!("No CadData node found"))?;
 
     // Find all LayerFeature nodes and process them
-    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen)?;
+    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors)?;
 
     Ok(layer_jsons)
 }
@@ -532,6 +731,7 @@ fn collect_layer_features(
     node: &XmlNode,
     layer_jsons: &mut Vec<LayerJSON>,
     layers_seen: &mut std::collections::HashSet<String>,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
 ) -> Result<(), anyhow::Error> {
     // If this is a LayerFeature node, process it
     if node.name == "LayerFeature" {
@@ -541,7 +741,7 @@ fn collect_layer_features(
                 
                 // Collect all polylines from this LayerFeature
                 let mut polylines = Vec::new();
-                collect_polylines_from_node(node, &mut polylines);
+                collect_polylines_from_node(node, &mut polylines, line_descriptors);
                 
                 if !polylines.is_empty() {
                     // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
@@ -569,7 +769,7 @@ fn collect_layer_features(
 
     // Recursively search all children
     for child in &node.children {
-        collect_layer_features(child, layer_jsons, layers_seen)?;
+        collect_layer_features(child, layer_jsons, layers_seen, line_descriptors)?;
     }
 
     Ok(())
@@ -590,17 +790,21 @@ fn get_layer_color(layer_ref: &str) -> [f32; 4] {
 }
 
 /// Recursively collect all Polyline elements from a specific node
-fn collect_polylines_from_node(node: &XmlNode, polylines: &mut Vec<Polyline>) {
+fn collect_polylines_from_node(
+    node: &XmlNode,
+    polylines: &mut Vec<Polyline>,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
+) {
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
-        if let Ok(polyline) = parse_polyline_node(node) {
+        if let Ok(polyline) = parse_polyline_node(node, line_descriptors) {
             polylines.push(polyline);
         }
     }
 
     // Recursively search all children
     for child in &node.children {
-        collect_polylines_from_node(child, polylines);
+        collect_polylines_from_node(child, polylines, line_descriptors);
     }
 }
 
@@ -638,6 +842,7 @@ mod tests {
             ],
             width: 0.1,
             color: [1.0, 0.0, 0.0, 1.0],
+            line_end: LineEnd::Round,
         };
 
         let lods = generate_polyline_lods(&polyline);
@@ -651,7 +856,7 @@ mod tests {
     #[test]
     fn test_tessellate_polyline() {
         let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
-        let (verts, indices) = tessellate_polyline(&points, 0.1);
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Round);
         
         assert!(verts.len() >= 8); // At least 4 vertices (2 per quad)
         assert!(indices.len() >= 6); // At least 6 indices (2 triangles)
@@ -664,5 +869,34 @@ mod tests {
         assert!(!encoded.is_empty());
         // Should be valid base64
         assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
+
+    #[test]
+    fn test_parse_line_end() {
+        assert_eq!(parse_line_end("ROUND"), LineEnd::Round);
+        assert_eq!(parse_line_end("round"), LineEnd::Round);
+        assert_eq!(parse_line_end("SQUARE"), LineEnd::Square);
+        assert_eq!(parse_line_end("BUTT"), LineEnd::Butt);
+        assert_eq!(parse_line_end("unknown"), LineEnd::Round); // Default
+    }
+
+    #[test]
+    fn test_tessellate_with_round_caps() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Round);
+        
+        // Should have more vertices due to round caps
+        assert!(verts.len() > 8);
+        assert!(indices.len() > 6);
+    }
+
+    #[test]
+    fn test_tessellate_with_square_caps() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Square);
+        
+        // Should have extra vertices for square caps
+        assert!(verts.len() >= 12); // 4 base + 4 for caps
+        assert!(indices.len() >= 12); // 2 triangles for line + 2 for caps
     }
 }
