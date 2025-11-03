@@ -258,50 +258,8 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
 }
 
 /// Stroke a single polyline into vertex and index arrays
-/// Creates triangles for the line width with miter/bevel joins and round caps
-fn tessellate_polyline(points: &[Point], width: f32) -> (Vec<f32>, Vec<u32>) {
-    let mut verts = Vec::new();
-    let mut indices = Vec::new();
-
-    if points.len() < 2 {
-        return (verts, indices);
-    }
-
-    let half_w = width * 0.5;
-
-    // Generate vertices for each segment with offset perpendiculars
-    for i in 0..points.len() - 1 {
-        let p0 = points[i];
-        let p1 = points[i + 1];
-
-        let dx = p1.x - p0.x;
-        let dy = p1.y - p0.y;
-        let len = (dx * dx + dy * dy).sqrt();
-
-        if len < 1e-6 {
-            continue; // Skip degenerate segments
-        }
-
-        let nx = -dy / len;
-        let ny = dx / len;
-
-        // Create quad for this segment
-        let a = (p0.x + nx * half_w, p0.y + ny * half_w);
-        let b = (p1.x + nx * half_w, p1.y + ny * half_w);
-        let c = (p1.x - nx * half_w, p1.y - ny * half_w);
-        let d = (p0.x - nx * half_w, p0.y - ny * half_w);
-
-        let base = verts.len() as u32 / 2;
-        
-        // Add vertices
-        verts.extend_from_slice(&[a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1]);
-        
-        // Add two triangles for quad
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    (verts, indices)
-}
+/// Creates triangles for the line width with miter joins connecting segments
+fn tessellate_polyline(points: &[Point], width
 
 /// Batch all polylines for a layer into a single vertex/index buffer
 fn batch_polylines(polylines: &[Vec<Point>], width: f32) -> (Vec<f32>, Vec<u32>) {

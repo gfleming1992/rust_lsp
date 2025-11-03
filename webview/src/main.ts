@@ -107,6 +107,8 @@ interface LayerRenderData {
   lodBuffers: GPUBuffer[];
   lodAlphaBuffers: (GPUBuffer | null)[];
   lodVertexCounts: number[];
+  lodIndexBuffers?: (GPUBuffer | null)[];
+  lodIndexCounts?: number[];
   currentLOD: number;
   uniformBuffer: GPUBuffer;
   bindGroup: GPUBindGroup;
@@ -358,6 +360,8 @@ function loadLayerData(layerJson: LayerJSON) {
   const lodBuffers: GPUBuffer[] = [];
   const lodAlphaBuffers: (GPUBuffer | null)[] = [];
   const lodVertexCounts: number[] = [];
+  const lodIndexBuffers: (GPUBuffer | null)[] = [];
+  const lodIndexCounts: number[] = [];
 
   // Load all LOD levels for the selected shader type
   for (let i = 0; i < geometryLODs.length; i++) {
@@ -407,6 +411,26 @@ function loadLayerData(layerJson: LayerJSON) {
     new Float32Array(alphaBuf.getMappedRange()).set(alphaArr);
     alphaBuf.unmap();
     lodAlphaBuffers.push(alphaBuf);
+
+    // Optional index buffer (use drawIndexed when present)
+    if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
+      const idxBin = atob(lod.indexData);
+      const idxBytes = new Uint8Array(idxBin.length);
+      for (let k = 0; k < idxBin.length; k++) idxBytes[k] = idxBin.charCodeAt(k);
+      const idxArr = new Uint32Array(idxBytes.buffer);
+      const idxBuf = device.createBuffer({
+        size: idxArr.byteLength,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint32Array(idxBuf.getMappedRange()).set(idxArr);
+      idxBuf.unmap();
+      lodIndexBuffers.push(idxBuf);
+      lodIndexCounts.push(lod.indexCount);
+    } else {
+      lodIndexBuffers.push(null);
+      lodIndexCounts.push(0);
+    }
   }
   
   // Create per-layer uniform buffer and bind group
@@ -428,6 +452,8 @@ function loadLayerData(layerJson: LayerJSON) {
     lodBuffers,
     lodAlphaBuffers,
     lodVertexCounts,
+    lodIndexBuffers,
+    lodIndexCounts,
     currentLOD: 0,
     uniformBuffer: layerUniformBuffer,
     bindGroup: layerBindGroup
@@ -436,10 +462,13 @@ function loadLayerData(layerJson: LayerJSON) {
   console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels (${currentShaderType || "unknown"} geometry):`);
   lodVertexCounts.forEach((count, i) => {
     const kb = (lodBuffers[i]?.size || 0) / 1024;
-    console.log(`  LOD${i}: ${count} vertices (${kb.toFixed(2)} KB)`);
+    const ic = (layerRenderData.get(layerJson.layerId)?.lodIndexCounts?.[i]) ?? 0;
+    const idxInfo = ic > 0 ? `, ${ic} indices` : ``;
+    console.log(`  LOD${i}: ${count} vertices${idxInfo} (${kb.toFixed(2)} KB)`);
   });
   
   startup.rebuildEnd = performance.now();
+  scheduleDraw();
 }
 
 function applyLayerColor(layerId: string) {
@@ -815,7 +844,15 @@ function render() {
     device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
 
     pass.setBindGroup(0, data.bindGroup);
-    pass.draw(count);
+    // If index buffer present for this LOD, use drawIndexed
+    const ib = data.lodIndexBuffers?.[currentLOD] ?? null;
+    const ic = data.lodIndexCounts?.[currentLOD] ?? 0;
+    if (ib && ic > 0) {
+      pass.setIndexBuffer(ib, "uint32");
+      pass.drawIndexed(ic);
+    } else {
+      pass.draw(count);
+    }
     drawn++;
   }
   pass.end();
