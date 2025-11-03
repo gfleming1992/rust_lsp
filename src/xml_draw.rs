@@ -198,6 +198,82 @@ fn parse_polyline_node(
     })
 }
 
+/// Parse a Line XML node by converting it into a two-point polyline
+fn parse_line_node(
+    node: &XmlNode,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
+) -> Result<Polyline, anyhow::Error> {
+    let start_x = node
+        .attributes
+        .get("startX")
+        .and_then(|v| v.parse::<f32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Line missing startX attribute"))?;
+    let start_y = node
+        .attributes
+        .get("startY")
+        .and_then(|v| v.parse::<f32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Line missing startY attribute"))?;
+    let end_x = node
+        .attributes
+        .get("endX")
+        .and_then(|v| v.parse::<f32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Line missing endX attribute"))?;
+    let end_y = node
+        .attributes
+        .get("endY")
+        .and_then(|v| v.parse::<f32>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Line missing endY attribute"))?;
+
+    let mut width: f32 = node
+        .attributes
+        .get("width")
+        .and_then(|w| w.parse().ok())
+        .unwrap_or(0.1);
+    let mut line_end = LineEnd::Round;
+
+    let color = parse_color(&node.attributes).unwrap_or([0.5, 0.5, 0.5, 1.0]);
+
+    let mut line_desc_ref: Option<String> = None;
+
+    for child in &node.children {
+        match child.name.as_str() {
+            "LineDescRef" => {
+                if let Some(id) = child.attributes.get("id") {
+                    line_desc_ref = Some(id.clone());
+                }
+            }
+            "LineDesc" => {
+                if let Some(w) = child.attributes.get("lineWidth") {
+                    if let Ok(parsed) = w.parse::<f32>() {
+                        width = parsed;
+                    }
+                }
+                if let Some(end) = child.attributes.get("lineEnd") {
+                    line_end = parse_line_end(end);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(ref_id) = line_desc_ref {
+        if let Some(descriptor) = line_descriptors.get(&ref_id) {
+            width = descriptor.line_width;
+            line_end = descriptor.line_end;
+        }
+    }
+
+    Ok(Polyline {
+        points: vec![
+            Point { x: start_x, y: start_y },
+            Point { x: end_x, y: end_y },
+        ],
+        width,
+        color,
+        line_end,
+    })
+}
+
 /// Parse line end from string
 fn parse_line_end(line_end_str: &str) -> LineEnd {
     match line_end_str.to_uppercase().as_str() {
@@ -836,6 +912,10 @@ fn collect_polylines_from_node(
     if node.name == "Polyline" {
         if let Ok(polyline) = parse_polyline_node(node, line_descriptors) {
             polylines.push(polyline);
+        }
+    } else if node.name == "Line" {
+        if let Ok(line_polyline) = parse_line_node(node, line_descriptors) {
+            polylines.push(line_polyline);
         }
     }
 
