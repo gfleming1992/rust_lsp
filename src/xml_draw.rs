@@ -365,6 +365,43 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
     lods
 }
 
+/// Number of segments used for round caps (matching Polyline.js defaults)
+const ROUND_CAP_SEGMENTS: u32 = 12;
+
+/// Helper function to add a round cap at a specific position
+fn add_round_cap(
+    verts: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    center: Point,
+    direction: (f32, f32),
+    half_width: f32,
+    is_start: bool,
+) {
+    let fan_base = (verts.len() / 2) as u32;
+    verts.push(center.x);
+    verts.push(center.y);
+    
+    let base_angle = direction.1.atan2(direction.0);
+    let angle_offset = if is_start {
+        std::f32::consts::PI / 2.0
+    } else {
+        -std::f32::consts::PI / 2.0
+    };
+    
+    for i in 0..=ROUND_CAP_SEGMENTS {
+        let t = i as f32 / ROUND_CAP_SEGMENTS as f32;
+        let ang = base_angle + angle_offset + t * std::f32::consts::PI;
+        verts.push(center.x + ang.cos() * half_width);
+        verts.push(center.y + ang.sin() * half_width);
+    }
+    
+    for i in 0..ROUND_CAP_SEGMENTS {
+        indices.push(fan_base);
+        indices.push(fan_base + 1 + i);
+        indices.push(fan_base + 2 + i);
+    }
+}
+
 /// Stroke a single polyline into vertex and index arrays
 /// Creates triangles for the line width with miter joins connecting segments
 /// Supports different line end styles (round, square, butt)
@@ -473,48 +510,9 @@ fn tessellate_polyline(points: &[Point], width: f32, line_end: LineEnd) -> (Vec<
     // Add end caps based on line_end style
     match line_end {
         LineEnd::Round => {
-            // Add round caps at start and end
-            let segs = 12; // Number of segments for round cap (matching Polyline.js defaults)
-
-            // Start cap
-            let start_dir = seg_dir[0];
-            let start_center = points[0];
-            let fan_start_base = (verts.len() / 2) as u32;
-            verts.push(start_center.x);
-            verts.push(start_center.y);
-            
-            let start_angle = start_dir.1.atan2(start_dir.0);
-            for i in 0..=segs {
-                let t = i as f32 / segs as f32;
-                let ang = start_angle + std::f32::consts::PI / 2.0 + t * std::f32::consts::PI;
-                verts.push(start_center.x + ang.cos() * half_w);
-                verts.push(start_center.y + ang.sin() * half_w);
-            }
-            for i in 0..segs {
-                indices.push(fan_start_base);
-                indices.push(fan_start_base + 1 + i);
-                indices.push(fan_start_base + 2 + i);
-            }
-
-            // End cap
-            let end_dir = seg_dir[seg_dir.len() - 1];
-            let end_center = points[n - 1];
-            let fan_end_base = (verts.len() / 2) as u32;
-            verts.push(end_center.x);
-            verts.push(end_center.y);
-            
-            let end_angle = end_dir.1.atan2(end_dir.0);
-            for i in 0..=segs {
-                let t = i as f32 / segs as f32;
-                let ang = end_angle - std::f32::consts::PI / 2.0 + t * std::f32::consts::PI;
-                verts.push(end_center.x + ang.cos() * half_w);
-                verts.push(end_center.y + ang.sin() * half_w);
-            }
-            for i in 0..segs {
-                indices.push(fan_end_base);
-                indices.push(fan_end_base + 1 + i);
-                indices.push(fan_end_base + 2 + i);
-            }
+            // Add round caps at start and end using helper function
+            add_round_cap(&mut verts, &mut indices, points[0], seg_dir[0], half_w, true);
+            add_round_cap(&mut verts, &mut indices, points[n - 1], seg_dir[seg_dir.len() - 1], half_w, false);
         }
         LineEnd::Square => {
             // Extend start and end by half width along segment tangents
