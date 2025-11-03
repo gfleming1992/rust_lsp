@@ -25,17 +25,14 @@ pub struct Point {
 
 /// Line end style
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum LineEnd {
+    #[default]
     Round,
     Square,
     Butt,
 }
 
-impl Default for LineEnd {
-    fn default() -> Self {
-        LineEnd::Round
-    }
-}
 
 /// Line descriptor from DictionaryLineDesc
 #[derive(Debug, Clone)]
@@ -745,7 +742,7 @@ fn collect_layer_features(
                     // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
                     let layer_name = layer_ref
                         .split(':')
-                        .last()
+                        .next_back()
                         .unwrap_or(layer_ref)
                         .to_string();
                     
