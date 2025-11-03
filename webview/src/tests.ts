@@ -168,21 +168,22 @@ export async function setupTestListeners() {
 }
 
 /**
- * Get list of available test cases from test data directory
- * Discovers all layer_*.json files using dynamic import
+ * Get list of available test cases from output directory
+ * Discovers all layer_*.json files dynamically using Vite's glob
  */
 export async function discoverTestLayers(): Promise<string[]> {
   try {
-    // Attempt to discover layers via fetch from test-data directory
-    // Fall back to known layer names if directory listing not available
-    const layerNames = [
-      'layer_LAYER_B.Silkscreen',
-      'layer_LAYER_F.Silkscreen',
-      'layer_LAYER_B.Fab',
-      'layer_LAYER_F.Fab',
-      'layer_LAYER_User.1',
-      'layer_LAYER_User.4',
-    ];
+    // Use Vite's glob for development - imports all layer JSON files from output directory
+    // @ts-ignore - Vite's glob is not in standard ImportMeta types but works at runtime
+    const layerModules = import.meta.glob<{ default: unknown }>('/src/test-data/layer_*.json');    
+    const layerNames = Object.keys(layerModules)
+      .map(filepath => {
+        // Extract filename from path: /output/layer_LAYER_X.json -> layer_LAYER_X
+        const match = filepath.match(/\/([^/]+)\.json$/);
+        return match ? match[1] : '';
+      })
+      .filter(Boolean)
+      .sort();
     
     console.log('[TEST] Discovered layers:', layerNames);
     return layerNames;
@@ -191,6 +192,7 @@ export async function discoverTestLayers(): Promise<string[]> {
     return [];
   }
 }
+
 
 /**
  * Get list of available test cases from test data directory
