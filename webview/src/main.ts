@@ -119,6 +119,7 @@ interface ViewerState {
   panY: number;
   zoom: number;
   flipX: boolean;
+  flipY: boolean;
   dragging: boolean;
   dragButton: number | null;
   lastX: number;
@@ -166,6 +167,7 @@ const state: ViewerState = {
   panY: 0,
   zoom: 1,
   flipX: false,
+  flipY: true,
   dragging: false,
   dragButton: null,
   lastX: 0,
@@ -685,13 +687,14 @@ function screenToWorld(cssX: number, cssY: number): { x: number; y: number } {
   const width = Math.max(1, canvas.width);
   const height = Math.max(1, canvas.height);
   const fx = state.flipX ? -1 : 1;
+  const fy = state.flipY ? -1 : 1;
   const scaleX = (2 * state.zoom) / width;
   const scaleY = (2 * state.zoom) / height;
   const xNdc = (2 * cssX) / Math.max(1, canvas.clientWidth) - 1;
   const yNdc = 1 - (2 * cssY) / Math.max(1, canvas.clientHeight);
 
   const worldX = ((xNdc / fx + 1) / scaleX) - width / 2 - state.panX;
-  const worldY = ((1 - yNdc) / scaleY) - height / 2 - state.panY;
+  const worldY = ((1 - yNdc * fy) / scaleY) - height / 2 - state.panY;
   return { x: worldX, y: worldY };
 }
 
@@ -699,6 +702,7 @@ function updateUniforms() {
   const width = Math.max(1, canvas.width);
   const height = Math.max(1, canvas.height);
   const flipX = state.flipX ? -1 : 1;
+  const flipY = state.flipY ? -1 : 1;
   const scaleX = (2 * state.zoom) / width;
   const scaleY = (2 * state.zoom) / height;
   const offsetX = scaleX * (width / 2 + state.panX) - 1;
@@ -710,8 +714,8 @@ function updateUniforms() {
   uniformData[7] = 0;
 
   uniformData[8] = 0;
-  uniformData[9] = -scaleY;
-  uniformData[10] = offsetY;
+  uniformData[9] = flipY * -scaleY;
+  uniformData[10] = flipY > 0 ? offsetY : -offsetY;
   uniformData[11] = 0;
 
   uniformData[12] = 0;
@@ -1051,13 +1055,14 @@ async function init() {
     const width = Math.max(1, canvas.width);
     const height = Math.max(1, canvas.height);
     const fx = state.flipX ? -1 : 1;
+    const fy = state.flipY ? -1 : 1;
     const scaleX = (2 * state.zoom) / width;
     const scaleY = (2 * state.zoom) / height;
     const xNdc = (2 * cssX) / Math.max(1, canvas.clientWidth) - 1;
     const yNdc = 1 - (2 * cssY) / Math.max(1, canvas.clientHeight);
 
     state.panX = ((xNdc / fx + 1) / scaleX) - width / 2 - pivotWorld.x;
-    state.panY = ((1 - yNdc) / scaleY) - height / 2 - pivotWorld.y;
+    state.panY = ((1 - yNdc * fy) / scaleY) - height / 2 - pivotWorld.y;
 
     scheduleDraw();
   }, { passive: false });

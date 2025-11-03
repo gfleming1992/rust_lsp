@@ -259,7 +259,110 @@ fn generate_polyline_lods(polyline: &Polyline) -> Vec<Vec<Point>> {
 
 /// Stroke a single polyline into vertex and index arrays
 /// Creates triangles for the line width with miter joins connecting segments
-fn tessellate_polyline(points: &[Point], width
+fn tessellate_polyline(points: &[Point], width: f32) -> (Vec<f32>, Vec<u32>) {
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+
+    if points.len() < 2 {
+        return (verts, indices);
+    }
+
+    let half_w = width * 0.5;
+    let n = points.len();
+
+    // Calculate segment directions and normals
+    let mut seg_dir = Vec::with_capacity(n - 1);
+    let mut seg_norm = Vec::with_capacity(n - 1);
+    
+    for i in 0..n - 1 {
+        let p0 = points[i];
+        let p1 = points[i + 1];
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let len = (dx * dx + dy * dy).sqrt();
+        
+        if len < 1e-12 {
+            seg_dir.push((1.0, 0.0));
+            seg_norm.push((0.0, 1.0));
+        } else {
+            let dx_norm = dx / len;
+            let dy_norm = dy / len;
+            seg_dir.push((dx_norm, dy_norm));
+            seg_norm.push((-dy_norm, dx_norm));
+        }
+    }
+
+    // Build left and right edge vertices with miter joins
+    let mut left = Vec::with_capacity(n);
+    let mut right = Vec::with_capacity(n);
+
+    for i in 0..n {
+        if i == 0 {
+            // First point: use first segment normal
+            let norm = seg_norm[0];
+            left.push((points[0].x + norm.0 * half_w, points[0].y + norm.1 * half_w));
+            right.push((points[0].x - norm.0 * half_w, points[0].y - norm.1 * half_w));
+        } else if i == n - 1 {
+            // Last point: use last segment normal
+            let norm = seg_norm[n - 2];
+            left.push((points[i].x + norm.0 * half_w, points[i].y + norm.1 * half_w));
+            right.push((points[i].x - norm.0 * half_w, points[i].y - norm.1 * half_w));
+        } else {
+            // Interior point: miter join between segments
+            let norm_prev = seg_norm[i - 1];
+            let norm_curr = seg_norm[i];
+            
+            // Average the normals for miter
+            let avg_nx = norm_prev.0 + norm_curr.0;
+            let avg_ny = norm_prev.1 + norm_curr.1;
+            let avg_len = (avg_nx * avg_nx + avg_ny * avg_ny).sqrt();
+            
+            if avg_len < 1e-6 {
+                // Degenerate case: use current normal
+                left.push((points[i].x + norm_curr.0 * half_w, points[i].y + norm_curr.1 * half_w));
+                right.push((points[i].x - norm_curr.0 * half_w, points[i].y - norm_curr.1 * half_w));
+            } else {
+                let miter_nx = avg_nx / avg_len;
+                let miter_ny = avg_ny / avg_len;
+                
+                // Calculate miter length scaling
+                let dot = norm_prev.0 * norm_curr.0 + norm_prev.1 * norm_curr.1;
+                let miter_scale = if dot.abs() < 0.99 {
+                    (1.0 / (1.0 + dot)).sqrt().min(4.0) // Clamp to prevent extreme miters
+                } else {
+                    1.0
+                };
+                
+                let scaled_w = half_w * miter_scale;
+                left.push((points[i].x + miter_nx * scaled_w, points[i].y + miter_ny * scaled_w));
+                right.push((points[i].x - miter_nx * scaled_w, points[i].y - miter_ny * scaled_w));
+            }
+        }
+    }
+
+    // Build vertices and indices from left/right pairs
+    for i in 0..n {
+        verts.push(left[i].0);
+        verts.push(left[i].1);
+        verts.push(right[i].0);
+        verts.push(right[i].1);
+    }
+
+    // Create quads between consecutive vertex pairs
+    for i in 0..n - 1 {
+        let base = (i * 2) as u32;
+        // Triangle 1: left[i], left[i+1], right[i+1]
+        indices.push(base);
+        indices.push(base + 2);
+        indices.push(base + 3);
+        // Triangle 2: left[i], right[i+1], right[i]
+        indices.push(base);
+        indices.push(base + 3);
+        indices.push(base + 1);
+    }
+
+    (verts, indices)
+}
 
 /// Batch all polylines for a layer into a single vertex/index buffer
 fn batch_polylines(polylines: &[Vec<Point>], width: f32) -> (Vec<f32>, Vec<u32>) {
