@@ -108,6 +108,8 @@ interface LayerRenderData {
   lodAlphaBuffers: (GPUBuffer | null)[];
   lodVertexCounts: number[];
   currentLOD: number;
+  uniformBuffer: GPUBuffer;
+  bindGroup: GPUBindGroup;
 }
 
 interface ViewerState {
@@ -407,13 +409,28 @@ function loadLayerData(layerJson: LayerJSON) {
     lodAlphaBuffers.push(alphaBuf);
   }
   
+  // Create per-layer uniform buffer and bind group
+  const color = getLayerColor(layerJson.layerId);
+  // Seed uniformData's color; matrix part will be updated during render
+  uniformData.set(color, 0);
+  const layerUniformBuffer = device.createBuffer({
+    size: uniformData.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  const layerBindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: layerUniformBuffer } }]
+  });
+
   // Store per-layer render data
   layerRenderData.set(layerJson.layerId, {
     layerId: layerJson.layerId,
     lodBuffers,
     lodAlphaBuffers,
     lodVertexCounts,
-    currentLOD: 0
+    currentLOD: 0,
+    uniformBuffer: layerUniformBuffer,
+    bindGroup: layerBindGroup
   });
 
   console.log(`Loaded layer ${layerJson.layerId} with ${lodBuffers.length} LOD levels (${currentShaderType || "unknown"} geometry):`);
@@ -426,8 +443,7 @@ function loadLayerData(layerJson: LayerJSON) {
 }
 
 function applyLayerColor(layerId: string) {
-  const color = getLayerColor(layerId);
-  uniformData.set(color, 0);
+  // Color is applied per-layer during render from layerColors map
   state.needsDraw = true;
 }
 
@@ -759,7 +775,6 @@ function render() {
   state.needsDraw = false;
   configureSurface();
   updateUniforms();
-  device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
   // Select LOD based on current zoom
   const lodIndex = selectLODForZoom(state.zoom);
@@ -794,7 +809,12 @@ function render() {
     pass.setVertexBuffer(0, vb);
     const alphaBuf = data.lodAlphaBuffers[currentLOD] ?? data.lodAlphaBuffers[data.lodAlphaBuffers.length - 1];
     if (alphaBuf) pass.setVertexBuffer(1, alphaBuf);
-    pass.setBindGroup(0, bindGroup);
+    // Update this layer's uniform buffer with its color + current matrix
+    const layerColor = getLayerColor(layerId);
+    uniformData.set(layerColor, 0);
+    device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+
+    pass.setBindGroup(0, data.bindGroup);
     pass.draw(count);
     drawn++;
   }
