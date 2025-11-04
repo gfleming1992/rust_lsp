@@ -14,8 +14,29 @@
 
 use crate::parse_xml::XmlNode;
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::env;
+use base64::{Engine as _, engine::general_purpose};
+
+/// Serialize Vec<f32> as base64-encoded string for compact JSON transmission
+fn serialize_f32_vec_as_base64<S>(data: &Option<Vec<f32>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match data {
+        Some(vec) => {
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    vec.as_ptr() as *const u8,
+                    vec.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let encoded = general_purpose::STANDARD.encode(bytes);
+            serializer.serialize_some(&encoded)
+        }
+        None => serializer.serialize_none(),
+    }
+}
 
 /// A 2D point
 #[derive(Debug, Clone, Copy)]
@@ -51,11 +72,30 @@ pub struct Polyline {
     pub line_end: LineEnd,
 }
 
-/// Represents all polylines organized by layer
+/// Represents a filled polygon (with optional holes)
+#[derive(Debug, Clone)]
+pub struct Polygon {
+    pub outer_ring: Vec<Point>,
+    pub holes: Vec<Vec<Point>>,
+    pub fill_color: [f32; 4],  // Supports alpha for transparency
+}
+
+/// Represents a pad stack hole with optional annular ring
+#[derive(Debug, Clone)]
+pub struct PadStackHole {
+    pub x: f32,
+    pub y: f32,
+    pub hole_diameter: f32,
+    pub ring_width: f32,  // 0 means no ring, just hole
+}
+
+/// Represents all geometries organized by layer
 #[derive(Debug)]
-pub struct LayerPolylines {
+pub struct LayerGeometries {
     pub layer_ref: String,
     pub polylines: Vec<Polyline>,
+    pub polygons: Vec<Polygon>,
+    pub padstack_holes: Vec<PadStackHole>,
 }
 
 /// Serializable geometry LOD for JSON
@@ -77,6 +117,10 @@ pub struct GeometryLOD {
     /// Optional number of indices
     #[serde(rename = "indexCount")]
     pub index_count: Option<usize>,
+    
+    /// Optional per-vertex alpha values (1 float per vertex), serialized as base64 string
+    #[serde(rename = "alphaData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
+    pub alpha_data: Option<Vec<f32>>,
 }
 
 /// Culling statistics for optimization reporting
@@ -89,8 +133,12 @@ pub struct CullingStats {
 /// Shader geometry organized by type
 #[derive(Serialize, Default)]
 pub struct ShaderGeometry {
-    /// For batch.wgsl - many unique items in one draw
+    /// For batch.wgsl - polylines without alpha (opaque, alpha=1.0 implicit)
     pub batch: Option<Vec<GeometryLOD>>,
+    
+    /// For batch_colored.wgsl - polygons with per-vertex alpha transparency
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_colored: Option<Vec<GeometryLOD>>,
 }
 
 /// Complete layer JSON structure matching main.ts
@@ -177,37 +225,68 @@ impl LayerBinary {
 fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
     let mut buffer = Vec::new();
     
-    let lods = match &geometry.batch {
-        Some(batch) => batch,
-        None => {
-            // No geometry - write 0 LODs
-            buffer.extend_from_slice(&0u32.to_le_bytes());
-            return buffer;
-        }
-    };
-    
-    // Number of LODs
-    buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
-    
-    for lod in lods {
-        // Vertex count
-        buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
-        
-        // Index count
-        let index_count = lod.index_count.unwrap_or(0);
-        buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
-        
-        // Raw vertex data (Float32)
-        for &f in &lod.vertex_data {
-            buffer.extend_from_slice(&f.to_le_bytes());
-        }
-        
-        // Raw index data (Uint32)
-        if let Some(indices) = &lod.index_data {
-            for &idx in indices {
-                buffer.extend_from_slice(&idx.to_le_bytes());
+    // Serialize batch geometry (polylines without alpha)
+    let batch_lods = geometry.batch.as_ref();
+    if let Some(lods) = batch_lods {
+        buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
+        for lod in lods {
+            // Vertex count
+            buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
+            // Index count
+            let index_count = lod.index_count.unwrap_or(0);
+            buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+            // Raw vertex data (Float32)
+            for &f in &lod.vertex_data {
+                buffer.extend_from_slice(&f.to_le_bytes());
+            }
+            // Raw index data (Uint32)
+            if let Some(indices) = &lod.index_data {
+                for &idx in indices {
+                    buffer.extend_from_slice(&idx.to_le_bytes());
+                }
             }
         }
+    } else {
+        // No batch geometry
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+    }
+    
+    // Serialize batch_colored geometry (polygons with alpha)
+    let batch_colored_lods = geometry.batch_colored.as_ref();
+    if let Some(lods) = batch_colored_lods {
+        buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
+        for lod in lods {
+            // Vertex count
+            buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
+            // Index count
+            let index_count = lod.index_count.unwrap_or(0);
+            buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+            // Has alpha flag
+            let has_alpha = lod.alpha_data.is_some();
+            buffer.push(if has_alpha { 1 } else { 0 });
+            // Padding to maintain 4-byte alignment
+            buffer.extend_from_slice(&[0u8, 0u8, 0u8]);
+            
+            // Raw vertex data (Float32)
+            for &f in &lod.vertex_data {
+                buffer.extend_from_slice(&f.to_le_bytes());
+            }
+            // Raw index data (Uint32)
+            if let Some(indices) = &lod.index_data {
+                for &idx in indices {
+                    buffer.extend_from_slice(&idx.to_le_bytes());
+                }
+            }
+            // Alpha data (Float32) if present
+            if let Some(alpha_values) = &lod.alpha_data {
+                for &alpha in alpha_values {
+                    buffer.extend_from_slice(&alpha.to_le_bytes());
+                }
+            }
+        }
+    } else {
+        // No batch_colored geometry
+        buffer.extend_from_slice(&0u32.to_le_bytes());
     }
     
     buffer
@@ -396,6 +475,136 @@ fn parse_line_end(line_end_str: &str) -> LineEnd {
         "BUTT" => LineEnd::Butt,
         _ => LineEnd::Round, // Default to round
     }
+}
+
+/// Parse a Polygon node (filled shape with optional holes)
+/// Expects <Polygon> with PolyBegin/PolyStepSegment children
+fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
+    let mut outer_ring: Vec<Point> = Vec::new();
+    let mut current_ring: Vec<Point> = Vec::new();
+    let mut holes: Vec<Vec<Point>> = Vec::new();
+    let mut is_first_contour = true;
+    
+    // Extract fill color from attributes or use default with alpha
+    let fill_color = parse_color(&node.attributes).unwrap_or([0.5, 0.5, 0.5, 0.5]);
+    
+    // Parse polygon contours (outer ring + holes)
+    for child in &node.children {
+        match child.name.as_str() {
+            "PolyBegin" => {
+                // Save previous contour if exists
+                if !current_ring.is_empty() {
+                    if is_first_contour {
+                        outer_ring = current_ring.clone();
+                        is_first_contour = false;
+                    } else {
+                        holes.push(current_ring.clone());
+                    }
+                    current_ring.clear();
+                }
+                
+                // Start new contour
+                if let (Some(x_str), Some(y_str)) = (
+                    child.attributes.get("x"),
+                    child.attributes.get("y"),
+                ) {
+                    if let (Ok(x), Ok(y)) = (x_str.parse::<f32>(), y_str.parse::<f32>()) {
+                        current_ring.push(Point { x, y });
+                    }
+                }
+            }
+            "PolyStepSegment" | "PolyStepCurve" => {
+                // Add point to current contour
+                if let (Some(x_str), Some(y_str)) = (
+                    child.attributes.get("x"),
+                    child.attributes.get("y"),
+                ) {
+                    if let (Ok(x), Ok(y)) = (x_str.parse::<f32>(), y_str.parse::<f32>()) {
+                        current_ring.push(Point { x, y });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Save last contour
+    if !current_ring.is_empty() {
+        if is_first_contour {
+            outer_ring = current_ring;
+        } else {
+            holes.push(current_ring);
+        }
+    }
+    
+    if outer_ring.len() < 3 {
+        return Err(anyhow::anyhow!("Polygon must have at least 3 points"));
+    }
+    
+    Ok(Polygon {
+        outer_ring,
+        holes,
+        fill_color,
+    })
+}
+
+/// Parse pad stack definitions and extract hole information
+/// Returns a map of pad stack name -> hole definition
+fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackHole> {
+    let mut padstack_defs = IndexMap::new();
+    
+    // Find Content -> DictionaryStandard for pad stack definitions
+    if let Some(content) = root.children.iter().find(|n| n.name == "Content") {
+        // Look for Step nodes which contain PadStackDef
+        for step in &content.children {
+            if step.name == "Step" {
+                for child in &step.children {
+                    if child.name == "PadStackDef" {
+                        if let Some(name) = child.attributes.get("name") {
+                            // Find PadstackHoleDef
+                            for hole_def in &child.children {
+                                if hole_def.name == "PadstackHoleDef" {
+                                    let diameter = hole_def
+                                        .attributes
+                                        .get("diameter")
+                                        .and_then(|d| d.parse::<f32>().ok())
+                                        .unwrap_or(0.0);
+                                    
+                                    let x = hole_def
+                                        .attributes
+                                        .get("x")
+                                        .and_then(|v| v.parse::<f32>().ok())
+                                        .unwrap_or(0.0);
+                                    
+                                    let y = hole_def
+                                        .attributes
+                                        .get("y")
+                                        .and_then(|v| v.parse::<f32>().ok())
+                                        .unwrap_or(0.0);
+                                    
+                                    // Estimate ring width from pad definitions (simplified)
+                                    // In full implementation, would parse PadstackPadDef
+                                    let ring_width = diameter * 0.2; // Assume 20% annular ring
+                                    
+                                    padstack_defs.insert(
+                                        name.clone(),
+                                        PadStackHole {
+                                            x,
+                                            y,
+                                            hole_diameter: diameter,
+                                            ring_width,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    padstack_defs
 }
 
 /// Parse DictionaryLineDesc to extract line width and end style for each line ID
@@ -869,6 +1078,171 @@ fn batch_polylines_with_styles(
     (all_verts, all_indices)
 }
 
+/// Tessellate a filled polygon using earcut triangulation
+/// Supports outer ring + optional holes with LOD via Douglas-Peucker
+/// Returns (vertices, indices) as flat arrays
+fn tessellate_polygon(polygon: &Polygon, tolerance: f32) -> (Vec<f32>, Vec<u32>) {
+    // Simplify outer ring and holes using Douglas-Peucker
+    let simplified_outer = if tolerance > 0.0 {
+        douglas_peucker(&polygon.outer_ring, tolerance)
+    } else {
+        polygon.outer_ring.clone()
+    };
+    
+    let simplified_holes: Vec<Vec<Point>> = polygon.holes.iter()
+        .map(|hole| {
+            if tolerance > 0.0 {
+                douglas_peucker(hole, tolerance)
+            } else {
+                hole.clone()
+            }
+        })
+        .collect();
+    
+    // Build flat coordinate array for earcut
+    let mut flat_coords: Vec<f64> = Vec::new();
+    let mut hole_indices: Vec<usize> = Vec::new();
+    
+    // Add outer ring
+    for p in &simplified_outer {
+        flat_coords.push(p.x as f64);
+        flat_coords.push(p.y as f64);
+    }
+    
+    // Add holes
+    for hole in &simplified_holes {
+        if hole.len() < 3 {
+            continue; // Skip degenerate holes
+        }
+        hole_indices.push(flat_coords.len() / 2);
+        for p in hole {
+            flat_coords.push(p.x as f64);
+            flat_coords.push(p.y as f64);
+        }
+    }
+    
+    // Triangulate using earcut
+    let indices = earcutr::earcut(&flat_coords, &hole_indices, 2);
+    
+    // Convert to f32 for GPU
+    let vertices: Vec<f32> = flat_coords.iter().map(|&v| v as f32).collect();
+    let indices_u32: Vec<u32> = indices.unwrap_or_default().iter().map(|&i| i as u32).collect();
+    
+    (vertices, indices_u32)
+}
+
+/// Generate LODs for a polygon using Douglas-Peucker simplification
+/// Returns array of LODs with progressively higher tolerance
+fn generate_polygon_lods(polygon: &Polygon) -> Vec<(Vec<f32>, Vec<u32>)> {
+    // Compute bounding box diagonal for tolerance scaling
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    
+    for p in &polygon.outer_ring {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    
+    let diag = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt().max(1.0);
+    let base_tol = diag * 0.0005;
+    let max_tol = diag * 0.02;
+    
+    // Generate tolerance levels (similar to Polygon.js)
+    let mut tolerances = vec![0.0]; // LOD0: original
+    while tolerances.len() < 6 && tolerances[tolerances.len() - 1] < max_tol {
+        let next = if tolerances.len() == 1 {
+            base_tol
+        } else {
+            (tolerances[tolerances.len() - 1] * 4.0).min(max_tol)
+        };
+        tolerances.push(next);
+    }
+    
+    // Generate LOD geometries
+    tolerances.iter()
+        .map(|&tol| tessellate_polygon(polygon, tol))
+        .collect()
+}
+
+/// Tessellate pad stack holes with optional annular rings
+/// Groups holes by size for LOD optimization (matching PadStackHoleBatch.js)
+/// Returns separate geometry for rings and holes
+fn tessellate_padstack_holes(
+    holes: &[PadStackHole],
+    segments: u32,
+) -> (Vec<f32>, Vec<u32>, Vec<f32>, Vec<u32>) {
+    let seg = segments.max(8); // Minimum 8 segments for smooth circles
+    
+    let mut ring_verts = Vec::new();
+    let mut ring_indices = Vec::new();
+    let mut hole_verts = Vec::new();
+    let mut hole_indices = Vec::new();
+    
+    let mut ring_vertex_base = 0u32;
+    let mut hole_vertex_base = 0u32;
+    
+    for pad in holes {
+        let hole_r = pad.hole_diameter * 0.5;
+        let outer_r = hole_r + pad.ring_width;
+        
+        // Generate annular ring if ring_width > 0
+        if pad.ring_width > 0.0 {
+            for i in 0..=seg {
+                let angle = (i as f32 / seg as f32) * std::f32::consts::PI * 2.0;
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+                
+                // Outer vertex
+                ring_verts.push(pad.x + cos_a * outer_r);
+                ring_verts.push(pad.y + sin_a * outer_r);
+                
+                // Inner vertex
+                ring_verts.push(pad.x + cos_a * hole_r);
+                ring_verts.push(pad.y + sin_a * hole_r);
+            }
+            
+            // Generate quad indices for ring
+            for i in 0..seg {
+                let o = ring_vertex_base + i * 2;
+                ring_indices.extend_from_slice(&[
+                    o, o + 1, o + 2,
+                    o + 2, o + 1, o + 3,
+                ]);
+            }
+            
+            ring_vertex_base += (seg + 1) * 2;
+        }
+        
+        // Generate hole as triangle fan (always present)
+        let center_index = hole_vertex_base;
+        hole_verts.push(pad.x);
+        hole_verts.push(pad.y);
+        hole_vertex_base += 1;
+        
+        for i in 0..=seg {
+            let angle = (i as f32 / seg as f32) * std::f32::consts::PI * 2.0;
+            hole_verts.push(pad.x + angle.cos() * hole_r);
+            hole_verts.push(pad.y + angle.sin() * hole_r);
+            hole_vertex_base += 1;
+        }
+        
+        // Triangle fan indices
+        for i in 0..seg {
+            hole_indices.extend_from_slice(&[
+                center_index,
+                center_index + 1 + i,
+                center_index + 1 + i + 1,
+            ]);
+        }
+    }
+    
+    (ring_verts, ring_indices, hole_verts, hole_indices)
+}
+
 fn should_debug_layer(layer_id: &str) -> bool {
     match env::var("DEBUG_TESSELLATION_LAYER") {
         Ok(val) => {
@@ -920,25 +1294,106 @@ fn debug_print_polyline(
     }
 }
 
-/// Generate LayerJSON for all LODs of polylines in a layer
+/// Generate LayerJSON for all geometry types (polylines, polygons, pad stacks) in a layer
 pub fn generate_layer_json(
     layer_id: &str,
     layer_name: &str,
     color: [f32; 4],
-    polylines: &[Polyline],
+    geometries: &LayerGeometries,
     culling_stats: &mut CullingStats,
 ) -> Result<LayerJSON, anyhow::Error> {
-    let mut lod_geometries = Vec::new();
+    let layer_start = std::time::Instant::now();
+    
+    // Generate polyline geometry (opaque, no alpha) - for batch.wgsl
+    let polyline_lods = if !geometries.polylines.is_empty() {
+        generate_polyline_geometry(layer_id, layer_name, &geometries.polylines, culling_stats)?
+    } else {
+        Vec::new()
+    };
+    
+    // Generate polygon geometry (with alpha) - for batch_colored.wgsl
+    let polygon_lods = if !geometries.polygons.is_empty() {
+        if std::env::var("PROFILE_TIMING").is_ok() {
+            println!("    [{}] Processing {} polygons", layer_name, geometries.polygons.len());
+        }
+        let lods = generate_polygon_geometry(&geometries.polygons)?;
+        if std::env::var("PROFILE_TIMING").is_ok() && !lods.is_empty() {
+            println!("    [{}] Generated {} polygon LODs with {} vertices", 
+                layer_name, lods.len(), lods[0].vertex_count);
+        }
+        lods
+    } else {
+        Vec::new()
+    };
+    
+    // TODO: Add pad stack holes similarly with alpha for rings vs holes
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("    [{}] Total layer time: {:.2}ms\n", layer_name, layer_start.elapsed().as_secs_f64() * 1000.0);
+    }
+    
+    let mut shader_geom = ShaderGeometry::default();
+    shader_geom.batch = if polyline_lods.is_empty() {
+        None
+    } else {
+        Some(polyline_lods)
+    };
+    shader_geom.batch_colored = if polygon_lods.is_empty() {
+        None
+    } else {
+        Some(polygon_lods)
+    };
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("    [{}] ShaderGeometry: batch={}, batch_colored={}", 
+            layer_name, 
+            shader_geom.batch.is_some(),
+            shader_geom.batch_colored.is_some());
+        
+        // Debug: serialize and check JSON output
+        if let Ok(json_str) = serde_json::to_string(&shader_geom) {
+            let has_batch_colored = json_str.contains("batch_colored");
+            println!("    [{}] JSON contains batch_colored: {}", layer_name, has_batch_colored);
+            if !has_batch_colored && shader_geom.batch_colored.is_some() {
+                println!("    [{}] WARNING: batch_colored is Some but not in JSON!", layer_name);
+            }
+        }
+    }
+
+    Ok(LayerJSON {
+        layer_id: layer_id.to_string(),
+        layer_name: layer_name.to_string(),
+        default_color: color,
+        geometry: shader_geom,
+    })
+}
+
+/// Generate polyline LOD geometry (extracted from original generate_layer_json)
+fn generate_polyline_geometry(
+    layer_id: &str,
+    layer_name: &str,
+    polylines: &[Polyline],
+    culling_stats: &mut CullingStats,
+) -> Result<Vec<GeometryLOD>, anyhow::Error> {
+    let mut lod_geometries: Vec<GeometryLOD> = Vec::new();
 
     // Generate LODs for all polylines
+    let lod_gen_start = std::time::Instant::now();
     let mut all_lod_points: Vec<Vec<Vec<Point>>> = Vec::new();
     
     for polyline in polylines {
         let lods = generate_polyline_lods(polyline);
         all_lod_points.push(lods);
     }
+    let lod_gen_time = lod_gen_start.elapsed();
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("    [{}] LOD generation: {:.2}ms ({} polylines)",
+                 layer_name, lod_gen_time.as_secs_f64() * 1000.0, polylines.len());
+    }
 
     // For each LOD level, batch all polylines at that LOD
+    let batch_start = std::time::Instant::now();
     let debug_this_layer = should_debug_layer(layer_id);
     let mut debug_header_printed = false;
     culling_stats.total_polylines += polylines.len();
@@ -1003,7 +1458,15 @@ pub fn generate_layer_json(
         }
 
         // Batch all polylines at this LOD into single vertex/index buffer
+        let tessellate_start = std::time::Instant::now();
         let (verts, indices) = batch_polylines_with_styles(&lod_polylines_data);
+        let tessellate_time = tessellate_start.elapsed();
+        
+        if std::env::var("PROFILE_TIMING").is_ok() && !lod_polylines_data.is_empty() {
+            println!("      LOD{}: tessellation {:.2}ms ({} polylines -> {} verts, {} indices)",
+                     lod_idx, tessellate_time.as_secs_f64() * 1000.0,
+                     lod_polylines_data.len(), verts.len() / 2, indices.len());
+        }
 
         if verts.is_empty() || indices.is_empty() {
             continue;
@@ -1017,6 +1480,7 @@ pub fn generate_layer_json(
             vertex_count,
             index_data: Some(indices),
             index_count: Some(index_count),
+            alpha_data: None, // Will be added later in generate_layer_json
         };
 
         lod_geometries.push(geometry_lod);
@@ -1039,29 +1503,110 @@ pub fn generate_layer_json(
         }
     }
 
-    let mut shader_geom = ShaderGeometry::default();
-    shader_geom.batch = if lod_geometries.is_empty() {
-        None
-    } else {
-        Some(lod_geometries)
-    };
+    let batch_time = batch_start.elapsed();
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("    [{}] Batching/tessellation: {:.2}ms", layer_name, batch_time.as_secs_f64() * 1000.0);
+    }
+    
+    Ok(lod_geometries)
+}
 
-    Ok(LayerJSON {
-        layer_id: layer_id.to_string(),
-        layer_name: layer_name.to_string(),
-        default_color: color,
-        geometry: shader_geom,
-    })
+/// Generate polygon LOD geometry using earcut triangulation
+fn generate_polygon_geometry(polygons: &[Polygon]) -> Result<Vec<GeometryLOD>, anyhow::Error> {
+    // Batch all polygons into single vertex/index buffer
+    let mut all_verts = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for polygon in polygons {
+        let (verts, indices) = tessellate_polygon(polygon, 0.0); // LOD0: no simplification
+        
+        // Offset indices by current vertex count
+        let vert_offset = (all_verts.len() / 2) as u32;
+        all_verts.extend(verts);
+        all_indices.extend(indices.iter().map(|&i| i + vert_offset));
+    }
+    
+    if all_verts.is_empty() || all_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Create single LOD level with alpha from polygon fill colors
+    let vert_count = all_verts.len() / 2;
+    let index_count = all_indices.len();
+    
+    // Extract alpha values from polygon fill colors
+    let mut alpha_values = Vec::with_capacity(vert_count);
+    for polygon in polygons {
+        let (verts, _) = tessellate_polygon(polygon, 0.0);
+        let poly_vert_count = verts.len() / 2;
+        let alpha = polygon.fill_color[3]; // Use alpha from fill_color
+        alpha_values.extend(vec![alpha; poly_vert_count]);
+    }
+    
+    let geometry_lod = GeometryLOD {
+        vertex_data: all_verts,
+        vertex_count: vert_count,
+        index_data: Some(all_indices),
+        index_count: Some(index_count),
+        alpha_data: Some(alpha_values),
+    };
+    
+    Ok(vec![geometry_lod])
+}
+
+/// Generate pad stack hole geometry (rings + holes)
+fn generate_padstack_geometry(holes: &[PadStackHole]) -> Result<Vec<GeometryLOD>, anyhow::Error> {
+    let segments = 24; // Smooth circles
+    let (ring_verts, ring_indices, hole_verts, hole_indices) = 
+        tessellate_padstack_holes(holes, segments);
+    
+    // Combine rings and holes into single geometry
+    // Draw order: rings first (with color), then holes (black) to mask centers
+    let mut combined_verts = ring_verts;
+    let mut combined_indices = ring_indices;
+    let vert_count_before_holes = combined_verts.len() / 2;
+    
+    // Calculate hole vert count before moving
+    let hole_vert_count = hole_verts.len() / 2;
+    
+    // Offset hole indices by ring vertex count
+    let vert_offset = vert_count_before_holes as u32;
+    combined_verts.extend(hole_verts);
+    combined_indices.extend(hole_indices.iter().map(|&i| i + vert_offset));
+    let total_index_count = combined_indices.len();
+    
+    if combined_verts.is_empty() || combined_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    let geometry_lod = GeometryLOD {
+        vertex_data: combined_verts,
+        vertex_count: vert_count_before_holes + hole_vert_count,
+        index_data: Some(combined_indices),
+        index_count: Some(total_index_count),
+        alpha_data: None, // Pad stacks are opaque
+    };
+    
+    Ok(vec![geometry_lod]) // Single LOD for now
 }
 
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
 pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, anyhow::Error> {
+    let total_start = std::time::Instant::now();
     let mut layer_jsons = Vec::new();
     let mut layers_seen = std::collections::HashSet::new();
     let mut total_culling_stats = CullingStats::default();
 
     // Parse line descriptors from DictionaryLineDesc
+    let parse_start = std::time::Instant::now();
     let line_descriptors = parse_line_descriptors(root);
+    let parse_time = parse_start.elapsed();
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("\n=== Detailed Timing Profile ===");
+        println!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
+    }
 
     // Find Ecad node which contains all the CAD data
     let ecad_node = root
@@ -1078,7 +1623,14 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
         .ok_or_else(|| anyhow::anyhow!("No CadData node found"))?;
 
     // Find all LayerFeature nodes and process them
+    let collect_start = std::time::Instant::now();
     collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors, &mut total_culling_stats)?;
+    let collect_time = collect_start.elapsed();
+    
+    if std::env::var("PROFILE_TIMING").is_ok() {
+        println!("\nTotal collection time: {:.2}ms", collect_time.as_secs_f64() * 1000.0);
+        println!("TOTAL TESSELLATION TIME: {:.2}ms\n", total_start.elapsed().as_secs_f64() * 1000.0);
+    }
 
     // Print summary if we culled anything
     if total_culling_stats.lod_culled.iter().any(|&c| c > 0) {
@@ -1112,11 +1664,17 @@ fn collect_layer_features(
             if !layers_seen.contains(layer_ref) {
                 layers_seen.insert(layer_ref.clone());
                 
-                // Collect all polylines from this LayerFeature
-                let mut polylines = Vec::new();
-                collect_polylines_from_node(node, &mut polylines, line_descriptors);
+                // Collect all geometries from this LayerFeature
+                let mut geometries = LayerGeometries {
+                    layer_ref: layer_ref.clone(),
+                    polylines: Vec::new(),
+                    polygons: Vec::new(),
+                    padstack_holes: Vec::new(),
+                };
+                collect_geometries_from_node(node, &mut geometries, line_descriptors);
                 
-                if !polylines.is_empty() {
+                // Only generate layer if it has any geometry
+                if !geometries.polylines.is_empty() || !geometries.polygons.is_empty() || !geometries.padstack_holes.is_empty() {
                     // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
                     let layer_name = layer_ref
                         .split(':')
@@ -1131,7 +1689,7 @@ fn collect_layer_features(
                         layer_ref,
                         &layer_name,
                         color,
-                        &polylines,
+                        &geometries,
                         culling_stats,
                     )?;
                     
@@ -1205,26 +1763,33 @@ fn get_layer_color(layer_ref: &str) -> [f32; 4] {
     [0.7, 0.7, 0.7, 1.0] // default gray
 }
 
-/// Recursively collect all Polyline elements from a specific node
-fn collect_polylines_from_node(
+/// Recursively collect all geometry elements from a specific node
+fn collect_geometries_from_node(
     node: &XmlNode,
-    polylines: &mut Vec<Polyline>,
+    geometries: &mut LayerGeometries,
     line_descriptors: &IndexMap<String, LineDescriptor>,
 ) {
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
         if let Ok(polyline) = parse_polyline_node(node, line_descriptors) {
-            polylines.push(polyline);
+            geometries.polylines.push(polyline);
         }
     } else if node.name == "Line" {
         if let Ok(line_polyline) = parse_line_node(node, line_descriptors) {
-            polylines.push(line_polyline);
+            geometries.polylines.push(line_polyline);
+        }
+    } else if node.name == "Polygon" {
+        // Parse filled polygon shapes
+        if let Ok(polygon) = parse_polygon_node(node) {
+            geometries.polygons.push(polygon);
         }
     }
+    // Note: Pad stack holes are collected separately via parse_padstack_definitions
+    // and instantiated at component locations
 
     // Recursively search all children
     for child in &node.children {
-        collect_polylines_from_node(child, polylines, line_descriptors);
+        collect_geometries_from_node(child, geometries, line_descriptors);
     }
 }
 
@@ -1290,6 +1855,7 @@ mod tests {
             vertex_count: 2,
             index_data: Some(vec![0, 1, 2]),
             index_count: Some(3),
+            alpha_data: None,
         };
         let json = serde_json::to_string(&lod).unwrap();
         assert!(json.contains("vertexData"));

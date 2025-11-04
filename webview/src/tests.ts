@@ -67,11 +67,13 @@ function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
   offset += 16;
   
   // Read geometry data
-  const numLods = view.getUint32(offset, true);
+  
+  // Read batch geometry (polylines without alpha)
+  const numBatchLods = view.getUint32(offset, true);
   offset += 4;
   
-  const lods = [];
-  for (let i = 0; i < numLods; i++) {
+  const batchLods = [];
+  for (let i = 0; i < numBatchLods; i++) {
     const vertexCount = view.getUint32(offset, true);
     offset += 4;
     const indexCount = view.getUint32(offset, true);
@@ -85,7 +87,7 @@ function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
     const indexData = indexCount > 0 ? Array.from(new Uint32Array(buffer, offset, indexCount)) : undefined;
     offset += indexCount * 4;
     
-    lods.push({
+    batchLods.push({
       vertexData,
       vertexCount,
       indexData,
@@ -93,12 +95,62 @@ function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
     });
   }
   
+  // Read batch_colored geometry (polygons with alpha)
+  const numColoredLods = view.getUint32(offset, true);
+  offset += 4;
+  
+  const coloredLods = [];
+  for (let i = 0; i < numColoredLods; i++) {
+    const vertexCount = view.getUint32(offset, true);
+    offset += 4;
+    const indexCount = view.getUint32(offset, true);
+    offset += 4;
+    const hasAlpha = view.getUint8(offset);
+    offset += 1;
+    // Skip 3 bytes padding
+    offset += 3;
+    
+    // Zero-copy view into buffer for vertex data
+    const vertexData = Array.from(new Float32Array(buffer, offset, vertexCount * 2));
+    offset += vertexCount * 2 * 4; // 2 floats per vertex, 4 bytes per float
+    
+    // Zero-copy view into buffer for index data
+    const indexData = indexCount > 0 ? Array.from(new Uint32Array(buffer, offset, indexCount)) : undefined;
+    offset += indexCount * 4;
+    
+    // Read alpha data if present
+    let alphaData = undefined;
+    if (hasAlpha) {
+      const alphaArray = new Float32Array(buffer, offset, vertexCount);
+      // Base64 encode the alpha array to match what Rust would send
+      const alphaBytes = new Uint8Array(alphaArray.buffer, alphaArray.byteOffset, alphaArray.byteLength);
+      const alphaBinary = String.fromCharCode(...alphaBytes);
+      alphaData = btoa(alphaBinary);
+      offset += vertexCount * 4;
+    }
+    
+    coloredLods.push({
+      vertexData,
+      vertexCount,
+      indexData,
+      indexCount,
+      alphaData
+    });
+  }
+  
+  // Debug logging
+  console.log(`[parseBinaryLayer] Parsed ${layerId}: batch=${batchLods.length} LODs, batch_colored=${coloredLods.length} LODs`);
+  if (coloredLods.length > 0) {
+    console.log(`[parseBinaryLayer] First colored LOD: ${coloredLods[0].vertexCount} vertices, alphaData=${coloredLods[0].alphaData ? 'present' : 'missing'}`);
+  }
+  
   return {
     layerId,
     layerName,
     defaultColor: color,
     geometry: {
-      batch: lods.length > 0 ? lods : undefined
+      batch: batchLods.length > 0 ? batchLods : undefined,
+      batch_colored: coloredLods.length > 0 ? coloredLods : undefined
     }
   };
 }
@@ -142,16 +194,21 @@ async function handleTestMessage(message: unknown, testCaseName: string) {
       const startTime = performance.now();
       console.log(`[TEST] Loading tessellation data: ${testCaseName}`);
       
-      // Fetch the binary file from test data directory
-      const binaryPath = `/src/test-data/${testCaseName}.bin`;
+      // Use dynamic import with ?url suffix to get the file URL
+      const modulePath = `./test-data/layer_${testCaseName}.bin?url`;
       
-      console.log(`[TEST] Fetching from: ${binaryPath}`);
+      console.log(`[TEST] Importing: ${modulePath}`);
       const fetchStart = performance.now();
-      const response = await fetch(binaryPath);
+      
+      // Dynamic import returns the URL as default export
+      const module = await import(/* @vite-ignore */ modulePath);
+      const binaryUrl = module.default;
+      
+      const response = await fetch(binaryUrl);
       const fetchEnd = performance.now();
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch ${binaryPath}: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch ${binaryUrl}: ${response.status} ${response.statusText}`);
       }
       
       // Decode custom binary format to LayerJSON
@@ -201,7 +258,7 @@ async function handleTestMessage(message: unknown, testCaseName: string) {
  * Setup webview to listen for test API messages and load all available layers
  * Call this from main.ts to enable test mode
  * 
- * Automatically discovers and loads all layer JSON files from test-data directory
+ * Automatically discovers and loads all layer binary files from test-data directory
  * Triggers in development (vite/npm) unless explicitly disabled
  */
 export async function setupTestListeners() {
@@ -247,28 +304,24 @@ export async function setupTestListeners() {
 
 /**
  * Get list of available test cases from output directory
- * Discovers all layer_*.json files dynamically using Vite's glob
  */
 export async function discoverTestLayers(): Promise<string[]> {
-  try {
-    // Use Vite's glob for development - imports all layer JSON files from output directory
-    // @ts-ignore - Vite's glob is not in standard ImportMeta types but works at runtime
-    const layerModules = import.meta.glob<{ default: unknown }>('/src/test-data/layer_*.json');    
-    const layerNames = Object.keys(layerModules)
-      .map(filepath => {
-        // Extract filename from path: /output/layer_LAYER_X.json -> layer_LAYER_X
-        const match = filepath.match(/\/([^/]+)\.json$/);
-        return match ? match[1] : '';
-      })
-      .filter(Boolean)
-      .sort();
-    
-    console.log('[TEST] Discovered layers:', layerNames);
-    return layerNames;
-  } catch (error) {
-    console.warn('[TEST] Could not discover test layers:', error);
-    return [];
-  }
+  // Hardcoded list of test layers - matches files in test-data directory
+  return [
+    'LAYER_B.Courtyard',
+    'LAYER_B.Cu',
+    'LAYER_B.Fab',
+    'LAYER_B.Silkscreen',
+    'LAYER_Edge.Cuts',
+    'LAYER_F.Courtyard',
+    'LAYER_F.Cu',
+    'LAYER_F.Fab',
+    'LAYER_F.Silkscreen',
+    'LAYER_In1.Cu',
+    'LAYER_In2.Cu',
+    'LAYER_User.1',
+    'LAYER_User.4',
+  ];
 }
 
 
@@ -284,14 +337,14 @@ export async function getAvailableTestCases(): Promise<string[]> {
     }
     const text = await response.text();
     
-    // Parse HTML directory listing - look for layer_*.json files
-    const jsonFiles = (text.match(/href="(layer_[^"]*\.json)"/g) || [])
+    // Parse HTML directory listing - look for layer_*.bin files
+    const binFiles = (text.match(/href="(layer_[^"]*\.bin)"/g) || [])
       .map(match => match.match(/href="([^"]*)"/)?.[1] || '')
-      .map(filename => filename.replace('.json', ''))
+      .map(filename => filename.replace('.bin', ''))
       .filter(Boolean)
       .sort();
     
-    return jsonFiles;
+    return binFiles;
   } catch (error) {
     console.warn('[TEST] Could not fetch test data directory:', error);
     return [];

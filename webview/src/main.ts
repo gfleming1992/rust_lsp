@@ -1,4 +1,5 @@
 import basicShaderCode from "./shaders/basic.wgsl?raw";
+import basicNoAlphaShaderCode from "./shaders/basic_noalpha.wgsl?raw";
 import { setupTestListeners } from "./tests";
 
 // PCB Viewer with Multi-Shader Architecture
@@ -54,7 +55,8 @@ export interface ShaderGeometry {
   instanced_colored?: GeometryLOD[]; // For instanced_colored.wgsl - repeated with per-vertex alpha
   instanced_rot?: GeometryLOD[];   // For instanced_rot.wgsl - repeated geometry with 0°/90°/180°/270° rotation (pads)
   instanced_rot_colored?: GeometryLOD[]; // For instanced_rot_colored.wgsl - repeated with rotation and per-vertex alpha
-  batch?: GeometryLOD[];           // For batch.wgsl - many unique items in one draw (PCB traces)
+  batch?: GeometryLOD[];           // For basic_noalpha.wgsl - polylines (opaque, no per-vertex alpha needed)
+  batch_colored?: GeometryLOD[];   // For basic.wgsl - polygons with per-vertex alpha transparency
   batch_instanced?: GeometryLOD[]; // For batch_instanced.wgsl - multiple types, each repeated (via types)
   batch_instanced_rot?: GeometryLOD[]; // For batch_instanced_rot.wgsl - multiple types with rotation (pad types)
 }
@@ -104,6 +106,7 @@ interface GPUBufferInfo {
 // Minimal per-layer render data (step 1: vertices + alpha by LOD)
 interface LayerRenderData {
   layerId: string;
+  shaderType: keyof ShaderGeometry; // Which shader type this layer uses
   lodBuffers: GPUBuffer[];
   lodAlphaBuffers: (GPUBuffer | null)[];
   lodVertexCounts: number[];
@@ -195,7 +198,8 @@ let debugLogEl: HTMLDivElement | null = null;
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
-let pipeline: GPURenderPipeline;
+let pipelineNoAlpha: GPURenderPipeline; // For batch (polylines without alpha)
+let pipelineWithAlpha: GPURenderPipeline; // For batch_colored and basic (polygons with per-vertex alpha)
 let vertexBuffer: GPUBuffer;
 let uniformBuffer: GPUBuffer;
 let bindGroup: GPUBindGroup;
@@ -335,9 +339,10 @@ function loadLayerData(layerJson: LayerJSON) {
   registerLayerInfo(layerJson);
   startup.rebuildStart = performance.now();
   
-  // Use priority order for geometry types: prefer batch (most optimized), fall back to basic
-  const geometryPriority: Array<[keyof ShaderGeometry, GeometryLOD[] | undefined]> = [
+  // Load ALL available geometry types for this layer (not just the first one)
+  const geometryTypes: Array<[keyof ShaderGeometry, GeometryLOD[] | undefined]> = [
     ["batch", layerJson.geometry.batch],
+    ["batch_colored", layerJson.geometry.batch_colored],
     ["batch_instanced", layerJson.geometry.batch_instanced],
     ["batch_instanced_rot", layerJson.geometry.batch_instanced_rot],
     ["instanced_rot_colored", layerJson.geometry.instanced_rot_colored],
@@ -347,21 +352,45 @@ function loadLayerData(layerJson: LayerJSON) {
     ["basic", layerJson.geometry.basic]
   ];
   
-  let geometryLODs: GeometryLOD[] = [];
-  let currentShaderType: string | null = null;
-  for (const [shaderKey, lods] of geometryPriority) {
-    if (lods && lods.length) {
-      geometryLODs = lods;
-      currentShaderType = shaderKey;
-      break;
-    }
+  console.log(`[loadLayerData] ${layerJson.layerId} geometry keys:`, Object.keys(layerJson.geometry), 
+    'batch:', layerJson.geometry.batch ? `${layerJson.geometry.batch.length} LODs` : 'none',
+    'batch_colored:', layerJson.geometry.batch_colored ? `${layerJson.geometry.batch_colored.length} LODs` : 'none');
+  
+  let loadedAnyGeometry = false;
+  
+  // Load each geometry type that exists
+  for (const [shaderKey, lods] of geometryTypes) {
+    if (!lods || lods.length === 0) continue;
+    
+    loadedAnyGeometry = true;
+    const renderKey = shaderKey === 'batch' ? layerJson.layerId : `${layerJson.layerId}_${shaderKey}`;
+    
+    console.log(`[loadLayerData] Loading ${shaderKey} geometry for ${layerJson.layerId} (${lods.length} LODs)`);
+    
+    loadGeometryType(layerJson, renderKey, shaderKey, lods);
   }
   
-  if (geometryLODs.length === 0) {
+  if (!loadedAnyGeometry) {
     console.warn(`No geometry data found for layer ${layerJson.layerId}`);
     return;
   }
-  
+
+  const loadEnd = performance.now();
+  const loadTime = loadEnd - loadStart;
+  console.log(`[loadLayerData] Loaded layer ${layerJson.layerId} in ${loadTime.toFixed(2)}ms`);
+
+  startup.rebuildEnd = performance.now();
+}
+
+/**
+ * Load a specific geometry type for a layer
+ */
+function loadGeometryType(
+  layerJson: LayerJSON,
+  renderKey: string,
+  shaderKey: keyof ShaderGeometry,
+  geometryLODs: GeometryLOD[]
+) {
   // Build per-layer buffers (do not replace previous layers)
   const lodBuffers: GPUBuffer[] = [];
   const lodAlphaBuffers: (GPUBuffer | null)[] = [];
@@ -450,14 +479,18 @@ function loadLayerData(layerJson: LayerJSON) {
     size: uniformData.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
+  
+  // Create bind group using the correct pipeline layout based on shader type
+  const usePipeline = (shaderKey === 'batch') ? pipelineNoAlpha : pipelineWithAlpha;
   const layerBindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
+    layout: usePipeline.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: layerUniformBuffer } }]
   });
 
-  // Store per-layer render data
-  layerRenderData.set(layerJson.layerId, {
-    layerId: layerJson.layerId,
+  // Store per-layer render data with unique key (base layerId for 'batch', suffixed for others)
+  layerRenderData.set(renderKey, {
+    layerId: layerJson.layerId, // Keep original layerId for color lookups
+    shaderType: shaderKey,
     lodBuffers,
     lodAlphaBuffers,
     lodVertexCounts,
@@ -468,19 +501,7 @@ function loadLayerData(layerJson: LayerJSON) {
     bindGroup: layerBindGroup
   });
 
-  const loadEnd = performance.now();
-  const loadTime = loadEnd - loadStart;
-  const otherTime = loadTime - totalDecodeTime - totalUploadTime;
-  console.log(`Loaded layer ${layerJson.layerId} in ${loadTime.toFixed(2)}ms (decode: ${totalDecodeTime.toFixed(1)}ms, upload: ${totalUploadTime.toFixed(1)}ms, other: ${otherTime.toFixed(1)}ms) - ${lodBuffers.length} LODs (${currentShaderType || "unknown"} geometry):`);
-  lodVertexCounts.forEach((count, i) => {
-    const kb = (lodBuffers[i]?.size || 0) / 1024;
-    const ic = (layerRenderData.get(layerJson.layerId)?.lodIndexCounts?.[i]) ?? 0;
-    const idxInfo = ic > 0 ? `, ${ic} indices` : ``;
-    console.log(`  LOD${i}: ${count} vertices${idxInfo} (${kb.toFixed(2)} KB)`);
-  });
-  
-  startup.rebuildEnd = performance.now();
-  scheduleDraw();
+  console.log(`  Loaded ${shaderKey} geometry: ${lodBuffers.length} LODs, ${lodVertexCounts.reduce((a, b) => a + b, 0)} total vertices`);
 }
 
 function applyLayerColor(layerId: string) {
@@ -841,42 +862,56 @@ function render() {
   });
 
   // Draw all visible layers sequentially (shared color for now)
+  // Iterate over layer order, but render ALL geometry types for each visible layer
   let drawn = 0;
   let totalVertices = 0;
   let totalIndices = 0;
   for (const layerId of layerOrder) {
     if (layerVisible.get(layerId) === false) continue;
-    const data = layerRenderData.get(layerId);
-    if (!data) continue;
     
-    // Skip if requested LOD doesn't exist for this layer (fall back to last available)
-    const actualLOD = Math.min(currentLOD, data.lodBuffers.length - 1);
-    const vb = data.lodBuffers[actualLOD];
-    const count = data.lodVertexCounts[actualLOD];
-    if (!vb || !count) continue;
-    totalVertices += count;
+    // Render all geometry types for this layer (batch, batch_colored, etc.)
+    // Check both the base layerId and suffixed versions
+    for (const [renderKey, data] of layerRenderData.entries()) {
+      // Only render if this render data belongs to the current layer
+      if (data.layerId !== layerId) continue;
+      
+      // Skip if requested LOD doesn't exist for this layer (fall back to last available)
+      const actualLOD = Math.min(currentLOD, data.lodBuffers.length - 1);
+      const vb = data.lodBuffers[actualLOD];
+      const count = data.lodVertexCounts[actualLOD];
+      if (!vb || !count) continue;
+      totalVertices += count;
 
-    pass.setPipeline(pipeline);
-    pass.setVertexBuffer(0, vb);
-    const alphaBuf = data.lodAlphaBuffers[actualLOD];
-    if (alphaBuf) pass.setVertexBuffer(1, alphaBuf);
-    // Update this layer's uniform buffer with its color + current matrix
-    const layerColor = getLayerColor(layerId);
-    uniformData.set(layerColor, 0);
-    device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+      // Choose pipeline based on shader type
+      const usePipeline = (data.shaderType === 'batch') ? pipelineNoAlpha : pipelineWithAlpha;
+      pass.setPipeline(usePipeline);
+      pass.setVertexBuffer(0, vb);
+      
+      // Only set alpha buffer for pipelines that use it (batch_colored, basic, etc.)
+      if (data.shaderType !== 'batch') {
+        const alphaBuf = data.lodAlphaBuffers[actualLOD];
+        if (alphaBuf) {
+          pass.setVertexBuffer(1, alphaBuf);
+        }
+      }
+      // Update this layer's uniform buffer with its color + current matrix
+      const layerColor = getLayerColor(data.layerId);
+      uniformData.set(layerColor, 0);
+      device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
 
-    pass.setBindGroup(0, data.bindGroup);
-    // If index buffer present for this LOD, use drawIndexed
-    const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
-    const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
-    if (ib && ic > 0) {
-      pass.setIndexBuffer(ib, "uint32");
-      pass.drawIndexed(ic);
-      totalIndices += ic;
-    } else {
-      pass.draw(count);
+      pass.setBindGroup(0, data.bindGroup);
+      // If index buffer present for this LOD, use drawIndexed
+      const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
+      const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
+      if (ib && ic > 0) {
+        pass.setIndexBuffer(ib, "uint32");
+        pass.drawIndexed(ic);
+        totalIndices += ic;
+      } else {
+        pass.draw(count);
+      }
+      drawn++;
     }
-    drawn++;
   }
   pass.end();
 
@@ -944,16 +979,14 @@ async function init() {
   context = ctx;
   canvasFormat = gpu.getPreferredCanvasFormat();
 
-  const shaderModule = device.createShaderModule({ code: basicShaderCode });
+  const shaderModuleWithAlpha = device.createShaderModule({ code: basicShaderCode });
+  const shaderModuleNoAlpha = device.createShaderModule({ code: basicNoAlphaShaderCode });
 
-  // Create a pipeline using basic.wgsl (always supports per-vertex alpha at location(1)).
-  // Vertex buffer layout includes:
-  //  - slot 0: vec2<f32> position (location 0)
-  //  - slot 1: float32 alpha (location 1) - always bound (1.0 if not provided by Rust)
-  pipeline = device.createRenderPipeline({
+  // Pipeline for batch_colored and basic geometry (with per-vertex alpha at location(1))
+  pipelineWithAlpha = device.createRenderPipeline({
     layout: "auto",
     vertex: {
-      module: shaderModule,
+      module: shaderModuleWithAlpha,
       entryPoint: "vs_main",
       buffers: [
         {
@@ -961,14 +994,50 @@ async function init() {
           attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
         },
         {
-          // Per-vertex alpha buffer (1 float per vertex, defaults to 1.0)
+          // Per-vertex alpha buffer (1 float per vertex)
           arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
           attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
         }
       ]
     },
     fragment: {
-      module: shaderModule,
+      module: shaderModuleWithAlpha,
+      entryPoint: "fs_main",
+      targets: [{
+        format: canvasFormat,
+        blend: {
+          color: {
+            srcFactor: "src-alpha",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          },
+          alpha: {
+            srcFactor: "one",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          }
+        }
+      }]
+    },
+    primitive: { topology: "triangle-list" }
+  });
+
+  // Pipeline for batch geometry (polylines without alpha, uses layer color alpha)
+  pipelineNoAlpha = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: shaderModuleNoAlpha,
+      entryPoint: "vs_main",
+      buffers: [
+        {
+          // Only position, no alpha attribute
+          arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+        }
+      ]
+    },
+    fragment: {
+      module: shaderModuleNoAlpha,
       entryPoint: "fs_main",
       targets: [{
         format: canvasFormat,
@@ -1001,7 +1070,7 @@ async function init() {
   });
 
   bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
+    layout: pipelineWithAlpha.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
   });
 
@@ -1103,19 +1172,50 @@ async function init() {
   updateStats(true);
   scheduleDraw();
 
+  // Batch layer loading state
+  let pendingLayers: LayerJSON[] = [];
+  let batchTimeout: number | null = null;
+  const BATCH_DELAY_MS = 50; // Wait 50ms after last layer before rendering
+
+  function processPendingLayers() {
+    if (pendingLayers.length === 0) return;
+    
+    const batchStart = performance.now();
+    console.log(`[BATCH] Processing ${pendingLayers.length} layers at once...`);
+    
+    // Load all layers
+    for (const layerJson of pendingLayers) {
+      loadLayerData(layerJson);
+      applyLayerColor(layerJson.layerId);
+    }
+    
+    // Refresh UI and trigger single render
+    refreshLayerLegend();
+    scheduleDraw();
+    
+    const batchEnd = performance.now();
+    console.log(`[BATCH] Loaded ${pendingLayers.length} layers in ${(batchEnd - batchStart).toFixed(1)}ms`);
+    
+    pendingLayers = [];
+    batchTimeout = null;
+  }
+
   // Listen for messages from extension (or test API)
   window.addEventListener("message", (event) => {
     const data = event.data as Record<string, unknown>;
     
     if (data.command === "tessellationData" && data.payload) {
-      startup.fetchStart = performance.now();
       const layerJson = data.payload as LayerJSON;
-      console.log(`Received tessellation data from extension: ${layerJson.layerId}`);
-      loadLayerData(layerJson);
-      startup.parseEnd = performance.now();
-      applyLayerColor(layerJson.layerId);
-      refreshLayerLegend();
-      scheduleDraw();
+      console.log(`[BATCH] Queued layer: ${layerJson.layerId} (${pendingLayers.length + 1} total)`);
+      
+      pendingLayers.push(layerJson);
+      
+      // Reset batch timer - wait for more layers
+      if (batchTimeout !== null) {
+        clearTimeout(batchTimeout);
+      }
+      batchTimeout = window.setTimeout(processPendingLayers, BATCH_DELAY_MS);
+      
     } else if (data.command === "error") {
       console.error(`Extension error: ${data.message}`);
     }

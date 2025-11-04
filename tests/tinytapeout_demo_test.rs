@@ -54,24 +54,32 @@ mod tests {
 
     #[test]
     fn test_tinytapeout_demo_tessellation() {
-        let xml_path = "tests/tinytapeout-demo.xml";
-        let root = parse_xml_file(xml_path).expect("Failed to parse XML");
+        // Enable detailed timing profiling
+        std::env::set_var("PROFILE_TIMING", "1");
         
-        println!("\n=== XML Tessellation & LOD Generation ===");
+        let xml_path = "tests/tinytapeout-demo.xml";
+        
+        println!("\n=== XML Tessellation & LOD Generation (Release Mode) ===");
         println!("File: tinytapeout-demo.xml");
+        
+        let parse_start = Instant::now();
+        let root = parse_xml_file(xml_path).expect("Failed to parse XML");
+        let parse_time = parse_start.elapsed();
+        println!("XML parsing: {:.3}ms", parse_time.as_secs_f64() * 1000.0);
         
         let start = Instant::now();
         let layer_jsons = extract_and_generate_layers(&root)
             .expect("Failed to extract layers and generate LODs");
         let tessellation_time = start.elapsed();
         
-        println!("Tessellation time: {:.3}ms", tessellation_time.as_secs_f64() * 1000.0);
+        println!("\nOverall tessellation time: {:.3}ms", tessellation_time.as_secs_f64() * 1000.0);
         println!("Layers found: {}", layer_jsons.len());
         
         // Ensure output directory exists
         fs::create_dir_all("output").expect("Failed to create output directory");
         
         // Write each layer to custom binary file
+        let write_start = Instant::now();
         let mut total_bytes = 0;
         for layer_json in &layer_jsons {
             let filename = format!("webview/src/test-data/layer_{}.bin", layer_json.layer_id.replace(":", "_"));
@@ -93,8 +101,11 @@ mod tests {
                      lod_count, 
                      file_size as f32 / 1024.0);
         }
+        let write_time = write_start.elapsed();
         
         println!("\nTotal binary written: {:.2} MB", total_bytes as f32 / 1_048_576.0);
+        println!("Binary serialization time: {:.3}ms", write_time.as_secs_f64() * 1000.0);
+        println!("\n=== TOTAL TIME: {:.3}ms ===", (parse_time + tessellation_time + write_time).as_secs_f64() * 1000.0);
         
         // Verify files were created
         assert!(layer_jsons.len() > 0, "No layers found");
@@ -102,7 +113,6 @@ mod tests {
             let filename = format!("webview/src/test-data/layer_{}.bin", layer_json.layer_id.replace(":", "_"));
             assert!(std::path::Path::new(&filename).exists(), 
                    "Layer binary file {} not created", filename);
-            println!("✓ Layer binary file {} created", filename);
         }
     }
 }
