@@ -16,6 +16,7 @@ use crate::parse_xml::XmlNode;
 use indexmap::IndexMap;
 use serde::{Serialize, Serializer};
 use std::env;
+use std::collections::HashMap;
 use base64::{Engine as _, engine::general_purpose};
 
 /// Serialize Vec<f32> as base64-encoded string for compact JSON transmission
@@ -89,6 +90,39 @@ pub struct PadStackHole {
     pub ring_width: f32,  // 0 means no ring, just hole
 }
 
+/// Pad instance with shape reference, position, and rotation
+#[derive(Debug, Clone, Serialize)]
+pub struct PadInstance {
+    pub shape_id: String,
+    pub x: f32,
+    pub y: f32,
+    pub rotation: f32,  // degrees
+}
+
+/// Padstack definition (for vias and component pads)
+#[derive(Debug, Clone)]
+pub struct PadStackDef {
+    pub hole_diameter: f32,
+    pub outer_diameter: f32,  // From pad definition circle
+}
+
+/// Via instance (circular hole through layers)
+#[derive(Debug, Clone, Serialize)]
+pub struct ViaInstance {
+    pub x: f32,
+    pub y: f32,
+    pub diameter: f32,
+    pub hole_diameter: f32,
+}
+
+/// Standard primitive shape definition
+#[derive(Debug, Clone)]
+pub enum StandardPrimitive {
+    Circle { diameter: f32 },
+    Rectangle { width: f32, height: f32 },
+    Oval { width: f32, height: f32 },
+}
+
 /// Represents all geometries organized by layer
 #[derive(Debug)]
 pub struct LayerGeometries {
@@ -96,6 +130,8 @@ pub struct LayerGeometries {
     pub polylines: Vec<Polyline>,
     pub polygons: Vec<Polygon>,
     pub padstack_holes: Vec<PadStackHole>,
+    pub pads: Vec<PadInstance>,
+    pub vias: Vec<ViaInstance>,
 }
 
 /// Serializable geometry LOD for JSON
@@ -121,6 +157,14 @@ pub struct GeometryLOD {
     /// Optional per-vertex alpha values (1 float per vertex), serialized as base64 string
     #[serde(rename = "alphaData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
     pub alpha_data: Option<Vec<f32>>,
+    
+    /// Optional instance data for instanced rendering (x, y, rotation for instanced_rot; x, y for instanced)
+    #[serde(rename = "instanceData", skip_serializing_if = "Option::is_none")]
+    pub instance_data: Option<Vec<f32>>,
+    
+    /// Optional number of instances
+    #[serde(rename = "instanceCount", skip_serializing_if = "Option::is_none")]
+    pub instance_count: Option<usize>,
 }
 
 /// Culling statistics for optimization reporting
@@ -139,6 +183,14 @@ pub struct ShaderGeometry {
     /// For batch_colored.wgsl - polygons with per-vertex alpha transparency
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_colored: Option<Vec<GeometryLOD>>,
+    
+    /// For instanced_rot shader - pads with rotation (x, y, rotation per instance)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instanced_rot: Option<Vec<GeometryLOD>>,
+    
+    /// For instanced shader - vias without rotation (x, y per instance)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instanced: Option<Vec<GeometryLOD>>,
 }
 
 /// Complete layer JSON structure matching main.ts
@@ -286,6 +338,78 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
         }
     } else {
         // No batch_colored geometry
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+    }
+    
+    // Serialize instanced_rot geometry (pads with rotation)
+    let instanced_rot_lods = geometry.instanced_rot.as_ref();
+    if let Some(lods) = instanced_rot_lods {
+        buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
+        for lod in lods {
+            // Vertex count
+            buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
+            // Index count
+            let index_count = lod.index_count.unwrap_or(0);
+            buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+            // Instance count
+            let instance_count = lod.instance_count.unwrap_or(0);
+            buffer.extend_from_slice(&(instance_count as u32).to_le_bytes());
+            
+            // Raw vertex data (Float32) - base shape
+            for &f in &lod.vertex_data {
+                buffer.extend_from_slice(&f.to_le_bytes());
+            }
+            // Raw index data (Uint32)
+            if let Some(indices) = &lod.index_data {
+                for &idx in indices {
+                    buffer.extend_from_slice(&idx.to_le_bytes());
+                }
+            }
+            // Instance data (Float32) - x, y, rotation per instance
+            if let Some(instance_data) = &lod.instance_data {
+                for &f in instance_data {
+                    buffer.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+        }
+    } else {
+        // No instanced_rot geometry
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+    }
+    
+    // Serialize instanced geometry (vias without rotation)
+    let instanced_lods = geometry.instanced.as_ref();
+    if let Some(lods) = instanced_lods {
+        buffer.extend_from_slice(&(lods.len() as u32).to_le_bytes());
+        for lod in lods {
+            // Vertex count
+            buffer.extend_from_slice(&(lod.vertex_count as u32).to_le_bytes());
+            // Index count
+            let index_count = lod.index_count.unwrap_or(0);
+            buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+            // Instance count
+            let instance_count = lod.instance_count.unwrap_or(0);
+            buffer.extend_from_slice(&(instance_count as u32).to_le_bytes());
+            
+            // Raw vertex data (Float32) - base shape
+            for &f in &lod.vertex_data {
+                buffer.extend_from_slice(&f.to_le_bytes());
+            }
+            // Raw index data (Uint32)
+            if let Some(indices) = &lod.index_data {
+                for &idx in indices {
+                    buffer.extend_from_slice(&idx.to_le_bytes());
+                }
+            }
+            // Instance data (Float32) - x, y per instance
+            if let Some(instance_data) = &lod.instance_data {
+                for &f in instance_data {
+                    buffer.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+        }
+    } else {
+        // No instanced geometry
         buffer.extend_from_slice(&0u32.to_le_bytes());
     }
     
@@ -548,53 +672,31 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
     })
 }
 
-/// Parse pad stack definitions and extract hole information
-/// Returns a map of pad stack name -> hole definition
-fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackHole> {
+/// Parse pad stack definitions and extract hole + outer diameter information
+/// Returns a map of pad stack name -> definition (hole dia + outer dia)
+fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
     let mut padstack_defs = IndexMap::new();
     
-    // Find Content -> DictionaryStandard for pad stack definitions
-    if let Some(content) = root.children.iter().find(|n| n.name == "Content") {
-        // Look for Step nodes which contain PadStackDef
-        for step in &content.children {
-            if step.name == "Step" {
-                for child in &step.children {
-                    if child.name == "PadStackDef" {
-                        if let Some(name) = child.attributes.get("name") {
-                            // Find PadstackHoleDef
-                            for hole_def in &child.children {
-                                if hole_def.name == "PadstackHoleDef" {
-                                    let diameter = hole_def
-                                        .attributes
-                                        .get("diameter")
-                                        .and_then(|d| d.parse::<f32>().ok())
-                                        .unwrap_or(0.0);
-                                    
-                                    let x = hole_def
-                                        .attributes
-                                        .get("x")
-                                        .and_then(|v| v.parse::<f32>().ok())
-                                        .unwrap_or(0.0);
-                                    
-                                    let y = hole_def
-                                        .attributes
-                                        .get("y")
-                                        .and_then(|v| v.parse::<f32>().ok())
-                                        .unwrap_or(0.0);
-                                    
-                                    // Estimate ring width from pad definitions (simplified)
-                                    // In full implementation, would parse PadstackPadDef
-                                    let ring_width = diameter * 0.2; // Assume 20% annular ring
-                                    
-                                    padstack_defs.insert(
-                                        name.clone(),
-                                        PadStackHole {
-                                            x,
-                                            y,
-                                            hole_diameter: diameter,
-                                            ring_width,
-                                        },
-                                    );
+    // First, parse user primitive circles to get their diameters
+    // DictionaryUser is under root -> DictionaryUser or root -> Content -> DictionaryUser or Ecad -> Content -> DictionaryUser
+    let mut user_circles = HashMap::new();
+    
+    // Helper to search for DictionaryUser
+    fn find_dict_user(node: &XmlNode, circles: &mut HashMap<String, f32>) {
+        if node.name == "DictionaryUser" {
+            for entry in &node.children {
+                if entry.name == "EntryUser" {
+                    if let Some(id) = entry.attributes.get("id") {
+                        for user_special in &entry.children {
+                            if user_special.name == "UserSpecial" {
+                                for circle in &user_special.children {
+                                    if circle.name == "Circle" {
+                                        if let Some(dia) = circle.attributes.get("diameter") {
+                                            if let Ok(diameter) = dia.parse::<f32>() {
+                                                circles.insert(id.clone(), diameter);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -602,7 +704,67 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackHole> 
                 }
             }
         }
+        for child in &node.children {
+            find_dict_user(child, circles);
+        }
     }
+    
+    find_dict_user(root, &mut user_circles);
+    
+    // Now parse PadStackDef entries - search recursively for Step nodes containing PadStackDef
+    fn find_padstack_defs(node: &XmlNode, defs: &mut IndexMap<String, PadStackDef>, circles: &HashMap<String, f32>) {
+        if node.name == "Step" {
+            for child in &node.children {
+                if child.name == "PadStackDef" {
+                    if let Some(name) = child.attributes.get("name") {
+                        let mut hole_diameter = 0.0;
+                        let mut outer_diameter = 0.0;
+                        
+                        // Find PadstackHoleDef
+                        for hole_def in &child.children {
+                            if hole_def.name == "PadstackHoleDef" {
+                                hole_diameter = hole_def
+                                    .attributes
+                                    .get("diameter")
+                                    .and_then(|d| d.parse::<f32>().ok())
+                                    .unwrap_or(0.0);
+                            }
+                            
+                            // Find PadstackPadDef to get outer diameter from UserPrimitiveRef
+                            if hole_def.name == "PadstackPadDef" {
+                                for pad_child in &hole_def.children {
+                                    if pad_child.name == "UserPrimitiveRef" {
+                                        if let Some(user_id) = pad_child.attributes.get("id") {
+                                            if let Some(&dia) = circles.get(user_id) {
+                                                outer_diameter = dia;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if hole_diameter > 0.0 && outer_diameter > 0.0 {
+                            defs.insert(
+                                name.clone(),
+                                PadStackDef {
+                                    hole_diameter,
+                                    outer_diameter,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Recurse into children
+        for child in &node.children {
+            find_padstack_defs(child, defs, circles);
+        }
+    }
+    
+    find_padstack_defs(root, &mut padstack_defs, &user_circles);
     
     padstack_defs
 }
@@ -1294,13 +1456,14 @@ fn debug_print_polyline(
     }
 }
 
-/// Generate LayerJSON for all geometry types (polylines, polygons, pad stacks) in a layer
+/// Generate LayerJSON for all geometry types (polylines, polygons, pads, vias) in a layer
 pub fn generate_layer_json(
     layer_id: &str,
     layer_name: &str,
     color: [f32; 4],
     geometries: &LayerGeometries,
     culling_stats: &mut CullingStats,
+    primitives: &HashMap<String, StandardPrimitive>,
 ) -> Result<LayerJSON, anyhow::Error> {
     let layer_start = std::time::Instant::now();
     
@@ -1326,7 +1489,25 @@ pub fn generate_layer_json(
         Vec::new()
     };
     
-    // TODO: Add pad stack holes similarly with alpha for rings vs holes
+    // Generate pad geometry (instanced with rotation) - for instanced_rot shader
+    let pad_lods = if !geometries.pads.is_empty() {
+        if std::env::var("PROFILE_TIMING").is_ok() {
+            println!("    [{}] Processing {} pads", layer_name, geometries.pads.len());
+        }
+        generate_pad_geometry(&geometries.pads, primitives)?
+    } else {
+        Vec::new()
+    };
+    
+    // Generate via geometry (instanced without rotation) - for instanced shader
+    let via_lods = if !geometries.vias.is_empty() {
+        if std::env::var("PROFILE_TIMING").is_ok() {
+            println!("    [{}] Processing {} vias", layer_name, geometries.vias.len());
+        }
+        generate_via_geometry(&geometries.vias)?
+    } else {
+        Vec::new()
+    };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
         println!("    [{}] Total layer time: {:.2}ms\n", layer_name, layer_start.elapsed().as_secs_f64() * 1000.0);
@@ -1342,6 +1523,16 @@ pub fn generate_layer_json(
         None
     } else {
         Some(polygon_lods)
+    };
+    shader_geom.instanced_rot = if pad_lods.is_empty() {
+        None
+    } else {
+        Some(pad_lods)
+    };
+    shader_geom.instanced = if via_lods.is_empty() {
+        None
+    } else {
+        Some(via_lods)
     };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
@@ -1481,6 +1672,8 @@ fn generate_polyline_geometry(
             index_data: Some(indices),
             index_count: Some(index_count),
             alpha_data: None, // Will be added later in generate_layer_json
+            instance_data: None,
+            instance_count: None,
         };
 
         lod_geometries.push(geometry_lod);
@@ -1550,6 +1743,8 @@ fn generate_polygon_geometry(polygons: &[Polygon]) -> Result<Vec<GeometryLOD>, a
         index_data: Some(all_indices),
         index_count: Some(index_count),
         alpha_data: Some(alpha_values),
+        instance_data: None,
+        instance_count: None,
     };
     
     Ok(vec![geometry_lod])
@@ -1586,9 +1781,567 @@ fn generate_padstack_geometry(holes: &[PadStackHole]) -> Result<Vec<GeometryLOD>
         index_data: Some(combined_indices),
         index_count: Some(total_index_count),
         alpha_data: None, // Pad stacks are opaque
+        instance_data: None,
+        instance_count: None,
     };
     
     Ok(vec![geometry_lod]) // Single LOD for now
+}
+
+/// Parse StandardPrimitive definitions from DictionaryStandard
+fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitive> {
+    let mut primitives = HashMap::new();
+    
+    // Helper to recursively visit all nodes
+    fn visit_nodes(node: &XmlNode, primitives: &mut HashMap<String, StandardPrimitive>) {
+        if node.name == "EntryStandard" {
+            if let Some(id) = node.attributes.get("id") {
+                for child in &node.children {
+                    let shape = match child.name.as_str() {
+                        "Circle" => {
+                            let diameter = child.attributes.get("diameter")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            Some(StandardPrimitive::Circle { diameter })
+                        }
+                        "RectCenter" => {
+                            let width = child.attributes.get("width")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            let height = child.attributes.get("height")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            Some(StandardPrimitive::Rectangle { width, height })
+                        }
+                        "Oval" => {
+                            let width = child.attributes.get("width")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            let height = child.attributes.get("height")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            Some(StandardPrimitive::Oval { width, height })
+                        }
+                        _ => None,
+                    };
+                    
+                    if let Some(shape) = shape {
+                        primitives.insert(id.clone(), shape);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Recursively visit children
+        for child in &node.children {
+            visit_nodes(child, primitives);
+        }
+    }
+    
+    visit_nodes(root, &mut primitives);
+    primitives
+}
+
+/// Collect pad instances from LayerFeature nodes
+fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<PadInstance> {
+    let mut pads = Vec::new();
+    
+    // Helper to recursively visit all nodes
+    fn visit_nodes(node: &XmlNode, pads: &mut Vec<PadInstance>, padstack_defs: &IndexMap<String, PadStackDef>) {
+        if node.name == "Pad" {
+            // Skip if this is a via (padUsage="VIA")
+            if let Some(usage) = node.attributes.get("padUsage") {
+                if usage == "VIA" {
+                    return; // Don't collect as pad
+                }
+            }
+            
+            // Skip if this has a padstackDefRef with an actual hole (PTH - will be rendered as via)
+            if let Some(ref_name) = node.attributes.get("padstackDefRef") {
+                if let Some(def) = padstack_defs.get(ref_name) {
+                    // Only skip if there's a significant hole (> 0.01mm)
+                    if def.hole_diameter > 0.01 {
+                        return; // Don't collect as pad, it's a PTH
+                    }
+                }
+            }
+            
+            let mut x = 0.0;
+            let mut y = 0.0;
+            let mut rotation = 0.0;
+            let mut shape_id = String::new();
+            
+            for child in &node.children {
+                match child.name.as_str() {
+                    "Location" => {
+                        x = child.attributes.get("x")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0.0);
+                        y = child.attributes.get("y")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0.0);
+                    }
+                    "Xform" => {
+                        rotation = child.attributes.get("rotation")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0.0);
+                    }
+                    "StandardPrimitiveRef" => {
+                        shape_id = child.attributes.get("id")
+                            .map(|s| s.clone())
+                            .unwrap_or_default();
+                    }
+                    _ => {}
+                }
+            }
+            
+            if !shape_id.is_empty() {
+                pads.push(PadInstance {
+                    shape_id,
+                    x,
+                    y,
+                    rotation,
+                });
+            }
+        }
+        
+        // Recursively visit children
+        for child in &node.children {
+            visit_nodes(child, pads, padstack_defs);
+        }
+    }
+    
+    visit_nodes(layer_node, &mut pads, padstack_defs);
+    pads
+}
+
+/// Collect via instances from LayerFeature nodes
+/// Also collects plated through holes (PTH) which have actual holes
+fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<ViaInstance> {
+    let mut vias = Vec::new();
+    
+    // Helper to recursively visit all nodes
+    fn visit_nodes(node: &XmlNode, vias: &mut Vec<ViaInstance>, padstack_defs: &IndexMap<String, PadStackDef>, parent_is_via_set: bool) {
+        // Check if this is a Set with padUsage="VIA"
+        let is_via_set = node.name == "Set" && node.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+        
+        if node.name == "Pad" {
+            // Collect if in a via Set
+            if parent_is_via_set {
+                let mut x = 0.0;
+                let mut y = 0.0;
+                let mut padstack_ref = String::new();
+                
+                // Get padstackDefRef from Pad attributes
+                if let Some(ref_name) = node.attributes.get("padstackDefRef") {
+                    padstack_ref = ref_name.clone();
+                }
+                
+                for child in &node.children {
+                    if child.name == "Location" {
+                        x = child.attributes.get("x")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0.0);
+                        y = child.attributes.get("y")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0.0);
+                    }
+                }
+                
+                // Look up padstack definition to get diameters
+                if let Some(def) = padstack_defs.get(&padstack_ref) {
+                    vias.push(ViaInstance {
+                        x,
+                        y,
+                        diameter: def.outer_diameter,
+                        hole_diameter: def.hole_diameter,
+                    });
+                }
+            } else if node.attributes.contains_key("padstackDefRef") {
+                // Check if this padstack has an actual hole (PTH vs SMD)
+                if let Some(ref_name) = node.attributes.get("padstackDefRef") {
+                    if let Some(def) = padstack_defs.get(ref_name) {
+                        // Only collect if there's a significant hole (> 0.01mm to filter SMD pads)
+                        if def.hole_diameter > 0.01 {
+                            let mut x = 0.0;
+                            let mut y = 0.0;
+                            
+                            for child in &node.children {
+                                if child.name == "Location" {
+                                    x = child.attributes.get("x")
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(0.0);
+                                    y = child.attributes.get("y")
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(0.0);
+                                }
+                            }
+                            
+                            vias.push(ViaInstance {
+                                x,
+                                y,
+                                diameter: def.outer_diameter,
+                                hole_diameter: def.hole_diameter,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Recursively visit children, passing down via_set status
+        for child in &node.children {
+            visit_nodes(child, vias, padstack_defs, is_via_set || parent_is_via_set);
+        }
+    }
+    
+    visit_nodes(layer_node, &mut vias, padstack_defs, false);
+    vias
+}
+
+/// Tessellate a circle into triangle fan
+fn tessellate_circle(radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let mut vertices = vec![0.0, 0.0]; // Center
+    let mut indices = Vec::new();
+    
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        vertices.push(angle.cos() * radius);
+        vertices.push(angle.sin() * radius);
+    }
+    
+    for i in 0..segments {
+        indices.push(0);       // Center
+        indices.push(i + 1);   // Current vertex
+        indices.push(i + 2);   // Next vertex
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate an annular ring (donut shape) with outer and inner radii
+/// Creates a ring by connecting outer and inner circle vertices with triangle strips
+fn tessellate_annular_ring(outer_radius: f32, inner_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Generate interleaved vertices: outer, inner, outer, inner, ...
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        
+        // Outer circle vertex
+        vertices.push(cos_a * outer_radius);
+        vertices.push(sin_a * outer_radius);
+        
+        // Inner circle vertex
+        vertices.push(cos_a * inner_radius);
+        vertices.push(sin_a * inner_radius);
+    }
+    
+    // Generate triangle strip indices to form quads between rings
+    for i in 0..segments {
+        let base = (i * 2) as u32;
+        // Two triangles forming a quad
+        indices.push(base);         // outer[i]
+        indices.push(base + 1);     // inner[i]
+        indices.push(base + 2);     // outer[i+1]
+        
+        indices.push(base + 2);     // outer[i+1]
+        indices.push(base + 1);     // inner[i]
+        indices.push(base + 3);     // inner[i+1]
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate a rectangle
+fn tessellate_rectangle(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    
+    let vertices = vec![
+        -hw, -hh,  // Bottom-left
+         hw, -hh,  // Bottom-right
+         hw,  hh,  // Top-right
+        -hw,  hh,  // Top-left
+    ];
+    
+    let indices = vec![0, 1, 2, 0, 2, 3];
+    
+    (vertices, indices)
+}
+
+/// Tessellate an oval (ellipse)
+fn tessellate_oval(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let rx = width / 2.0;
+    let ry = height / 2.0;
+    let mut vertices = vec![0.0, 0.0]; // Center
+    let mut indices = Vec::new();
+    
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        vertices.push(angle.cos() * rx);
+        vertices.push(angle.sin() * ry);
+    }
+    
+    for i in 0..segments {
+        indices.push(0);       // Center
+        indices.push(i + 1);   // Current vertex
+        indices.push(i + 2);   // Next vertex
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate a standard primitive shape
+fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
+    match primitive {
+        StandardPrimitive::Circle { diameter } => {
+            tessellate_circle(diameter / 2.0)
+        }
+        StandardPrimitive::Rectangle { width, height } => {
+            tessellate_rectangle(*width, *height)
+        }
+        StandardPrimitive::Oval { width, height } => {
+            tessellate_oval(*width, *height)
+        }
+    }
+}
+
+/// Generate instanced_rot geometry for pads (shapes with rotation)
+fn generate_pad_geometry(
+    pads: &[PadInstance],
+    primitives: &HashMap<String, StandardPrimitive>,
+) -> Result<Vec<GeometryLOD>, anyhow::Error> {
+    if pads.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Group pads by shape_id for efficient instancing
+    let mut shape_groups: HashMap<String, Vec<&PadInstance>> = HashMap::new();
+    for pad in pads {
+        shape_groups.entry(pad.shape_id.clone())
+            .or_insert_with(Vec::new)
+            .push(pad);
+    }
+    
+    let mut all_lods = Vec::new();
+    
+    for (shape_id, instances) in shape_groups {
+        if let Some(primitive) = primitives.get(&shape_id) {
+            // Tessellate the base shape once
+            let (shape_verts, shape_indices) = tessellate_primitive(primitive);
+            
+            // Create instance data (x, y, rotation) for each pad
+            let mut instance_data = Vec::new();
+            for inst in instances {
+                instance_data.push(inst.x);
+                instance_data.push(inst.y);
+                instance_data.push(inst.rotation.to_radians()); // Convert to radians for shader
+            }
+            
+            let vert_count = shape_verts.len() / 2;
+            let idx_count = shape_indices.len();
+            
+            all_lods.push(GeometryLOD {
+                vertex_data: shape_verts,
+                vertex_count: vert_count,
+                index_data: Some(shape_indices),
+                index_count: Some(idx_count),
+                alpha_data: None,
+                instance_data: Some(instance_data.clone()),
+                instance_count: Some(instance_data.len() / 3), // 3 floats per instance
+            });
+        }
+    }
+    
+    Ok(all_lods)
+}
+
+/// Generate instanced geometry for vias with size-based LOD
+/// Creates 3 LOD levels, each containing multiple geometries for different via sizes
+/// LOD0: Annular rings (all sizes), LOD1: Solid circles (large only), LOD2: Culled (small only)
+/// Larger vias stay detailed longer, smaller vias simplify/cull earlier
+fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyhow::Error> {
+    if vias.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    // Group vias by size (both diameter and hole)
+    let mut size_groups: HashMap<String, Vec<&ViaInstance>> = HashMap::new();
+    for via in vias {
+        let key = format!("{:.4}_{:.4}", via.diameter, via.hole_diameter);
+        size_groups.entry(key)
+            .or_insert_with(Vec::new)
+            .push(via);
+    }
+    
+    // We'll create LOD entries for each size, organized by LOD level
+    // Size-based LOD: larger vias use detailed geometry longer
+    // Small vias (< 0.5mm): LOD0=rings, LOD1=empty, LOD2=empty (simplify early)
+    // Medium vias (0.5-1.0mm): LOD0=rings, LOD1=circles, LOD2=empty
+    // Large vias (> 1.0mm): LOD0=rings, LOD1=rings, LOD2=circles (stay detailed)
+    let mut lod0_entries = Vec::new();
+    let mut lod1_entries = Vec::new();
+    let mut lod2_entries = Vec::new();
+    
+    for (size_key, instances) in size_groups {
+        if let Some(first_via) = instances.first() {
+            let outer_radius = first_via.diameter / 2.0;
+            let inner_radius = first_via.hole_diameter / 2.0;
+            let diameter = first_via.diameter;
+            
+            if std::env::var("DEBUG_VIA").is_ok() {
+                println!("  Via size {}: {} instances, outer_r={:.4}, inner_r={:.4}", 
+                    size_key, instances.len(), outer_radius, inner_radius);
+            }
+            
+            // Create instance data (x, y) for this size group
+            let mut instance_data = Vec::new();
+            for inst in &instances {
+                instance_data.push(inst.x);
+                instance_data.push(inst.y);
+            }
+            let inst_count = instances.len();
+            
+            // Tessellate geometry
+            let (ring_verts, ring_indices) = tessellate_annular_ring(outer_radius, inner_radius);
+            let (circle_verts, circle_indices) = tessellate_circle(outer_radius);
+            
+            // Calculate sizes before moving
+            let ring_vert_count = ring_verts.len() / 2;
+            let ring_idx_count = ring_indices.len();
+            let circle_vert_count = circle_verts.len() / 2;
+            let circle_idx_count = circle_indices.len();
+            
+            // Pixel-density based LOD assignment
+            // Estimate pixels at each LOD zoom threshold:
+            // LOD0: zoom >= 10 (very zoomed in)
+            // LOD1: zoom >= 5 
+            // LOD2: zoom >= 2
+            // Assume ~100 pixels per mm at zoom=1.0, scales linearly with zoom
+            let pixels_at_lod0 = diameter * 100.0 * 10.0;  // diameter in mm * px/mm * zoom
+            let pixels_at_lod1 = diameter * 100.0 * 5.0;
+            let pixels_at_lod2 = diameter * 100.0 * 2.0;
+            
+            // Very aggressive size-based LOD:
+            // Tiny vias (<0.5mm): cull at LOD1
+            // Small vias (0.5-0.8mm): circles at LOD1, cull at LOD2
+            // Medium vias (0.8-1.5mm): rings at LOD1, circles at LOD2
+            // Large PTH (>1.5mm): rings at LOD1 and LOD2
+            let needs_ring_at_lod0 = pixels_at_lod0 >= 150.0;  // ~0.15mm at zoom 10
+            let needs_ring_at_lod1 = pixels_at_lod1 >= 400.0;  // ~0.8mm at zoom 5 (medium/large only)
+            let needs_circle_at_lod1 = pixels_at_lod1 >= 250.0;  // ~0.5mm at zoom 5 (small vias)
+            let needs_circle_at_lod2 = pixels_at_lod2 >= 160.0;  // ~0.8mm at zoom 2 (medium+ only)
+            
+            if std::env::var("DEBUG_VIA").is_ok() {
+                println!("    Pixels: LOD0={:.1}px, LOD1={:.1}px, LOD2={:.1}px", 
+                    pixels_at_lod0, pixels_at_lod1, pixels_at_lod2);
+                println!("    Render: LOD0={}, LOD1={}, LOD2={}", 
+                    if needs_ring_at_lod0 { "rings" } else { "none" },
+                    if needs_ring_at_lod1 { "rings" } else if needs_circle_at_lod1 { "circles" } else { "none" },
+                    if needs_circle_at_lod2 { "circles" } else { "none" });
+            }
+            
+            // LOD0: Always show rings if visible
+            if needs_ring_at_lod0 {
+                lod0_entries.push(GeometryLOD {
+                    vertex_data: ring_verts.clone(),
+                    vertex_count: ring_vert_count,
+                    index_data: Some(ring_indices.clone()),
+                    index_count: Some(ring_idx_count),
+                    alpha_data: None,
+                    instance_data: Some(instance_data.clone()),
+                    instance_count: Some(inst_count),
+                });
+            } else {
+                lod0_entries.push(GeometryLOD {
+                    vertex_data: Vec::new(),
+                    vertex_count: 0,
+                    index_data: Some(Vec::new()),
+                    index_count: Some(0),
+                    alpha_data: None,
+                    instance_data: Some(Vec::new()),
+                    instance_count: Some(0),
+                });
+            }
+            
+            // LOD1: Show rings if large enough, otherwise circles
+            if needs_ring_at_lod1 {
+                lod1_entries.push(GeometryLOD {
+                    vertex_data: ring_verts,
+                    vertex_count: ring_vert_count,
+                    index_data: Some(ring_indices),
+                    index_count: Some(ring_idx_count),
+                    alpha_data: None,
+                    instance_data: Some(instance_data.clone()),
+                    instance_count: Some(inst_count),
+                });
+            } else if needs_circle_at_lod1 {
+                lod1_entries.push(GeometryLOD {
+                    vertex_data: circle_verts.clone(),
+                    vertex_count: circle_vert_count,
+                    index_data: Some(circle_indices.clone()),
+                    index_count: Some(circle_idx_count),
+                    alpha_data: None,
+                    instance_data: Some(instance_data.clone()),
+                    instance_count: Some(inst_count),
+                });
+            } else {
+                lod1_entries.push(GeometryLOD {
+                    vertex_data: Vec::new(),
+                    vertex_count: 0,
+                    index_data: Some(Vec::new()),
+                    index_count: Some(0),
+                    alpha_data: None,
+                    instance_data: Some(Vec::new()),
+                    instance_count: Some(0),
+                });
+            }
+            
+            // LOD2: Show circles only if large enough
+            if needs_circle_at_lod2 {
+                lod2_entries.push(GeometryLOD {
+                    vertex_data: circle_verts,
+                    vertex_count: circle_vert_count,
+                    index_data: Some(circle_indices),
+                    index_count: Some(circle_idx_count),
+                    alpha_data: None,
+                    instance_data: Some(instance_data),
+                    instance_count: Some(inst_count),
+                });
+            } else {
+                lod2_entries.push(GeometryLOD {
+                    vertex_data: Vec::new(),
+                    vertex_count: 0,
+                    index_data: Some(Vec::new()),
+                    index_count: Some(0),
+                    alpha_data: None,
+                    instance_data: Some(Vec::new()),
+                    instance_count: Some(0),
+                });
+            }
+        }
+    }
+    
+    // Combine: all LOD0s first, then all LOD1s, then all LOD2s
+    let mut all_lods = Vec::new();
+    all_lods.extend(lod0_entries);
+    all_lods.extend(lod1_entries);
+    all_lods.extend(lod2_entries);
+    
+    if std::env::var("DEBUG_VIA").is_ok() || std::env::var("PROFILE_TIMING").is_ok() {
+        println!("  Via LOD summary: {} total geometry entries ({} sizes × 3 LODs)", 
+            all_lods.len(), all_lods.len() / 3);
+    }
+    
+    Ok(all_lods)
 }
 
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
@@ -1603,9 +2356,17 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     let line_descriptors = parse_line_descriptors(root);
     let parse_time = parse_start.elapsed();
     
+    // Parse standard primitive definitions (circles, rectangles, etc.)
+    let primitives = parse_standard_primitives(root);
+    
+    // Parse padstack definitions (for vias)
+    let padstack_defs = parse_padstack_definitions(root);
+    
     if std::env::var("PROFILE_TIMING").is_ok() {
         println!("\n=== Detailed Timing Profile ===");
         println!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
+        println!("Parsed {} standard primitives", primitives.len());
+        println!("Parsed {} padstack definitions", padstack_defs.len());
     }
 
     // Find Ecad node which contains all the CAD data
@@ -1624,7 +2385,7 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
 
     // Find all LayerFeature nodes and process them
     let collect_start = std::time::Instant::now();
-    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors, &mut total_culling_stats)?;
+    collect_layer_features(cad_data, &mut layer_jsons, &mut layers_seen, &line_descriptors, &primitives, &mut total_culling_stats, &padstack_defs)?;
     let collect_time = collect_start.elapsed();
     
     if std::env::var("PROFILE_TIMING").is_ok() {
@@ -1656,7 +2417,9 @@ fn collect_layer_features(
     layer_jsons: &mut Vec<LayerJSON>,
     layers_seen: &mut std::collections::HashSet<String>,
     line_descriptors: &IndexMap<String, LineDescriptor>,
+    primitives: &HashMap<String, StandardPrimitive>,
     culling_stats: &mut CullingStats,
+    padstack_defs: &IndexMap<String, PadStackDef>,
 ) -> Result<(), anyhow::Error> {
     // If this is a LayerFeature node, process it
     if node.name == "LayerFeature" {
@@ -1670,11 +2433,13 @@ fn collect_layer_features(
                     polylines: Vec::new(),
                     polygons: Vec::new(),
                     padstack_holes: Vec::new(),
+                    pads: Vec::new(),
+                    vias: Vec::new(),
                 };
-                collect_geometries_from_node(node, &mut geometries, line_descriptors);
+                collect_geometries_from_node(node, &mut geometries, line_descriptors, padstack_defs);
                 
                 // Only generate layer if it has any geometry
-                if !geometries.polylines.is_empty() || !geometries.polygons.is_empty() || !geometries.padstack_holes.is_empty() {
+                if !geometries.polylines.is_empty() || !geometries.polygons.is_empty() || !geometries.padstack_holes.is_empty() || !geometries.pads.is_empty() || !geometries.vias.is_empty() {
                     // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
                     let layer_name = layer_ref
                         .split(':')
@@ -1691,6 +2456,7 @@ fn collect_layer_features(
                         color,
                         &geometries,
                         culling_stats,
+                        primitives,
                     )?;
                     
                     layer_jsons.push(layer_json);
@@ -1701,7 +2467,7 @@ fn collect_layer_features(
 
     // Recursively search all children
     for child in &node.children {
-        collect_layer_features(child, layer_jsons, layers_seen, line_descriptors, culling_stats)?;
+        collect_layer_features(child, layer_jsons, layers_seen, line_descriptors, primitives, culling_stats, padstack_defs)?;
     }
 
     Ok(())
@@ -1768,6 +2534,7 @@ fn collect_geometries_from_node(
     node: &XmlNode,
     geometries: &mut LayerGeometries,
     line_descriptors: &IndexMap<String, LineDescriptor>,
+    padstack_defs: &IndexMap<String, PadStackDef>,
 ) {
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
@@ -1783,13 +2550,21 @@ fn collect_geometries_from_node(
         if let Ok(polygon) = parse_polygon_node(node) {
             geometries.polygons.push(polygon);
         }
+    } else if node.name == "LayerFeature" {
+        // Collect pads and vias from this layer
+        let pads = collect_pads_from_layer(node, padstack_defs);
+        geometries.pads.extend(pads);
+        
+        let vias = collect_vias_from_layer(node, padstack_defs);
+        if !vias.is_empty() && std::env::var("PROFILE_TIMING").is_ok() {
+            println!("      Collected {} vias", vias.len());
+        }
+        geometries.vias.extend(vias);
     }
-    // Note: Pad stack holes are collected separately via parse_padstack_definitions
-    // and instantiated at component locations
 
     // Recursively search all children
     for child in &node.children {
-        collect_geometries_from_node(child, geometries, line_descriptors);
+        collect_geometries_from_node(child, geometries, line_descriptors, padstack_defs);
     }
 }
 
@@ -1856,6 +2631,8 @@ mod tests {
             index_data: Some(vec![0, 1, 2]),
             index_count: Some(3),
             alpha_data: None,
+            instance_data: None,
+            instance_count: None,
         };
         let json = serde_json::to_string(&lod).unwrap();
         assert!(json.contains("vertexData"));

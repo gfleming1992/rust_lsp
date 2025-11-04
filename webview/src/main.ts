@@ -1,5 +1,7 @@
 import basicShaderCode from "./shaders/basic.wgsl?raw";
 import basicNoAlphaShaderCode from "./shaders/basic_noalpha.wgsl?raw";
+import instancedShaderCode from "./shaders/instanced.wgsl?raw";
+import instancedRotShaderCode from "./shaders/instanced_rot.wgsl?raw";
 import { setupTestListeners } from "./tests";
 
 // PCB Viewer with Multi-Shader Architecture
@@ -37,7 +39,7 @@ export interface GeometryLOD {
   vertexCount: number;
   indexData?: number[];  // Raw Uint32 array (no base64 encoding needed)
   indexCount?: number;
-  instanceData?: string;  // Optional base64-encoded instance data (for instanced shaders)
+  instanceData?: number[];  // Raw Float32 array: instanced=2 floats/instance (x,y), instanced_rot=3 floats/instance (x,y,rotation)
   instanceCount?: number;
   alphaData?: string;  // Optional base64-encoded per-vertex alpha values (1 float per vertex)
   // When alphaData is present, use the *_colored shader variant (e.g., basic_colored.wgsl)
@@ -109,7 +111,9 @@ interface LayerRenderData {
   shaderType: keyof ShaderGeometry; // Which shader type this layer uses
   lodBuffers: GPUBuffer[];
   lodAlphaBuffers: (GPUBuffer | null)[];
+  lodInstanceBuffers?: GPUBuffer[]; // For instanced geometry
   lodVertexCounts: number[];
+  lodInstanceCounts?: number[]; // For instanced geometry
   lodIndexBuffers?: (GPUBuffer | null)[];
   lodIndexCounts?: number[];
   currentLOD: number;
@@ -162,6 +166,7 @@ const colorOverrides = new Map<string, LayerColor>();
 // Multi-layer support (step 1)
 const layerRenderData = new Map<string, LayerRenderData>();
 let currentLOD = 0;  // Active LOD index (0-4) shared for now
+let viasVisible = true;  // Global via visibility toggle
 let lastVertexCount = 0;
 let lastIndexCount = 0;
 
@@ -200,6 +205,8 @@ let device: GPUDevice;
 let context: GPUCanvasContext;
 let pipelineNoAlpha: GPURenderPipeline; // For batch (polylines without alpha)
 let pipelineWithAlpha: GPURenderPipeline; // For batch_colored and basic (polygons with per-vertex alpha)
+let pipelineInstanced: GPURenderPipeline; // For instanced (vias without rotation)
+let pipelineInstancedRot: GPURenderPipeline; // For instanced_rot (pads with rotation)
 let vertexBuffer: GPUBuffer;
 let uniformBuffer: GPUBuffer;
 let bindGroup: GPUBindGroup;
@@ -352,9 +359,20 @@ function loadLayerData(layerJson: LayerJSON) {
     ["basic", layerJson.geometry.basic]
   ];
   
-  console.log(`[loadLayerData] ${layerJson.layerId} geometry keys:`, Object.keys(layerJson.geometry), 
-    'batch:', layerJson.geometry.batch ? `${layerJson.geometry.batch.length} LODs` : 'none',
-    'batch_colored:', layerJson.geometry.batch_colored ? `${layerJson.geometry.batch_colored.length} LODs` : 'none');
+  // Check for instanced geometry
+  if (layerJson.geometry.instanced_rot) {
+    console.log(`[INSTANCED] ${layerJson.layerId} has instanced_rot:`, layerJson.geometry.instanced_rot.length, 'LODs');
+    if (layerJson.geometry.instanced_rot.length > 0) {
+      const lod0 = layerJson.geometry.instanced_rot[0];
+      console.log(`[INSTANCED] LOD0: ${lod0.instanceCount} instances, ${lod0.vertexCount} vertices per shape, instanceData length: ${lod0.instanceData?.length}`);
+      if (lod0.instanceData && lod0.instanceData.length > 0) {
+        console.log(`[INSTANCED] First instance: x=${lod0.instanceData[0]}, y=${lod0.instanceData[1]}, rot=${lod0.instanceData[2]}`);
+      }
+    }
+  }
+  if (layerJson.geometry.instanced) {
+    console.log(`[INSTANCED] ${layerJson.layerId} has instanced:`, layerJson.geometry.instanced.length, 'LODs');
+  }
   
   let loadedAnyGeometry = false;
   
@@ -365,19 +383,19 @@ function loadLayerData(layerJson: LayerJSON) {
     loadedAnyGeometry = true;
     const renderKey = shaderKey === 'batch' ? layerJson.layerId : `${layerJson.layerId}_${shaderKey}`;
     
-    console.log(`[loadLayerData] Loading ${shaderKey} geometry for ${layerJson.layerId} (${lods.length} LODs)`);
-    
-    loadGeometryType(layerJson, renderKey, shaderKey, lods);
+    // Use instanced loader for instanced geometry types
+    if (shaderKey === 'instanced' || shaderKey === 'instanced_rot') {
+      console.log(`[LOAD] Loading ${shaderKey} for ${layerJson.layerId}`);
+      loadInstancedGeometry(layerJson, renderKey, shaderKey, lods);
+    } else {
+      loadGeometryType(layerJson, renderKey, shaderKey, lods);
+    }
   }
   
   if (!loadedAnyGeometry) {
     console.warn(`No geometry data found for layer ${layerJson.layerId}`);
     return;
   }
-
-  const loadEnd = performance.now();
-  const loadTime = loadEnd - loadStart;
-  console.log(`[loadLayerData] Loaded layer ${layerJson.layerId} in ${loadTime.toFixed(2)}ms`);
 
   startup.rebuildEnd = performance.now();
 }
@@ -502,6 +520,115 @@ function loadGeometryType(
   });
 
   console.log(`  Loaded ${shaderKey} geometry: ${lodBuffers.length} LODs, ${lodVertexCounts.reduce((a, b) => a + b, 0)} total vertices`);
+}
+
+/**
+ * Load instanced geometry (pads with rotation or vias without rotation)
+ */
+function loadInstancedGeometry(
+  layerJson: LayerJSON,
+  renderKey: string,
+  shaderKey: 'instanced' | 'instanced_rot',
+  geometryLODs: GeometryLOD[]
+) {
+  const lodBuffers: GPUBuffer[] = [];
+  const lodInstanceBuffers: GPUBuffer[] = [];
+  const lodVertexCounts: number[] = [];
+  const lodInstanceCounts: number[] = [];
+  const lodIndexBuffers: (GPUBuffer | null)[] = [];
+  const lodIndexCounts: number[] = [];
+
+  for (let i = 0; i < geometryLODs.length; i++) {
+    const lod = geometryLODs[i];
+    if (!lod) {
+      console.warn(`Missing LOD ${i} for layer ${layerJson.layerId}`);
+      continue;
+    }
+    
+    // Base shape vertices
+    const lodVertices = new Float32Array(lod.vertexData);
+    const vertexBuffer = device.createBuffer({
+      size: lodVertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Float32Array(vertexBuffer.getMappedRange()).set(lodVertices);
+    vertexBuffer.unmap();
+    lodBuffers.push(vertexBuffer);
+    lodVertexCounts.push(lod.vertexCount);
+
+    // Instance data (x, y) or (x, y, rotation)
+    if (lod.instanceData && lod.instanceCount) {
+      const instanceArr = new Float32Array(lod.instanceData);
+      const instanceBuffer = device.createBuffer({
+        size: instanceArr.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(instanceBuffer.getMappedRange()).set(instanceArr);
+      instanceBuffer.unmap();
+      lodInstanceBuffers.push(instanceBuffer);
+      lodInstanceCounts.push(lod.instanceCount);
+    } else {
+      // No instances for this LOD
+      const emptyBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.VERTEX
+      });
+      lodInstanceBuffers.push(emptyBuffer);
+      lodInstanceCounts.push(0);
+    }
+
+    // Index buffer
+    if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
+      const idxArr = new Uint32Array(lod.indexData);
+      const idxBuf = device.createBuffer({
+        size: idxArr.byteLength,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Uint32Array(idxBuf.getMappedRange()).set(idxArr);
+      idxBuf.unmap();
+      lodIndexBuffers.push(idxBuf);
+      lodIndexCounts.push(lod.indexCount);
+    } else {
+      lodIndexBuffers.push(null);
+      lodIndexCounts.push(0);
+    }
+  }
+  
+  // Create per-layer uniform buffer and bind group
+  const color = getLayerColor(layerJson.layerId);
+  uniformData.set(color, 0);
+  const layerUniformBuffer = device.createBuffer({
+    size: uniformData.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  
+  const usePipeline = (shaderKey === 'instanced') ? pipelineInstanced : pipelineInstancedRot;
+  const layerBindGroup = device.createBindGroup({
+    layout: usePipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: layerUniformBuffer } }]
+  });
+
+  layerRenderData.set(renderKey, {
+    layerId: layerJson.layerId,
+    shaderType: shaderKey,
+    lodBuffers,
+    lodInstanceBuffers,
+    lodAlphaBuffers: [], // Not used for instanced
+    lodVertexCounts,
+    lodInstanceCounts,
+    lodIndexBuffers,
+    lodIndexCounts,
+    currentLOD: 0,
+    uniformBuffer: layerUniformBuffer,
+    bindGroup: layerBindGroup
+  });
+
+  const totalInstances = lodInstanceCounts.reduce((a, b) => a + b, 0);
+  console.log(`[INSTANCED] Loaded ${shaderKey} for ${layerJson.layerId}: ${lodBuffers.length} LODs, ${totalInstances} instances`);
+  console.log(`[INSTANCED] LOD0 has ${lodInstanceCounts[0]} instances, vertex buffer size: ${lodBuffers[0]?.size}, instance buffer size: ${lodInstanceBuffers[0]?.size}`);
 }
 
 function applyLayerColor(layerId: string) {
@@ -875,6 +1002,9 @@ function render() {
       // Only render if this render data belongs to the current layer
       if (data.layerId !== layerId) continue;
       
+      // Skip vias (instanced shader) - they'll be rendered separately with gold color
+      if (renderKey.endsWith('_instanced')) continue;
+      
       // Skip if requested LOD doesn't exist for this layer (fall back to last available)
       const actualLOD = Math.min(currentLOD, data.lodBuffers.length - 1);
       const vb = data.lodBuffers[actualLOD];
@@ -883,36 +1013,176 @@ function render() {
       totalVertices += count;
 
       // Choose pipeline based on shader type
-      const usePipeline = (data.shaderType === 'batch') ? pipelineNoAlpha : pipelineWithAlpha;
+      let usePipeline: GPURenderPipeline;
+      if (data.shaderType === 'batch') {
+        usePipeline = pipelineNoAlpha;
+      } else if (renderKey.endsWith('_instanced')) {
+        usePipeline = pipelineInstanced;
+      } else if (data.shaderType === 'instanced_rot') {
+        usePipeline = pipelineInstancedRot;
+      } else {
+        usePipeline = pipelineWithAlpha;
+      }
+      
       pass.setPipeline(usePipeline);
       pass.setVertexBuffer(0, vb);
       
-      // Only set alpha buffer for pipelines that use it (batch_colored, basic, etc.)
-      if (data.shaderType !== 'batch') {
-        const alphaBuf = data.lodAlphaBuffers[actualLOD];
-        if (alphaBuf) {
-          pass.setVertexBuffer(1, alphaBuf);
+      // Handle instanced geometry
+      if (renderKey.endsWith('_instanced') || data.shaderType === 'instanced_rot') {
+        const instanceBuf = data.lodInstanceBuffers?.[actualLOD];
+        const instanceCount = data.lodInstanceCounts?.[actualLOD] ?? 0;
+        
+        if (frameCount === 0 && instanceCount > 0) {
+          console.log(`[RENDER] Drawing ${data.shaderType} for ${data.layerId}: ${instanceCount} instances, ${count} vertices per shape`);
+          // Log the first instance buffer data to see actual positions
+          if (data.lodInstanceBuffers && data.lodInstanceBuffers[actualLOD]) {
+            const buf = data.lodInstanceBuffers[actualLOD];
+            console.log(`[RENDER] Instance buffer size: ${buf.size} bytes (${buf.size / 12} instances at 12 bytes each = 3 floats)`);
+          }
         }
-      }
-      // Update this layer's uniform buffer with its color + current matrix
-      const layerColor = getLayerColor(data.layerId);
-      uniformData.set(layerColor, 0);
-      device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
-
-      pass.setBindGroup(0, data.bindGroup);
-      // If index buffer present for this LOD, use drawIndexed
-      const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
-      const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
-      if (ib && ic > 0) {
-        pass.setIndexBuffer(ib, "uint32");
-        pass.drawIndexed(ic);
-        totalIndices += ic;
+        
+        if (instanceBuf && instanceCount > 0) {
+          pass.setVertexBuffer(1, instanceBuf);
+          
+          // Update uniform buffer
+          const layerColor = getLayerColor(data.layerId);
+          uniformData.set(layerColor, 0);
+          device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+          pass.setBindGroup(0, data.bindGroup);
+          
+          // Draw instanced
+          const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
+          const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
+          if (ib && ic > 0) {
+            pass.setIndexBuffer(ib, "uint32");
+            pass.drawIndexed(ic, instanceCount);
+            totalIndices += ic * instanceCount;
+          } else {
+            pass.draw(count, instanceCount);
+          }
+          drawn++;
+        } else if (frameCount === 0) {
+          console.warn(`[RENDER] Skipping ${data.shaderType} for ${data.layerId}: instanceBuf=${!!instanceBuf}, instanceCount=${instanceCount}`);
+        }
       } else {
-        pass.draw(count);
+        // Only set alpha buffer for pipelines that use it (batch_colored, basic, etc.)
+        if (data.shaderType !== 'batch') {
+          const alphaBuf = data.lodAlphaBuffers[actualLOD];
+          if (alphaBuf) {
+            pass.setVertexBuffer(1, alphaBuf);
+          }
+        }
+        // Update this layer's uniform buffer with its color + current matrix
+        const layerColor = getLayerColor(data.layerId);
+        uniformData.set(layerColor, 0);
+        device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+
+        pass.setBindGroup(0, data.bindGroup);
+        // If index buffer present for this LOD, use drawIndexed
+        const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
+        const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
+        if (ib && ic > 0) {
+          pass.setIndexBuffer(ib, "uint32");
+          pass.drawIndexed(ic);
+          totalIndices += ic;
+        } else {
+          pass.draw(count);
+        }
+        drawn++;
       }
-      drawn++;
     }
   }
+  
+  // Render vias separately with gold color if enabled and any layer is visible
+  const anyLayerVisible = Array.from(layerVisible.values()).some(v => v);
+  if (viasVisible && anyLayerVisible) {
+    const viaColor: LayerColor = [1.0, 0.9, 0.25, 1.0];  // Gold color for vias
+    
+    // Render all via geometry (instanced shader type) from all layers
+    for (const [renderKey, data] of layerRenderData.entries()) {
+      // Only render instanced geometry (vias) - check using renderKey suffix
+      if (!renderKey.endsWith('_instanced')) continue;
+      
+      // Via geometry is organized as: [size1_LOD0, size2_LOD0, ..., size1_LOD1, size2_LOD1, ..., size1_LOD2, size2_LOD2, ...]
+      // We need to render ALL size groups at the selected LOD level
+      const totalLODs = data.lodBuffers.length;
+      const numSizes = totalLODs / 3;  // 3 LOD levels per size group
+      
+      // Don't render vias at LOD 3 or higher (too zoomed out)
+      if (currentLOD >= 3) {
+        if (frameCount < 10) {
+          console.log(`[VIA] ${data.layerId}: LOD${currentLOD} - skipping all vias (too zoomed out)`);
+        }
+        continue;
+      }
+      
+      // Calculate which entries belong to the current LOD level
+      const lodStartIdx = currentLOD * numSizes;
+      const lodEndIdx = lodStartIdx + numSizes;
+      
+      if (frameCount < 10) {
+        console.log(`[VIA] ${data.layerId}: zoom=${state.zoom.toFixed(2)}, currentLOD=${currentLOD}, rendering via LOD${currentLOD}`);
+        console.log(`  Total entries: ${totalLODs}, numSizes: ${numSizes}, range: ${lodStartIdx}-${lodEndIdx-1}`);
+      }
+      
+      let renderedCount = 0;
+      // Render each size group at this LOD level
+      for (let idx = lodStartIdx; idx < lodEndIdx && idx < totalLODs; idx++) {
+        const vb = data.lodBuffers[idx];
+        const count = data.lodVertexCounts[idx];
+        
+        // Skip if no vertices (empty LOD level like LOD2)
+        if (!vb || !count || count === 0) {
+          if (frameCount < 10) {
+            console.log(`  Entry ${idx}: SKIP (no vertices)`);
+          }
+          continue;
+        }
+        
+        const instanceBuf = data.lodInstanceBuffers?.[idx];
+        const instanceCount = data.lodInstanceCounts?.[idx] ?? 0;
+        
+        // Skip if no instances
+        if (!instanceBuf || instanceCount === 0) {
+          if (frameCount < 10) {
+            console.log(`  Entry ${idx}: SKIP (no instances)`);
+          }
+          continue;
+        }
+        
+        if (frameCount < 10) {
+          console.log(`  Entry ${idx}: RENDER ${instanceCount} instances, ${count} vertices`);
+        }
+        
+        pass.setPipeline(pipelineInstanced);
+        pass.setVertexBuffer(0, vb);
+        pass.setVertexBuffer(1, instanceBuf);
+        
+        // Use gold color for vias
+        uniformData.set(viaColor, 0);
+        device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+        pass.setBindGroup(0, data.bindGroup);
+        
+        // Draw instanced
+        const ib = data.lodIndexBuffers?.[idx] ?? null;
+        const ic = data.lodIndexCounts?.[idx] ?? 0;
+        
+        if (ib && ic > 0) {
+          pass.setIndexBuffer(ib, "uint32");
+          pass.drawIndexed(ic, instanceCount);
+        } else {
+          pass.draw(count, instanceCount);
+        }
+        drawn++;
+        renderedCount++;
+      }
+      
+      if (frameCount < 10 && renderedCount === 0) {
+        console.warn(`[VIA WARNING] ${data.layerId}: No vias rendered at LOD${currentLOD}!`);
+      }
+    }
+  }
+  
   pass.end();
 
   device.queue.submit([encoder.finish()]);
@@ -981,6 +1251,8 @@ async function init() {
 
   const shaderModuleWithAlpha = device.createShaderModule({ code: basicShaderCode });
   const shaderModuleNoAlpha = device.createShaderModule({ code: basicNoAlphaShaderCode });
+  const shaderModuleInstanced = device.createShaderModule({ code: instancedShaderCode });
+  const shaderModuleInstancedRot = device.createShaderModule({ code: instancedRotShaderCode });
 
   // Pipeline for batch_colored and basic geometry (with per-vertex alpha at location(1))
   pipelineWithAlpha = device.createRenderPipeline({
@@ -1038,6 +1310,92 @@ async function init() {
     },
     fragment: {
       module: shaderModuleNoAlpha,
+      entryPoint: "fs_main",
+      targets: [{
+        format: canvasFormat,
+        blend: {
+          color: {
+            srcFactor: "src-alpha",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          },
+          alpha: {
+            srcFactor: "one",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          }
+        }
+      }]
+    },
+    primitive: { topology: "triangle-list" }
+  });
+
+  // Pipeline for instanced geometry (vias without rotation)
+  // Base shape vertices + instance data (x, y) per instance
+  pipelineInstanced = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: shaderModuleInstanced,
+      entryPoint: "vs_main",
+      buffers: [
+        {
+          // Base shape vertices (location 0)
+          arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+        },
+        {
+          // Instance data: x, y (location 1)
+          arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+          stepMode: "instance",
+          attributes: [{ shaderLocation: 1, offset: 0, format: "float32x2" }]
+        }
+      ]
+    },
+    fragment: {
+      module: shaderModuleInstanced,
+      entryPoint: "fs_main",
+      targets: [{
+        format: canvasFormat,
+        blend: {
+          color: {
+            srcFactor: "src-alpha",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          },
+          alpha: {
+            srcFactor: "one",
+            dstFactor: "one-minus-src-alpha",
+            operation: "add"
+          }
+        }
+      }]
+    },
+    primitive: { topology: "triangle-list" }
+  });
+
+  // Pipeline for instanced_rot geometry (pads with rotation)
+  // Base shape vertices + instance data (x, y, rotation) per instance
+  pipelineInstancedRot = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: shaderModuleInstancedRot,
+      entryPoint: "vs_main",
+      buffers: [
+        {
+          // Base shape vertices (location 0)
+          arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+        },
+        {
+          // Instance data: x, y, rotation (location 1)
+          arrayStride: 3 * Float32Array.BYTES_PER_ELEMENT,
+          stepMode: "instance",
+          attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }]
+        }
+      ]
+    },
+    fragment: {
+      module: shaderModuleInstancedRot,
       entryPoint: "fs_main",
       targets: [{
         format: canvasFormat,

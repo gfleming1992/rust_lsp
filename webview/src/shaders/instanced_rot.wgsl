@@ -1,7 +1,6 @@
-// Instanced shader with quantized rotation support (0°, 90°, 180°, 270°).
-// For rendering repeated geometry at different positions with orthogonal rotations.
-// Instance data: vec3<f32> = (offsetX, offsetY, rotationQuad)
-// rotationQuad: 0=0°, 1=90°, 2=180°, 3=270°
+// Instanced shader with rotation support.
+// For rendering repeated geometry at different positions with arbitrary rotations.
+// Instance data: vec3<f32> = (offsetX, offsetY, rotationRadians)
 
 struct VSOut {
   @builtin(position) Position : vec4<f32>,
@@ -21,15 +20,10 @@ struct Uniforms {
 fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut {
   var out : VSOut;
   
-  // Extract rotation quadrant (0-3)
-  let quad = u32(inst.z) & 3u;
-  
-  // Precomputed sin/cos for 0°, 90°, 180°, 270°
-  let cosTable = array<f32, 4>(1.0, 0.0, -1.0, 0.0);
-  let sinTable = array<f32, 4>(0.0, 1.0, 0.0, -1.0);
-  
-  let c = cosTable[quad];
-  let s = sinTable[quad];
+  // Extract rotation angle in radians
+  let angle = inst.z;
+  let c = cos(angle);
+  let s = sin(angle);
   
   // Apply rotation
   let rotated = vec2<f32>(

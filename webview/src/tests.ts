@@ -138,10 +138,94 @@ function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
     });
   }
   
+  // Read instanced_rot geometry (pads with rotation)
+  const numInstancedRotLods = view.getUint32(offset, true);
+  offset += 4;
+  
+  const instancedRotLods = [];
+  for (let i = 0; i < numInstancedRotLods; i++) {
+    const vertexCount = view.getUint32(offset, true);
+    offset += 4;
+    const indexCount = view.getUint32(offset, true);
+    offset += 4;
+    const instanceCount = view.getUint32(offset, true);
+    offset += 4;
+    
+    // Zero-copy view into buffer for vertex data (base shape)
+    const vertexData = Array.from(new Float32Array(buffer, offset, vertexCount * 2));
+    offset += vertexCount * 2 * 4;
+    
+    // Zero-copy view into buffer for index data
+    const indexData = indexCount > 0 ? Array.from(new Uint32Array(buffer, offset, indexCount)) : undefined;
+    offset += indexCount * 4;
+    
+    // Zero-copy view for instance data (x, y, rotation - 3 floats per instance)
+    const instanceData = instanceCount > 0 ? Array.from(new Float32Array(buffer, offset, instanceCount * 3)) : undefined;
+    offset += instanceCount * 3 * 4;
+    
+    instancedRotLods.push({
+      vertexData,
+      vertexCount,
+      indexData,
+      indexCount,
+      instanceData,
+      instanceCount
+    });
+  }
+  
+  // Read instanced geometry (vias without rotation)
+  const numInstancedLods = view.getUint32(offset, true);
+  offset += 4;
+  
+  const instancedLods = [];
+  for (let i = 0; i < numInstancedLods; i++) {
+    const vertexCount = view.getUint32(offset, true);
+    offset += 4;
+    const indexCount = view.getUint32(offset, true);
+    offset += 4;
+    const instanceCount = view.getUint32(offset, true);
+    offset += 4;
+    
+    // Zero-copy view into buffer for vertex data (base shape)
+    const vertexData = Array.from(new Float32Array(buffer, offset, vertexCount * 2));
+    offset += vertexCount * 2 * 4;
+    
+    // Zero-copy view into buffer for index data
+    const indexData = indexCount > 0 ? Array.from(new Uint32Array(buffer, offset, indexCount)) : undefined;
+    offset += indexCount * 4;
+    
+    // Zero-copy view for instance data (x, y - 2 floats per instance)
+    const instanceData = instanceCount > 0 ? Array.from(new Float32Array(buffer, offset, instanceCount * 2)) : undefined;
+    offset += instanceCount * 2 * 4;
+    
+    instancedLods.push({
+      vertexData,
+      vertexCount,
+      indexData,
+      indexCount,
+      instanceData,
+      instanceCount
+    });
+  }
+  
   // Debug logging
-  console.log(`[parseBinaryLayer] Parsed ${layerId}: batch=${batchLods.length} LODs, batch_colored=${coloredLods.length} LODs`);
+  console.log(`[parseBinaryLayer] Parsed ${layerId}: batch=${batchLods.length} LODs, batch_colored=${coloredLods.length} LODs, instanced_rot=${instancedRotLods.length} LODs, instanced=${instancedLods.length} LODs`);
   if (coloredLods.length > 0) {
     console.log(`[parseBinaryLayer] First colored LOD: ${coloredLods[0].vertexCount} vertices, alphaData=${coloredLods[0].alphaData ? 'present' : 'missing'}`);
+  }
+  if (instancedRotLods.length > 0) {
+    const lod0 = instancedRotLods[0];
+    console.log(`[parseBinaryLayer] instanced_rot LOD0: ${lod0.instanceCount} instances, ${lod0.vertexCount} vertices, instanceData=${lod0.instanceData?.length} floats`);
+    if (lod0.instanceData && lod0.instanceData.length >= 3) {
+      console.log(`[parseBinaryLayer] First pad: x=${lod0.instanceData[0]}, y=${lod0.instanceData[1]}, rot=${lod0.instanceData[2]} radians (${(lod0.instanceData[2] * 180 / Math.PI).toFixed(1)}°)`);
+    }
+  }
+  if (instancedLods.length > 0) {
+    console.log(`[parseBinaryLayer] instanced LODs for ${layerId}:`);
+    for (let i = 0; i < instancedLods.length; i++) {
+      const lod = instancedLods[i];
+      console.log(`  LOD${i}: ${lod.instanceCount} instances, ${lod.vertexCount} verts, ${lod.indexCount} indices, instanceData=${lod.instanceData?.length} floats`);
+    }
   }
   
   return {
@@ -150,7 +234,9 @@ function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
     defaultColor: color,
     geometry: {
       batch: batchLods.length > 0 ? batchLods : undefined,
-      batch_colored: coloredLods.length > 0 ? coloredLods : undefined
+      batch_colored: coloredLods.length > 0 ? coloredLods : undefined,
+      instanced_rot: instancedRotLods.length > 0 ? instancedRotLods : undefined,
+      instanced: instancedLods.length > 0 ? instancedLods : undefined
     }
   };
 }
