@@ -2308,6 +2308,7 @@ fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
 }
 
 /// Generate instanced_rot geometry for pads (shapes with rotation)
+/// Creates 3 LOD levels, each containing multiple geometries for different pad shapes
 fn generate_pad_geometry(
     pads: &[PadInstance],
     primitives: &HashMap<String, StandardPrimitive>,
@@ -2332,7 +2333,9 @@ fn generate_pad_geometry(
         println!("  Pad shape groups: {}", shape_groups.len());
     }
     
-    let mut all_lods = Vec::new();
+    let mut lod0_entries = Vec::new();
+    let mut lod1_entries = Vec::new();
+    let mut lod2_entries = Vec::new();
     
     for (shape_id, instances) in shape_groups {
         if let Some(primitive) = primitives.get(&shape_id) {
@@ -2353,23 +2356,54 @@ fn generate_pad_geometry(
             
             let vert_count = shape_verts.len() / 2;
             let idx_count = shape_indices.len();
+            let inst_count = instance_data.len() / 3; // 3 floats per instance
             
-            all_lods.push(GeometryLOD {
+            // For pads, show at all LOD levels (they're always visible)
+            // LOD0: Full detail
+            lod0_entries.push(GeometryLOD {
+                vertex_data: shape_verts.clone(),
+                vertex_count: vert_count,
+                index_data: Some(shape_indices.clone()),
+                index_count: Some(idx_count),
+                alpha_data: None,
+                instance_data: Some(instance_data.clone()),
+                instance_count: Some(inst_count),
+            });
+            
+            // LOD1: Same detail (pads are important)
+            lod1_entries.push(GeometryLOD {
+                vertex_data: shape_verts.clone(),
+                vertex_count: vert_count,
+                index_data: Some(shape_indices.clone()),
+                index_count: Some(idx_count),
+                alpha_data: None,
+                instance_data: Some(instance_data.clone()),
+                instance_count: Some(inst_count),
+            });
+            
+            // LOD2: Same detail (pads should remain visible when zoomed out)
+            lod2_entries.push(GeometryLOD {
                 vertex_data: shape_verts,
                 vertex_count: vert_count,
                 index_data: Some(shape_indices),
                 index_count: Some(idx_count),
                 alpha_data: None,
-                instance_data: Some(instance_data.clone()),
-                instance_count: Some(instance_data.len() / 3), // 3 floats per instance
+                instance_data: Some(instance_data),
+                instance_count: Some(inst_count),
             });
         } else if std::env::var("DEBUG_PADS").is_ok() {
             println!("    WARNING: Shape {} not found in primitives! ({} instances skipped)", shape_id, instances.len());
         }
     }
     
+    // Organize as: all LOD0 entries, then all LOD1 entries, then all LOD2 entries
+    let mut all_lods = Vec::new();
+    all_lods.extend(lod0_entries);
+    all_lods.extend(lod1_entries);
+    all_lods.extend(lod2_entries);
+    
     if std::env::var("DEBUG_PADS").is_ok() {
-        println!("  Generated {} pad LOD entries", all_lods.len());
+        println!("  Generated {} total pad LOD entries ({} shapes x 3 LODs)", all_lods.len(), all_lods.len() / 3);
     }
     
     Ok(all_lods)

@@ -1005,6 +1005,60 @@ function render() {
       // Skip vias (instanced shader) - they'll be rendered separately with gold color
       if (renderKey.endsWith('_instanced')) continue;
       
+      // Handle instanced_rot (pads) - uses multi-shape LOD structure like vias
+      if (data.shaderType === 'instanced_rot') {
+        const totalLODs = data.lodBuffers.length;
+        const numShapes = totalLODs / 3;  // 3 LOD levels per shape
+        
+        // Calculate which entries belong to the current LOD level
+        const lodStartIdx = currentLOD * numShapes;
+        const lodEndIdx = lodStartIdx + numShapes;
+        
+        if (frameCount < 2) {
+          console.log(`[PAD] ${data.layerId}: zoom=${state.zoom.toFixed(2)}, currentLOD=${currentLOD}, rendering pad LOD${currentLOD}`);
+          console.log(`  Total entries: ${totalLODs}, numShapes: ${numShapes}, range: ${lodStartIdx}-${lodEndIdx-1}`);
+        }
+        
+        pass.setPipeline(pipelineInstancedRot);
+        
+        // Render each shape at this LOD level
+        for (let idx = lodStartIdx; idx < lodEndIdx && idx < totalLODs; idx++) {
+          const vb = data.lodBuffers[idx];
+          const count = data.lodVertexCounts[idx];
+          const instanceBuf = data.lodInstanceBuffers?.[idx];
+          const instanceCount = data.lodInstanceCounts?.[idx] ?? 0;
+          
+          if (!vb || !count || !instanceBuf || instanceCount === 0) continue;
+          
+          pass.setVertexBuffer(0, vb);
+          pass.setVertexBuffer(1, instanceBuf);
+          
+          // Update uniform buffer with layer color
+          const layerColor = getLayerColor(data.layerId);
+          uniformData.set(layerColor, 0);
+          device.queue.writeBuffer(data.uniformBuffer, 0, uniformData);
+          pass.setBindGroup(0, data.bindGroup);
+          
+          // Draw instanced
+          const ib = data.lodIndexBuffers?.[idx];
+          const ic = data.lodIndexCounts?.[idx] ?? 0;
+          if (ib && ic > 0) {
+            pass.setIndexBuffer(ib, "uint32");
+            pass.drawIndexed(ic, instanceCount);
+            totalIndices += ic * instanceCount;
+          } else {
+            pass.draw(count, instanceCount);
+          }
+          
+          if (frameCount < 2) {
+            console.log(`  Shape ${idx}: RENDER ${instanceCount} instances, ${count} vertices`);
+          }
+          drawn++;
+        }
+        
+        continue; // Skip normal rendering path
+      }
+      
       // Skip if requested LOD doesn't exist for this layer (fall back to last available)
       const actualLOD = Math.min(currentLOD, data.lodBuffers.length - 1);
       const vb = data.lodBuffers[actualLOD];
@@ -1018,8 +1072,6 @@ function render() {
         usePipeline = pipelineNoAlpha;
       } else if (renderKey.endsWith('_instanced')) {
         usePipeline = pipelineInstanced;
-      } else if (data.shaderType === 'instanced_rot') {
-        usePipeline = pipelineInstancedRot;
       } else {
         usePipeline = pipelineWithAlpha;
       }
@@ -1027,19 +1079,10 @@ function render() {
       pass.setPipeline(usePipeline);
       pass.setVertexBuffer(0, vb);
       
-      // Handle instanced geometry
-      if (renderKey.endsWith('_instanced') || data.shaderType === 'instanced_rot') {
+      // Handle instanced geometry (should not reach here for instanced_rot)
+      if (renderKey.endsWith('_instanced')) {
         const instanceBuf = data.lodInstanceBuffers?.[actualLOD];
         const instanceCount = data.lodInstanceCounts?.[actualLOD] ?? 0;
-        
-        if (frameCount === 0 && instanceCount > 0) {
-          console.log(`[RENDER] Drawing ${data.shaderType} for ${data.layerId}: ${instanceCount} instances, ${count} vertices per shape`);
-          // Log the first instance buffer data to see actual positions
-          if (data.lodInstanceBuffers && data.lodInstanceBuffers[actualLOD]) {
-            const buf = data.lodInstanceBuffers[actualLOD];
-            console.log(`[RENDER] Instance buffer size: ${buf.size} bytes (${buf.size / 12} instances at 12 bytes each = 3 floats)`);
-          }
-        }
         
         if (instanceBuf && instanceCount > 0) {
           pass.setVertexBuffer(1, instanceBuf);
@@ -1061,8 +1104,6 @@ function render() {
             pass.draw(count, instanceCount);
           }
           drawn++;
-        } else if (frameCount === 0) {
-          console.warn(`[RENDER] Skipping ${data.shaderType} for ${data.layerId}: instanceBuf=${!!instanceBuf}, instanceCount=${instanceCount}`);
         }
       } else {
         // Only set alpha buffer for pipelines that use it (batch_colored, basic, etc.)
