@@ -103,24 +103,27 @@ pub struct PadInstance {
 #[derive(Debug, Clone)]
 pub struct PadStackDef {
     pub hole_diameter: f32,
-    pub outer_diameter: f32,  // From pad definition circle
+    pub outer_diameter: f32,  // From pad definition circle (deprecated for non-circles)
+    pub shape: StandardPrimitive,  // Actual pad shape
 }
 
-/// Via instance (circular hole through layers)
+/// Via instance (hole through layers - can be circular, square, etc.)
 #[derive(Debug, Clone, Serialize)]
 pub struct ViaInstance {
     pub x: f32,
     pub y: f32,
-    pub diameter: f32,
+    pub diameter: f32,  // For circles, or max dimension for other shapes
     pub hole_diameter: f32,
+    pub shape: StandardPrimitive,
 }
 
 /// Standard primitive shape definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StandardPrimitive {
     Circle { diameter: f32 },
     Rectangle { width: f32, height: f32 },
     Oval { width: f32, height: f32 },
+    RoundRect { width: f32, height: f32, corner_radius: f32 },
 }
 
 /// Represents all geometries organized by layer
@@ -677,12 +680,13 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
 fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
     let mut padstack_defs = IndexMap::new();
     
-    // First, parse user primitive circles to get their diameters
+    // First, parse user primitive circles to get their diameters AND line widths
+    // UserPrimitives can be HOLLOW circles (annular rings) with lineWidth defining ring thickness
     // DictionaryUser is under root -> DictionaryUser or root -> Content -> DictionaryUser or Ecad -> Content -> DictionaryUser
-    let mut user_circles = HashMap::new();
+    let mut user_circles: HashMap<String, (f32, f32)> = HashMap::new(); // id -> (diameter, lineWidth)
     
     // Helper to search for DictionaryUser
-    fn find_dict_user(node: &XmlNode, circles: &mut HashMap<String, f32>) {
+    fn find_dict_user(node: &XmlNode, circles: &mut HashMap<String, (f32, f32)>) {
         if node.name == "DictionaryUser" {
             for entry in &node.children {
                 if entry.name == "EntryUser" {
@@ -693,7 +697,16 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
                                     if circle.name == "Circle" {
                                         if let Some(dia) = circle.attributes.get("diameter") {
                                             if let Ok(diameter) = dia.parse::<f32>() {
-                                                circles.insert(id.clone(), diameter);
+                                                // Look for LineDesc child to get lineWidth (annular ring width)
+                                                let mut line_width = 0.0;
+                                                for desc in &circle.children {
+                                                    if desc.name == "LineDesc" {
+                                                        if let Some(lw) = desc.attributes.get("lineWidth") {
+                                                            line_width = lw.parse().unwrap_or(0.0);
+                                                        }
+                                                    }
+                                                }
+                                                circles.insert(id.clone(), (diameter, line_width));
                                             }
                                         }
                                     }
@@ -711,14 +724,23 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
     
     find_dict_user(root, &mut user_circles);
     
+    // Parse standard primitives for shape definitions
+    let standard_primitives = parse_standard_primitives(root);
+    
     // Now parse PadStackDef entries - search recursively for Step nodes containing PadStackDef
-    fn find_padstack_defs(node: &XmlNode, defs: &mut IndexMap<String, PadStackDef>, circles: &HashMap<String, f32>) {
+    fn find_padstack_defs(
+        node: &XmlNode,
+        defs: &mut IndexMap<String, PadStackDef>,
+        circles: &HashMap<String, (f32, f32)>,  // id -> (diameter, lineWidth)
+        primitives: &HashMap<String, StandardPrimitive>
+    ) {
         if node.name == "Step" {
             for child in &node.children {
                 if child.name == "PadStackDef" {
                     if let Some(name) = child.attributes.get("name") {
                         let mut hole_diameter = 0.0;
                         let mut outer_diameter = 0.0;
+                        let mut shape: Option<StandardPrimitive> = None;
                         
                         // Find PadstackHoleDef
                         for hole_def in &child.children {
@@ -730,13 +752,40 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
                                     .unwrap_or(0.0);
                             }
                             
-                            // Find PadstackPadDef to get outer diameter from UserPrimitiveRef
+                            // Find PadstackPadDef to get shape
                             if hole_def.name == "PadstackPadDef" {
                                 for pad_child in &hole_def.children {
+                                    // Check for UserPrimitiveRef (circles with optional lineWidth for annular rings)
                                     if pad_child.name == "UserPrimitiveRef" {
                                         if let Some(user_id) = pad_child.attributes.get("id") {
-                                            if let Some(&dia) = circles.get(user_id) {
-                                                outer_diameter = dia;
+                                            if let Some(&(center_dia, line_width)) = circles.get(user_id) {
+                                                // If lineWidth > 0, this is a HOLLOW circle (annular ring)
+                                                // The diameter is the centerline, lineWidth is the ring thickness
+                                                // Outer diameter = center_dia + line_width
+                                                // Inner diameter would be center_dia - line_width, but we use hole_diameter instead
+                                                if line_width > 0.0 {
+                                                    // Annular ring: outer edge is centerline + half lineWidth on each side
+                                                    outer_diameter = center_dia + line_width;
+                                                } else {
+                                                    // Solid circle
+                                                    outer_diameter = center_dia;
+                                                }
+                                                shape = Some(StandardPrimitive::Circle { diameter: outer_diameter });
+                                            }
+                                        }
+                                    }
+                                    // Check for StandardPrimitiveRef (all shapes)
+                                    else if pad_child.name == "StandardPrimitiveRef" {
+                                        if let Some(std_id) = pad_child.attributes.get("id") {
+                                            if let Some(prim) = primitives.get(std_id) {
+                                                shape = Some(prim.clone());
+                                                // Set outer_diameter based on shape type
+                                                outer_diameter = match prim {
+                                                    StandardPrimitive::Circle { diameter } => *diameter,
+                                                    StandardPrimitive::Rectangle { width, height } => width.max(*height),
+                                                    StandardPrimitive::Oval { width, height } => width.max(*height),
+                                                    StandardPrimitive::RoundRect { width, height, .. } => width.max(*height),
+                                                };
                                             }
                                         }
                                     }
@@ -745,13 +794,16 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
                         }
                         
                         if hole_diameter > 0.0 && outer_diameter > 0.0 {
-                            defs.insert(
-                                name.clone(),
-                                PadStackDef {
-                                    hole_diameter,
-                                    outer_diameter,
-                                },
-                            );
+                            if let Some(shape) = shape {
+                                defs.insert(
+                                    name.clone(),
+                                    PadStackDef {
+                                        hole_diameter,
+                                        outer_diameter,
+                                        shape,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -760,11 +812,11 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
         
         // Recurse into children
         for child in &node.children {
-            find_padstack_defs(child, defs, circles);
+            find_padstack_defs(child, defs, circles, primitives);
         }
     }
     
-    find_padstack_defs(root, &mut padstack_defs, &user_circles);
+    find_padstack_defs(root, &mut padstack_defs, &user_circles, &standard_primitives);
     
     padstack_defs
 }
@@ -1536,17 +1588,23 @@ pub fn generate_layer_json(
     };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("    [{}] ShaderGeometry: batch={}, batch_colored={}", 
+        println!("    [{}] ShaderGeometry: batch={}, batch_colored={}, instanced_rot={}, instanced={}", 
             layer_name, 
             shader_geom.batch.is_some(),
-            shader_geom.batch_colored.is_some());
+            shader_geom.batch_colored.is_some(),
+            shader_geom.instanced_rot.is_some(),
+            shader_geom.instanced.is_some());
         
         // Debug: serialize and check JSON output
         if let Ok(json_str) = serde_json::to_string(&shader_geom) {
             let has_batch_colored = json_str.contains("batch_colored");
-            println!("    [{}] JSON contains batch_colored: {}", layer_name, has_batch_colored);
+            let has_instanced_rot = json_str.contains("instanced_rot");
+            println!("    [{}] JSON contains batch_colored: {}, instanced_rot: {}", layer_name, has_batch_colored, has_instanced_rot);
             if !has_batch_colored && shader_geom.batch_colored.is_some() {
                 println!("    [{}] WARNING: batch_colored is Some but not in JSON!", layer_name);
+            }
+            if !has_instanced_rot && shader_geom.instanced_rot.is_some() {
+                println!("    [{}] WARNING: instanced_rot is Some but not in JSON!", layer_name);
             }
         }
     }
@@ -1822,6 +1880,18 @@ fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitiv
                                 .unwrap_or(0.0);
                             Some(StandardPrimitive::Oval { width, height })
                         }
+                        "RectRound" => {
+                            let width = child.attributes.get("width")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            let height = child.attributes.get("height")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            let corner_radius = child.attributes.get("radius")
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .unwrap_or(0.0);
+                            Some(StandardPrimitive::RoundRect { width, height, corner_radius })
+                        }
                         _ => None,
                     };
                     
@@ -1949,13 +2019,14 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                     }
                 }
                 
-                // Look up padstack definition to get diameters
+                // Look up padstack definition to get diameters and shape
                 if let Some(def) = padstack_defs.get(&padstack_ref) {
                     vias.push(ViaInstance {
                         x,
                         y,
                         diameter: def.outer_diameter,
                         hole_diameter: def.hole_diameter,
+                        shape: def.shape.clone(),
                     });
                 }
             } else if node.attributes.contains_key("padstackDefRef") {
@@ -1983,6 +2054,7 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                                 y,
                                 diameter: def.outer_diameter,
                                 hole_diameter: def.hole_diameter,
+                                shape: def.shape.clone(),
                             });
                         }
                     }
@@ -2076,6 +2148,69 @@ fn tessellate_rectangle(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// Tessellate a rectangular annular ring (rectangle with circular hole)
+fn tessellate_rectangular_ring(width: f32, height: f32, hole_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    let segments = 32;
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Outer rectangle vertices
+    vertices.extend_from_slice(&[
+        -hw, -hh,  // 0: Bottom-left
+         hw, -hh,  // 1: Bottom-right
+         hw,  hh,  // 2: Top-right
+        -hw,  hh,  // 3: Top-left
+    ]);
+    
+    // Inner circle vertices (hole)
+    let hole_start_idx = 4;
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        vertices.push(angle.cos() * hole_radius);
+        vertices.push(angle.sin() * hole_radius);
+    }
+    
+    // Triangulate using ear clipping approach
+    // Connect outer rectangle to inner circle with triangles
+    
+    // Bottom edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(1); // Bottom-right corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Right edge to circle  
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(2); // Top-right corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Top edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(3); // Top-left corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Left edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(0); // Bottom-left corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    (vertices, indices)
+}
+
 /// Tessellate an oval (ellipse)
 fn tessellate_oval(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
     let segments = 32;
@@ -2099,6 +2234,61 @@ fn tessellate_oval(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
     (vertices, indices)
 }
 
+/// Tessellate a rounded rectangle
+fn tessellate_roundrect(width: f32, height: f32, corner_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    let r = corner_radius.min(hw).min(hh); // Clamp radius to half-dimensions
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Center point
+    vertices.push(0.0);
+    vertices.push(0.0);
+    let center_idx = 0u32;
+    let mut vertex_idx = 1u32;
+    
+    let segments_per_corner = 8;
+    
+    // Helper to add corner arc
+    let mut add_corner = |cx: f32, cy: f32, start_angle: f32| {
+        let start_idx = vertex_idx;
+        for i in 0..=segments_per_corner {
+            let angle = start_angle + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+            vertices.push(cx + angle.cos() * r);
+            vertices.push(cy + angle.sin() * r);
+            
+            if i > 0 {
+                indices.push(center_idx);
+                indices.push(vertex_idx - 1);
+                indices.push(vertex_idx);
+            }
+            vertex_idx += 1;
+        }
+        start_idx
+    };
+    
+    // Top-right corner (0° to 90°)
+    add_corner(hw - r, hh - r, 0.0);
+    
+    // Top-left corner (90° to 180°)
+    add_corner(-hw + r, hh - r, std::f32::consts::FRAC_PI_2);
+    
+    // Bottom-left corner (180° to 270°)
+    add_corner(-hw + r, -hh + r, std::f32::consts::PI);
+    
+    // Bottom-right corner (270° to 360°/0°)
+    add_corner(hw - r, -hh + r, std::f32::consts::PI + std::f32::consts::FRAC_PI_2);
+    
+    // Close the shape by connecting last vertex to first
+    indices.push(center_idx);
+    indices.push(vertex_idx - 1);
+    indices.push(1); // First vertex after center
+    
+    (vertices, indices)
+}
+
 /// Tessellate a standard primitive shape
 fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
     match primitive {
@@ -2110,6 +2300,9 @@ fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
         }
         StandardPrimitive::Oval { width, height } => {
             tessellate_oval(*width, *height)
+        }
+        StandardPrimitive::RoundRect { width, height, corner_radius } => {
+            tessellate_roundrect(*width, *height, *corner_radius)
         }
     }
 }
@@ -2123,6 +2316,10 @@ fn generate_pad_geometry(
         return Ok(Vec::new());
     }
     
+    if std::env::var("DEBUG_PADS").is_ok() {
+        println!("  Generating pad geometry for {} pads", pads.len());
+    }
+    
     // Group pads by shape_id for efficient instancing
     let mut shape_groups: HashMap<String, Vec<&PadInstance>> = HashMap::new();
     for pad in pads {
@@ -2131,10 +2328,18 @@ fn generate_pad_geometry(
             .push(pad);
     }
     
+    if std::env::var("DEBUG_PADS").is_ok() {
+        println!("  Pad shape groups: {}", shape_groups.len());
+    }
+    
     let mut all_lods = Vec::new();
     
     for (shape_id, instances) in shape_groups {
         if let Some(primitive) = primitives.get(&shape_id) {
+            if std::env::var("DEBUG_PADS").is_ok() {
+                println!("    Shape {}: {} instances, primitive: {:?}", shape_id, instances.len(), primitive);
+            }
+            
             // Tessellate the base shape once
             let (shape_verts, shape_indices) = tessellate_primitive(primitive);
             
@@ -2158,51 +2363,84 @@ fn generate_pad_geometry(
                 instance_data: Some(instance_data.clone()),
                 instance_count: Some(instance_data.len() / 3), // 3 floats per instance
             });
+        } else if std::env::var("DEBUG_PADS").is_ok() {
+            println!("    WARNING: Shape {} not found in primitives! ({} instances skipped)", shape_id, instances.len());
         }
+    }
+    
+    if std::env::var("DEBUG_PADS").is_ok() {
+        println!("  Generated {} pad LOD entries", all_lods.len());
     }
     
     Ok(all_lods)
 }
 
-/// Generate instanced geometry for vias with size-based LOD
-/// Creates 3 LOD levels, each containing multiple geometries for different via sizes
-/// LOD0: Annular rings (all sizes), LOD1: Solid circles (large only), LOD2: Culled (small only)
-/// Larger vias stay detailed longer, smaller vias simplify/cull earlier
+/// Generate instanced geometry for vias with shape and size-based LOD
+/// Creates 3 LOD levels, each containing multiple geometries for different via shapes and sizes
+/// Vias are grouped by shape type (circle, rectangle, oval) and size
 fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyhow::Error> {
     if vias.is_empty() {
         return Ok(Vec::new());
     }
     
-    // Group vias by size (both diameter and hole)
-    let mut size_groups: HashMap<String, Vec<&ViaInstance>> = HashMap::new();
+    // Group vias by shape type and size
+    #[derive(Debug, Hash, Eq, PartialEq)]
+    enum ShapeKey {
+        Circle { diameter_key: String, hole_key: String },
+        Rectangle { width_key: String, height_key: String, hole_key: String },
+        Oval { width_key: String, height_key: String, hole_key: String },
+    }
+    
+    let mut shape_groups: HashMap<ShapeKey, Vec<&ViaInstance>> = HashMap::new();
     for via in vias {
-        let key = format!("{:.4}_{:.4}", via.diameter, via.hole_diameter);
-        size_groups.entry(key)
+        let hole_key = format!("{:.4}", via.hole_diameter);
+        let key = match &via.shape {
+            StandardPrimitive::Circle { diameter } => {
+                ShapeKey::Circle {
+                    diameter_key: format!("{:.4}", diameter),
+                    hole_key,
+                }
+            }
+            StandardPrimitive::Rectangle { width, height } => {
+                ShapeKey::Rectangle {
+                    width_key: format!("{:.4}", width),
+                    height_key: format!("{:.4}", height),
+                    hole_key,
+                }
+            }
+            StandardPrimitive::Oval { width, height } => {
+                ShapeKey::Oval {
+                    width_key: format!("{:.4}", width),
+                    height_key: format!("{:.4}", height),
+                    hole_key,
+                }
+            }
+            StandardPrimitive::RoundRect { width, height, .. } => {
+                ShapeKey::Rectangle {
+                    width_key: format!("{:.4}", width),
+                    height_key: format!("{:.4}", height),
+                    hole_key,
+                }
+            }
+        };
+        shape_groups.entry(key)
             .or_insert_with(Vec::new)
             .push(via);
     }
     
-    // We'll create LOD entries for each size, organized by LOD level
-    // Size-based LOD: larger vias use detailed geometry longer
-    // Small vias (< 0.5mm): LOD0=rings, LOD1=empty, LOD2=empty (simplify early)
-    // Medium vias (0.5-1.0mm): LOD0=rings, LOD1=circles, LOD2=empty
-    // Large vias (> 1.0mm): LOD0=rings, LOD1=rings, LOD2=circles (stay detailed)
     let mut lod0_entries = Vec::new();
     let mut lod1_entries = Vec::new();
     let mut lod2_entries = Vec::new();
     
-    for (size_key, instances) in size_groups {
+    for (shape_key, instances) in shape_groups {
         if let Some(first_via) = instances.first() {
-            let outer_radius = first_via.diameter / 2.0;
-            let inner_radius = first_via.hole_diameter / 2.0;
-            let diameter = first_via.diameter;
+            let hole_radius = first_via.hole_diameter / 2.0;
             
             if std::env::var("DEBUG_VIA").is_ok() {
-                println!("  Via size {}: {} instances, outer_r={:.4}, inner_r={:.4}", 
-                    size_key, instances.len(), outer_radius, inner_radius);
+                println!("  Via shape {:?}: {} instances", shape_key, instances.len());
             }
             
-            // Create instance data (x, y) for this size group
+            // Create instance data (x, y) for this shape group
             let mut instance_data = Vec::new();
             for inst in &instances {
                 instance_data.push(inst.x);
@@ -2210,50 +2448,59 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
             }
             let inst_count = instances.len();
             
-            // Tessellate geometry
-            let (ring_verts, ring_indices) = tessellate_annular_ring(outer_radius, inner_radius);
-            let (circle_verts, circle_indices) = tessellate_circle(outer_radius);
+            // Tessellate geometry based on shape
+            let (with_hole_verts, with_hole_indices, without_hole_verts, without_hole_indices, max_dimension) = match &first_via.shape {
+                StandardPrimitive::Circle { diameter } => {
+                    let radius = diameter / 2.0;
+                    let ring = tessellate_annular_ring(radius, hole_radius);
+                    let circle = tessellate_circle(radius);
+                    (ring.0, ring.1, circle.0, circle.1, *diameter)
+                }
+                StandardPrimitive::Rectangle { width, height } => {
+                    let ring = tessellate_rectangular_ring(*width, *height, hole_radius);
+                    let rect = tessellate_rectangle(*width, *height);
+                    (ring.0, ring.1, rect.0, rect.1, width.max(*height))
+                }
+                StandardPrimitive::Oval { width, height } => {
+                    // For ovals, use simplified approach: oval shape with circular hole
+                    // TODO: Proper oval ring tessellation
+                    let oval = tessellate_oval(*width, *height);
+                    (oval.0.clone(), oval.1.clone(), oval.0, oval.1, width.max(*height))
+                }
+                StandardPrimitive::RoundRect { width, height, corner_radius } => {
+                    let roundrect_ring = tessellate_rectangular_ring(*width, *height, hole_radius);
+                    let roundrect = tessellate_roundrect(*width, *height, *corner_radius);
+                    (roundrect_ring.0, roundrect_ring.1, roundrect.0, roundrect.1, width.max(*height))
+                }
+            };
             
-            // Calculate sizes before moving
-            let ring_vert_count = ring_verts.len() / 2;
-            let ring_idx_count = ring_indices.len();
-            let circle_vert_count = circle_verts.len() / 2;
-            let circle_idx_count = circle_indices.len();
+            let with_hole_vert_count = with_hole_verts.len() / 2;
+            let with_hole_idx_count = with_hole_indices.len();
+            let without_hole_vert_count = without_hole_verts.len() / 2;
+            let without_hole_idx_count = without_hole_indices.len();
             
             // Pixel-density based LOD assignment
-            // Estimate pixels at each LOD zoom threshold:
-            // LOD0: zoom >= 10 (very zoomed in)
-            // LOD1: zoom >= 5 
-            // LOD2: zoom >= 2
-            // Assume ~100 pixels per mm at zoom=1.0, scales linearly with zoom
-            let pixels_at_lod0 = diameter * 100.0 * 10.0;  // diameter in mm * px/mm * zoom
-            let pixels_at_lod1 = diameter * 100.0 * 5.0;
-            let pixels_at_lod2 = diameter * 100.0 * 2.0;
+            let pixels_at_lod0 = max_dimension * 100.0 * 10.0;
+            let pixels_at_lod1 = max_dimension * 100.0 * 5.0;
+            let pixels_at_lod2 = max_dimension * 100.0 * 2.0;
             
-            // Size-based LOD - aggressive ring removal, conservative culling:
-            // Keep rings-to-circles aggressive (400px threshold)
-            // Make culling much less aggressive (lower thresholds)
-            let needs_ring_at_lod0 = pixels_at_lod0 >= 150.0;  // ~0.15mm at zoom 10
-            let needs_ring_at_lod1 = pixels_at_lod1 >= 400.0;  // ~0.8mm at zoom 5 (aggressive - good)
-            let needs_circle_at_lod1 = pixels_at_lod1 >= 50.0;  // ~0.1mm at zoom 5 (very small vias visible)
-            let needs_circle_at_lod2 = pixels_at_lod2 >= 30.0;  // ~0.15mm at zoom 2 (only cull tiny vias)
+            let needs_hole_at_lod0 = pixels_at_lod0 >= 150.0;
+            let needs_hole_at_lod1 = pixels_at_lod1 >= 400.0;
+            let needs_shape_at_lod1 = pixels_at_lod1 >= 50.0;
+            let needs_shape_at_lod2 = pixels_at_lod2 >= 30.0;
             
             if std::env::var("DEBUG_VIA").is_ok() {
                 println!("    Pixels: LOD0={:.1}px, LOD1={:.1}px, LOD2={:.1}px", 
                     pixels_at_lod0, pixels_at_lod1, pixels_at_lod2);
-                println!("    Render: LOD0={}, LOD1={}, LOD2={}", 
-                    if needs_ring_at_lod0 { "rings" } else { "none" },
-                    if needs_ring_at_lod1 { "rings" } else if needs_circle_at_lod1 { "circles" } else { "none" },
-                    if needs_circle_at_lod2 { "circles" } else { "none" });
             }
             
-            // LOD0: Always show rings if visible
-            if needs_ring_at_lod0 {
+            // LOD0: Show with hole if large enough
+            if needs_hole_at_lod0 {
                 lod0_entries.push(GeometryLOD {
-                    vertex_data: ring_verts.clone(),
-                    vertex_count: ring_vert_count,
-                    index_data: Some(ring_indices.clone()),
-                    index_count: Some(ring_idx_count),
+                    vertex_data: with_hole_verts.clone(),
+                    vertex_count: with_hole_vert_count,
+                    index_data: Some(with_hole_indices.clone()),
+                    index_count: Some(with_hole_idx_count),
                     alpha_data: None,
                     instance_data: Some(instance_data.clone()),
                     instance_count: Some(inst_count),
@@ -2270,23 +2517,23 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
                 });
             }
             
-            // LOD1: Show rings if large enough, otherwise circles
-            if needs_ring_at_lod1 {
+            // LOD1: Show with hole if very large, otherwise solid shape
+            if needs_hole_at_lod1 {
                 lod1_entries.push(GeometryLOD {
-                    vertex_data: ring_verts,
-                    vertex_count: ring_vert_count,
-                    index_data: Some(ring_indices),
-                    index_count: Some(ring_idx_count),
+                    vertex_data: with_hole_verts,
+                    vertex_count: with_hole_vert_count,
+                    index_data: Some(with_hole_indices),
+                    index_count: Some(with_hole_idx_count),
                     alpha_data: None,
                     instance_data: Some(instance_data.clone()),
                     instance_count: Some(inst_count),
                 });
-            } else if needs_circle_at_lod1 {
+            } else if needs_shape_at_lod1 {
                 lod1_entries.push(GeometryLOD {
-                    vertex_data: circle_verts.clone(),
-                    vertex_count: circle_vert_count,
-                    index_data: Some(circle_indices.clone()),
-                    index_count: Some(circle_idx_count),
+                    vertex_data: without_hole_verts.clone(),
+                    vertex_count: without_hole_vert_count,
+                    index_data: Some(without_hole_indices.clone()),
+                    index_count: Some(without_hole_idx_count),
                     alpha_data: None,
                     instance_data: Some(instance_data.clone()),
                     instance_count: Some(inst_count),
@@ -2303,15 +2550,15 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
                 });
             }
             
-            // LOD2: Show circles only if large enough
-            if needs_circle_at_lod2 {
+            // LOD2: Show solid shape only if large enough
+            if needs_shape_at_lod2 {
                 lod2_entries.push(GeometryLOD {
-                    vertex_data: circle_verts,
-                    vertex_count: circle_vert_count,
-                    index_data: Some(circle_indices),
-                    index_count: Some(circle_idx_count),
+                    vertex_data: without_hole_verts,
+                    vertex_count: without_hole_vert_count,
+                    index_data: Some(without_hole_indices),
+                    index_count: Some(without_hole_idx_count),
                     alpha_data: None,
-                    instance_data: Some(instance_data),
+                    instance_data: Some(instance_data.clone()),
                     instance_count: Some(inst_count),
                 });
             } else {
@@ -2328,16 +2575,11 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
         }
     }
     
-    // Combine: all LOD0s first, then all LOD1s, then all LOD2s
+    // Organize as: all LOD0 entries, then all LOD1 entries, then all LOD2 entries
     let mut all_lods = Vec::new();
     all_lods.extend(lod0_entries);
     all_lods.extend(lod1_entries);
     all_lods.extend(lod2_entries);
-    
-    if std::env::var("DEBUG_VIA").is_ok() || std::env::var("PROFILE_TIMING").is_ok() {
-        println!("  Via LOD summary: {} total geometry entries ({} sizes × 3 LODs)", 
-            all_lods.len(), all_lods.len() / 3);
-    }
     
     Ok(all_lods)
 }
