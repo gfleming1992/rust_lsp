@@ -2230,15 +2230,13 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
             let pixels_at_lod1 = diameter * 100.0 * 5.0;
             let pixels_at_lod2 = diameter * 100.0 * 2.0;
             
-            // Very aggressive size-based LOD:
-            // Tiny vias (<0.5mm): cull at LOD1
-            // Small vias (0.5-0.8mm): circles at LOD1, cull at LOD2
-            // Medium vias (0.8-1.5mm): rings at LOD1, circles at LOD2
-            // Large PTH (>1.5mm): rings at LOD1 and LOD2
+            // Size-based LOD - aggressive ring removal, conservative culling:
+            // Keep rings-to-circles aggressive (400px threshold)
+            // Make culling much less aggressive (lower thresholds)
             let needs_ring_at_lod0 = pixels_at_lod0 >= 150.0;  // ~0.15mm at zoom 10
-            let needs_ring_at_lod1 = pixels_at_lod1 >= 400.0;  // ~0.8mm at zoom 5 (medium/large only)
-            let needs_circle_at_lod1 = pixels_at_lod1 >= 250.0;  // ~0.5mm at zoom 5 (small vias)
-            let needs_circle_at_lod2 = pixels_at_lod2 >= 160.0;  // ~0.8mm at zoom 2 (medium+ only)
+            let needs_ring_at_lod1 = pixels_at_lod1 >= 400.0;  // ~0.8mm at zoom 5 (aggressive - good)
+            let needs_circle_at_lod1 = pixels_at_lod1 >= 50.0;  // ~0.1mm at zoom 5 (very small vias visible)
+            let needs_circle_at_lod2 = pixels_at_lod2 >= 30.0;  // ~0.15mm at zoom 2 (only cull tiny vias)
             
             if std::env::var("DEBUG_VIA").is_ok() {
                 println!("    Pixels: LOD0={:.1}px, LOD1={:.1}px, LOD2={:.1}px", 
