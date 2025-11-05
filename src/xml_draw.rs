@@ -2235,6 +2235,7 @@ fn tessellate_oval(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
 }
 
 /// Tessellate a rounded rectangle
+/// Uses triangle strip approach instead of center fan to preserve rectangular shape
 fn tessellate_roundrect(width: f32, height: f32, corner_radius: f32) -> (Vec<f32>, Vec<u32>) {
     let hw = width / 2.0;
     let hh = height / 2.0;
@@ -2243,48 +2244,47 @@ fn tessellate_roundrect(width: f32, height: f32, corner_radius: f32) -> (Vec<f32
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
-    // Center point
-    vertices.push(0.0);
-    vertices.push(0.0);
-    let center_idx = 0u32;
-    let mut vertex_idx = 1u32;
-    
     let segments_per_corner = 8;
     
-    // Helper to add corner arc
-    let mut add_corner = |cx: f32, cy: f32, start_angle: f32| {
-        let start_idx = vertex_idx;
-        for i in 0..=segments_per_corner {
-            let angle = start_angle + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
-            vertices.push(cx + angle.cos() * r);
-            vertices.push(cy + angle.sin() * r);
-            
-            if i > 0 {
-                indices.push(center_idx);
-                indices.push(vertex_idx - 1);
-                indices.push(vertex_idx);
-            }
-            vertex_idx += 1;
-        }
-        start_idx
-    };
-    
+    // Build vertices going around the perimeter clockwise from top-right
     // Top-right corner (0° to 90°)
-    add_corner(hw - r, hh - r, 0.0);
+    for i in 0..=segments_per_corner {
+        let angle = (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((hw - r) + angle.cos() * r);
+        vertices.push((hh - r) + angle.sin() * r);
+    }
     
     // Top-left corner (90° to 180°)
-    add_corner(-hw + r, hh - r, std::f32::consts::FRAC_PI_2);
+    for i in 0..=segments_per_corner {
+        let angle = std::f32::consts::FRAC_PI_2 + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((-hw + r) + angle.cos() * r);
+        vertices.push((hh - r) + angle.sin() * r);
+    }
     
     // Bottom-left corner (180° to 270°)
-    add_corner(-hw + r, -hh + r, std::f32::consts::PI);
+    for i in 0..=segments_per_corner {
+        let angle = std::f32::consts::PI + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((-hw + r) + angle.cos() * r);
+        vertices.push((-hh + r) + angle.sin() * r);
+    }
     
-    // Bottom-right corner (270° to 360°/0°)
-    add_corner(hw - r, -hh + r, std::f32::consts::PI + std::f32::consts::FRAC_PI_2);
+    // Bottom-right corner (270° to 360°)
+    for i in 0..=segments_per_corner {
+        let angle = std::f32::consts::PI + std::f32::consts::FRAC_PI_2 + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((hw - r) + angle.cos() * r);
+        vertices.push((-hh + r) + angle.sin() * r);
+    }
     
-    // Close the shape by connecting last vertex to first
-    indices.push(center_idx);
-    indices.push(vertex_idx - 1);
-    indices.push(1); // First vertex after center
+    // Total vertices: 4 corners * (segments_per_corner + 1)
+    let total_verts = (segments_per_corner + 1) * 4;
+    
+    // Triangulate using earcut or simple fan from first vertex
+    // Use first vertex as anchor for triangle fan
+    for i in 1..(total_verts as u32 - 1) {
+        indices.push(0);
+        indices.push(i);
+        indices.push(i + 1);
+    }
     
     (vertices, indices)
 }
