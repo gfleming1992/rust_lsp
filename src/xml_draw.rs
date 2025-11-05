@@ -40,7 +40,7 @@ where
 }
 
 /// A 2D point
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -124,6 +124,7 @@ pub enum StandardPrimitive {
     Rectangle { width: f32, height: f32 },
     Oval { width: f32, height: f32 },
     RoundRect { width: f32, height: f32, corner_radius: f32 },
+    CustomPolygon { points: Vec<Point> },
 }
 
 /// Represents all geometries organized by layer
@@ -785,6 +786,14 @@ fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
                                                     StandardPrimitive::Rectangle { width, height } => width.max(*height),
                                                     StandardPrimitive::Oval { width, height } => width.max(*height),
                                                     StandardPrimitive::RoundRect { width, height, .. } => width.max(*height),
+                                                    StandardPrimitive::CustomPolygon { points } => {
+                                                        // Find bounding box of polygon
+                                                        let mut max_dim = 0.0f32;
+                                                        for p in points {
+                                                            max_dim = max_dim.max(p.x.abs()).max(p.y.abs());
+                                                        }
+                                                        max_dim * 2.0
+                                                    }
                                                 };
                                             }
                                         }
@@ -1855,7 +1864,7 @@ fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitiv
         if node.name == "EntryStandard" {
             if let Some(id) = node.attributes.get("id") {
                 for child in &node.children {
-                    let shape = match child.name.as_str() {
+                    let mut shape = match child.name.as_str() {
                         "Circle" => {
                             let diameter = child.attributes.get("diameter")
                                 .and_then(|v| v.parse::<f32>().ok())
@@ -1894,6 +1903,30 @@ fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitiv
                         }
                         _ => None,
                     };
+                    
+                    // If no primitive found, check for <Contour><Polygon> (CUSTOM shapes)
+                    if shape.is_none() {
+                        if let Some(contour_node) = node.children.iter()
+                            .find(|c| c.name == "Contour") {
+                            if let Some(polygon_node) = contour_node.children.iter()
+                                .find(|c| c.name == "Polygon") {
+                                // Parse polygon points from PolyBegin + PolyStepSegment
+                                let mut points = Vec::new();
+                                for poly_child in &polygon_node.children {
+                                    if poly_child.name == "PolyBegin" || poly_child.name == "PolyStepSegment" {
+                                        if let (Some(x_str), Some(y_str)) = (poly_child.attributes.get("x"), poly_child.attributes.get("y")) {
+                                            if let (Ok(x), Ok(y)) = (x_str.parse::<f32>(), y_str.parse::<f32>()) {
+                                                points.push(Point { x, y });
+                                            }
+                                        }
+                                    }
+                                }
+                                if !points.is_empty() {
+                                    shape = Some(StandardPrimitive::CustomPolygon { points });
+                                }
+                            }
+                        }
+                    }
                     
                     if let Some(shape) = shape {
                         primitives.insert(id.clone(), shape);
@@ -2289,6 +2322,21 @@ fn tessellate_roundrect(width: f32, height: f32, corner_radius: f32) -> (Vec<f32
     (vertices, indices)
 }
 
+/// Tessellate a custom polygon using earcut
+fn tessellate_custom_polygon(points: &[Point]) -> (Vec<f32>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    for p in points {
+        vertices.push(p.x);
+        vertices.push(p.y);
+    }
+    
+    // Use earcut for triangulation
+    let indices = earcutr::earcut(&vertices, &[], 2).unwrap_or_default();
+    let indices_u32: Vec<u32> = indices.into_iter().map(|i| i as u32).collect();
+    
+    (vertices, indices_u32)
+}
+
 /// Tessellate a standard primitive shape
 fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
     match primitive {
@@ -2303,6 +2351,9 @@ fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
         }
         StandardPrimitive::RoundRect { width, height, corner_radius } => {
             tessellate_roundrect(*width, *height, *corner_radius)
+        }
+        StandardPrimitive::CustomPolygon { points } => {
+            tessellate_custom_polygon(points)
         }
     }
 }
@@ -2393,6 +2444,10 @@ fn generate_pad_geometry(
             });
         } else if std::env::var("DEBUG_PADS").is_ok() {
             println!("    WARNING: Shape {} not found in primitives! ({} instances skipped)", shape_id, instances.len());
+            // Show first few positions to help locate them
+            for (i, inst) in instances.iter().take(3).enumerate() {
+                println!("      Instance {}: x={:.2}, y={:.2}, rotation={:.1}°", i, inst.x, inst.y, inst.rotation);
+            }
         }
     }
     
@@ -2456,6 +2511,24 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
                     hole_key,
                 }
             }
+            StandardPrimitive::CustomPolygon { points } => {
+                // Use bounding box for grouping
+                let mut min_x = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut min_y = f32::MAX;
+                let mut max_y = f32::MIN;
+                for p in points {
+                    min_x = min_x.min(p.x);
+                    max_x = max_x.max(p.x);
+                    min_y = min_y.min(p.y);
+                    max_y = max_y.max(p.y);
+                }
+                ShapeKey::Rectangle {
+                    width_key: format!("{:.4}", max_x - min_x),
+                    height_key: format!("{:.4}", max_y - min_y),
+                    hole_key,
+                }
+            }
         };
         shape_groups.entry(key)
             .or_insert_with(Vec::new)
@@ -2505,6 +2578,15 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
                     let roundrect_ring = tessellate_rectangular_ring(*width, *height, hole_radius);
                     let roundrect = tessellate_roundrect(*width, *height, *corner_radius);
                     (roundrect_ring.0, roundrect_ring.1, roundrect.0, roundrect.1, width.max(*height))
+                }
+                StandardPrimitive::CustomPolygon { points } => {
+                    // Custom polygons: tessellate without hole (simplified)
+                    let poly = tessellate_custom_polygon(points);
+                    let mut max_dim = 0.0f32;
+                    for p in points {
+                        max_dim = max_dim.max(p.x.abs()).max(p.y.abs());
+                    }
+                    (poly.0.clone(), poly.1.clone(), poly.0, poly.1, max_dim * 2.0)
                 }
             };
             
