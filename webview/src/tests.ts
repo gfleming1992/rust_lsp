@@ -397,16 +397,21 @@ export async function discoverTestLayers(): Promise<string[]> {
     'LAYER_B.Courtyard',
     'LAYER_B.Cu',
     'LAYER_B.Fab',
+    'LAYER_B.Mask',
+    'LAYER_B.Paste',
     'LAYER_B.Silkscreen',
     'LAYER_Edge.Cuts',
     'LAYER_F.Courtyard',
     'LAYER_F.Cu',
     'LAYER_F.Fab',
+    'LAYER_F.Mask',
+    'LAYER_F.Paste',
     'LAYER_F.Silkscreen',
     'LAYER_In1.Cu',
     'LAYER_In2.Cu',
     'LAYER_User.1',
     'LAYER_User.4',
+    'SLOT_F.Cu_B.Cu',
   ];
 }
 
