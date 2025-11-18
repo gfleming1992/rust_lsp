@@ -1,0 +1,413 @@
+import { 
+  LayerJSON, 
+  LayerRenderData, 
+  ViewerState, 
+  LayerColor, 
+  LayerInfo, 
+  ShaderGeometry, 
+  GeometryLOD 
+} from "./types";
+
+export class Scene {
+  public state: ViewerState = {
+    panX: 0,
+    panY: 0,
+    zoom: 1,
+    flipX: false,
+    flipY: true,
+    dragging: false,
+    dragButton: null,
+    lastX: 0,
+    lastY: 0,
+    needsDraw: true
+  };
+
+  public layerRenderData = new Map<string, LayerRenderData>();
+  public layerInfoMap = new Map<string, LayerInfo>();
+  public layerOrder: string[] = [];
+  public layerColors = new Map<string, LayerColor>();
+  public layerVisible = new Map<string, boolean>();
+  public colorOverrides = new Map<string, LayerColor>();
+  
+  // Global via visibility toggle
+  public viasVisible = true;
+
+  private device: GPUDevice | null = null;
+  private pipelines: {
+    noAlpha: GPURenderPipeline;
+    withAlpha: GPURenderPipeline;
+    instanced: GPURenderPipeline;
+    instancedRot: GPURenderPipeline;
+  } | null = null;
+
+  // Shared uniform data buffer for temp use
+  private uniformData = new Float32Array(16);
+
+  private BASE_PALETTE: LayerColor[] = [
+    [0.95, 0.95, 0.95, 1],
+    [0.95, 0.2, 0.2, 1],
+    [0.2, 0.8, 0.2, 1],
+    [0.3, 0.6, 1.0, 1],
+    [1.0, 0.85, 0.2, 1],
+    [1.0, 0.4, 0.75, 1],
+    [0.95, 0.55, 0.2, 1],
+    [0.8, 0.3, 1.0, 1],
+    [0.2, 0.9, 0.9, 1],
+    [1.0, 0.6, 0.3, 1],
+    [0.5, 1.0, 0.3, 1],
+    [0.3, 0.4, 0.8, 1],
+    [0.9, 0.5, 0.7, 1],
+    [0.7, 0.9, 0.5, 1],
+    [0.5, 0.7, 0.9, 1],
+    [0.9, 0.7, 0.4, 1]
+  ];
+
+  constructor() {
+    this.loadColorOverrides();
+  }
+
+  public setDevice(
+    device: GPUDevice, 
+    pipelines: {
+      noAlpha: GPURenderPipeline;
+      withAlpha: GPURenderPipeline;
+      instanced: GPURenderPipeline;
+      instancedRot: GPURenderPipeline;
+    }
+  ) {
+    this.device = device;
+    this.pipelines = pipelines;
+  }
+
+  public getLayerColor(layerId: string): LayerColor {
+    if (!this.layerColors.has(layerId)) {
+      const layer = this.layerInfoMap.get(layerId);
+      let base: LayerColor;
+      if (layer) {
+        base = [...layer.defaultColor] as LayerColor;
+      } else {
+        const paletteColor = this.BASE_PALETTE[this.hashStr(layerId) % this.BASE_PALETTE.length];
+        base = [...paletteColor] as LayerColor;
+      }
+      if (this.colorOverrides.has(layerId)) {
+        base = [...this.colorOverrides.get(layerId)!] as LayerColor;
+      }
+      this.layerColors.set(layerId, base);
+      if (!this.layerVisible.has(layerId)) {
+        this.layerVisible.set(layerId, true);
+      }
+    }
+    return this.layerColors.get(layerId)!;
+  }
+
+  public setLayerColor(layerId: string, color: LayerColor) {
+    this.layerColors.set(layerId, color);
+    this.colorOverrides.set(layerId, color);
+    this.saveColorOverride(layerId, color);
+    this.state.needsDraw = true;
+  }
+
+  public resetLayerColor(layerId: string) {
+    this.layerColors.delete(layerId);
+    this.colorOverrides.delete(layerId);
+    this.removeColorOverride(layerId);
+    this.state.needsDraw = true;
+  }
+
+  public toggleLayerVisibility(layerId: string, visible: boolean) {
+    this.layerVisible.set(layerId, visible);
+    this.state.needsDraw = true;
+  }
+
+  public loadLayerData(layerJson: LayerJSON) {
+    if (!this.device || !this.pipelines) {
+      console.warn("Cannot load layer data: Device or pipelines not set");
+      return;
+    }
+
+    // Register layer metadata
+    const id = layerJson.layerId;
+    const name = layerJson.layerName || id;
+    const defaultColor = [...(layerJson.defaultColor ?? [0.8, 0.8, 0.8, 1])] as LayerColor;
+    this.layerInfoMap.set(id, { id, name, defaultColor });
+    
+    if (!this.layerOrder.includes(id)) {
+      this.layerOrder.push(id);
+    }
+    if (!this.layerColors.has(id)) {
+      this.layerColors.set(id, [...defaultColor] as LayerColor);
+    }
+    if (!this.layerVisible.has(id)) {
+      this.layerVisible.set(id, true);
+    }
+
+    // Load ALL available geometry types for this layer
+    const geometryTypes: Array<[keyof ShaderGeometry, GeometryLOD[] | undefined]> = [
+      ["batch", layerJson.geometry.batch],
+      ["batch_colored", layerJson.geometry.batch_colored],
+      ["batch_instanced", layerJson.geometry.batch_instanced],
+      ["batch_instanced_rot", layerJson.geometry.batch_instanced_rot],
+      ["instanced_rot_colored", layerJson.geometry.instanced_rot_colored],
+      ["instanced_rot", layerJson.geometry.instanced_rot],
+      ["instanced_colored", layerJson.geometry.instanced_colored],
+      ["instanced", layerJson.geometry.instanced],
+      ["basic", layerJson.geometry.basic]
+    ];
+
+    let loadedAnyGeometry = false;
+
+    for (const [shaderKey, lods] of geometryTypes) {
+      if (!lods || lods.length === 0) continue;
+      
+      loadedAnyGeometry = true;
+      const renderKey = shaderKey === 'batch' ? layerJson.layerId : `${layerJson.layerId}_${shaderKey}`;
+      
+      if (shaderKey === 'instanced' || shaderKey === 'instanced_rot') {
+        this.loadInstancedGeometry(layerJson, renderKey, shaderKey, lods);
+      } else {
+        this.loadGeometryType(layerJson, renderKey, shaderKey, lods);
+      }
+    }
+
+    if (!loadedAnyGeometry) {
+      console.warn(`No geometry data found for layer ${layerJson.layerId}`);
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  private loadGeometryType(
+    layerJson: LayerJSON,
+    renderKey: string,
+    shaderKey: keyof ShaderGeometry,
+    geometryLODs: GeometryLOD[]
+  ) {
+    if (!this.device || !this.pipelines) return;
+
+    const lodBuffers: GPUBuffer[] = [];
+    const lodAlphaBuffers: (GPUBuffer | null)[] = [];
+    const lodVertexCounts: number[] = [];
+    const lodIndexBuffers: (GPUBuffer | null)[] = [];
+    const lodIndexCounts: number[] = [];
+
+    for (let i = 0; i < geometryLODs.length; i++) {
+      const lod = geometryLODs[i];
+      if (!lod) continue;
+      
+      const lodVertices = new Float32Array(lod.vertexData);
+      const buffer = this.device.createBuffer({
+        size: lodVertices.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(buffer.getMappedRange()).set(lodVertices);
+      buffer.unmap();
+      
+      lodBuffers.push(buffer);
+      lodVertexCounts.push(lod.vertexCount);
+
+      let alphaArr: Float32Array;
+      if (lod.alphaData) {
+        const alphaBin = atob(lod.alphaData);
+        const alphaBytes = new Uint8Array(alphaBin.length);
+        for (let j = 0; j < alphaBin.length; j++) alphaBytes[j] = alphaBin.charCodeAt(j);
+        alphaArr = new Float32Array(alphaBytes.buffer);
+      } else {
+        alphaArr = new Float32Array(lod.vertexCount);
+        alphaArr.fill(1.0);
+      }
+      
+      const alphaBuf = this.device.createBuffer({
+        size: alphaArr.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(alphaBuf.getMappedRange()).set(alphaArr);
+      alphaBuf.unmap();
+      lodAlphaBuffers.push(alphaBuf);
+
+      if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
+        const idxArr = new Uint32Array(lod.indexData);
+        const idxBuf = this.device.createBuffer({
+          size: idxArr.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true
+        });
+        new Uint32Array(idxBuf.getMappedRange()).set(idxArr);
+        idxBuf.unmap();
+        lodIndexBuffers.push(idxBuf);
+        lodIndexCounts.push(lod.indexCount);
+      } else {
+        lodIndexBuffers.push(null);
+        lodIndexCounts.push(0);
+      }
+    }
+    
+    const color = this.getLayerColor(layerJson.layerId);
+    this.uniformData.set(color, 0);
+    const layerUniformBuffer = this.device.createBuffer({
+      size: this.uniformData.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    
+    const usePipeline = (shaderKey === 'batch') ? this.pipelines.noAlpha : this.pipelines.withAlpha;
+    const layerBindGroup = this.device.createBindGroup({
+      layout: usePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: layerUniformBuffer } }]
+    });
+
+    this.layerRenderData.set(renderKey, {
+      layerId: layerJson.layerId,
+      shaderType: shaderKey,
+      lodBuffers,
+      lodAlphaBuffers,
+      lodVertexCounts,
+      lodIndexBuffers,
+      lodIndexCounts,
+      currentLOD: 0,
+      uniformBuffer: layerUniformBuffer,
+      bindGroup: layerBindGroup
+    });
+  }
+
+  private loadInstancedGeometry(
+    layerJson: LayerJSON,
+    renderKey: string,
+    shaderKey: 'instanced' | 'instanced_rot',
+    geometryLODs: GeometryLOD[]
+  ) {
+    if (!this.device || !this.pipelines) return;
+
+    const lodBuffers: GPUBuffer[] = [];
+    const lodInstanceBuffers: GPUBuffer[] = [];
+    const lodVertexCounts: number[] = [];
+    const lodInstanceCounts: number[] = [];
+    const lodIndexBuffers: (GPUBuffer | null)[] = [];
+    const lodIndexCounts: number[] = [];
+
+    for (let i = 0; i < geometryLODs.length; i++) {
+      const lod = geometryLODs[i];
+      if (!lod) continue;
+      
+      const lodVertices = new Float32Array(lod.vertexData);
+      const vertexBuffer = this.device.createBuffer({
+        size: lodVertices.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(vertexBuffer.getMappedRange()).set(lodVertices);
+      vertexBuffer.unmap();
+      lodBuffers.push(vertexBuffer);
+      lodVertexCounts.push(lod.vertexCount);
+
+      if (lod.instanceData && lod.instanceCount) {
+        const instanceArr = new Float32Array(lod.instanceData);
+        const instanceBuffer = this.device.createBuffer({
+          size: instanceArr.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true
+        });
+        new Float32Array(instanceBuffer.getMappedRange()).set(instanceArr);
+        instanceBuffer.unmap();
+        lodInstanceBuffers.push(instanceBuffer);
+        lodInstanceCounts.push(lod.instanceCount);
+      } else {
+        const emptyBuffer = this.device.createBuffer({
+          size: 4,
+          usage: GPUBufferUsage.VERTEX
+        });
+        lodInstanceBuffers.push(emptyBuffer);
+        lodInstanceCounts.push(0);
+      }
+
+      if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
+        const idxArr = new Uint32Array(lod.indexData);
+        const idxBuf = this.device.createBuffer({
+          size: idxArr.byteLength,
+          usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true
+        });
+        new Uint32Array(idxBuf.getMappedRange()).set(idxArr);
+        idxBuf.unmap();
+        lodIndexBuffers.push(idxBuf);
+        lodIndexCounts.push(lod.indexCount);
+      } else {
+        lodIndexBuffers.push(null);
+        lodIndexCounts.push(0);
+      }
+    }
+    
+    const color = this.getLayerColor(layerJson.layerId);
+    this.uniformData.set(color, 0);
+    const layerUniformBuffer = this.device.createBuffer({
+      size: this.uniformData.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    
+    const usePipeline = (shaderKey === 'instanced') ? this.pipelines.instanced : this.pipelines.instancedRot;
+    const layerBindGroup = this.device.createBindGroup({
+      layout: usePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: layerUniformBuffer } }]
+    });
+
+    this.layerRenderData.set(renderKey, {
+      layerId: layerJson.layerId,
+      shaderType: shaderKey,
+      lodBuffers,
+      lodInstanceBuffers,
+      lodAlphaBuffers: [],
+      lodVertexCounts,
+      lodInstanceCounts,
+      lodIndexBuffers,
+      lodIndexCounts,
+      currentLOD: 0,
+      uniformBuffer: layerUniformBuffer,
+      bindGroup: layerBindGroup
+    });
+  }
+
+  private hashStr(input: string): number {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i += 1) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  private STORAGE_KEY = "layerColorOverrides";
+
+  private saveColorOverride(layerId: string, color: LayerColor) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(this.STORAGE_KEY) || "{}") as Record<string, LayerColor>;
+      stored[layerId] = color;
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(stored));
+    } catch (error) {
+      console.error("Failed to save color override", error);
+    }
+  }
+
+  private removeColorOverride(layerId: string) {
+    try {
+      const stored = JSON.parse(localStorage.getItem(this.STORAGE_KEY) || "{}") as Record<string, LayerColor>;
+      delete stored[layerId];
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(stored));
+    } catch (error) {
+      console.error("Failed to remove color override", error);
+    }
+  }
+
+  private loadColorOverrides() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(this.STORAGE_KEY) || "{}") as Record<string, LayerColor>;
+      for (const [layerId, color] of Object.entries(stored)) {
+        if (Array.isArray(color) && color.length === 4) {
+          this.colorOverrides.set(layerId, [...color] as LayerColor);
+          this.layerColors.set(layerId, [...color] as LayerColor);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load color overrides", error);
+    }
+  }
+}

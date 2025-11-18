@@ -1,5 +1,5 @@
 // Import the library functions
-use rust_extension::{parse_xml_file, print_xml_tree, xml_node_to_file, extract_and_generate_layers};
+use rust_extension::{parse_xml_file, xml_node_to_file, extract_and_generate_layers};
 use std::time::Instant;
 use std::fs;
 
@@ -23,11 +23,6 @@ mod tests {
         println!("  Root element: {}", root.name);
         println!("  Number of child elements: {}", root.children.len());
         println!("Parsing time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
-        #[cfg(debug_assertions)]
-        {
-            println!("\nParsed structure:");
-            print_xml_tree(&root, 0);
-        }
     }
 
     #[test]
@@ -54,9 +49,6 @@ mod tests {
 
     #[test]
     fn test_tinytapeout_demo_tessellation() {
-        // Enable detailed timing profiling
-        std::env::set_var("PROFILE_TIMING", "1");
-        
         let xml_path = "tests/tinytapeout-demo.xml";
         
         println!("\n=== XML Tessellation & LOD Generation (Release Mode) ===");
