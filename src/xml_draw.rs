@@ -1697,6 +1697,93 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
     Ok(all_lods)
 }
 
+/// Recursively find Step nodes and collect PadStack instances (vias) defined at the Step level
+fn collect_padstacks_from_step(
+    node: &XmlNode,
+    layer_contexts: &mut IndexMap<String, LayerGeometries>,
+    primitives: &HashMap<String, StandardPrimitive>,
+) {
+    if node.name == "Step" {
+        // Look for PadStack nodes directly under Step
+        for child in &node.children {
+            if child.name == "PadStack" {
+                // Parse inline PadStack definition
+                
+                // 1. Parse LayerHole (optional, but usually present for vias)
+                let mut hole_diameter = 0.0;
+                
+                for subchild in &child.children {
+                    if subchild.name == "LayerHole" {
+                        if let Some(diam_str) = subchild.attributes.get("diameter") {
+                            if let Ok(d) = diam_str.parse::<f32>() {
+                                hole_diameter = d;
+                            }
+                        }
+                    }
+                }
+                
+                // 2. Parse LayerPad elements
+                for subchild in &child.children {
+                    if subchild.name == "LayerPad" {
+                        if let Some(layer_ref) = subchild.attributes.get("layerRef") {
+                            // Parse location
+                            let mut x = 0.0;
+                            let mut y = 0.0;
+                            
+                            // Find Location node
+                            if let Some(loc_node) = subchild.children.iter().find(|n| n.name == "Location") {
+                                x = loc_node.attributes.get("x").and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                                y = loc_node.attributes.get("y").and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                            }
+                            
+                            // Find StandardPrimitiveRef
+                            if let Some(prim_ref) = subchild.children.iter().find(|n| n.name == "StandardPrimitiveRef") {
+                                if let Some(prim_id) = prim_ref.attributes.get("id") {
+                                    if let Some(primitive) = primitives.get(prim_id) {
+                                        // We need to extract diameter/width from primitive.
+                                        let outer_diameter = match primitive {
+                                            StandardPrimitive::Circle { diameter } => *diameter,
+                                            StandardPrimitive::Rectangle { width, height } => width.max(*height),
+                                            StandardPrimitive::Oval { width, height } => width.max(*height),
+                                            StandardPrimitive::RoundRect { width, height, .. } => width.max(*height),
+                                            StandardPrimitive::CustomPolygon { .. } => 0.0,
+                                        };
+                                        
+                                        let via = ViaInstance {
+                                            x,
+                                            y,
+                                            diameter: outer_diameter,
+                                            hole_diameter,
+                                            shape: primitive.clone(),
+                                        };
+                                        
+                                        // Add to layer
+                                        layer_contexts.entry(layer_ref.clone())
+                                            .or_insert_with(|| LayerGeometries {
+                                                layer_ref: layer_ref.clone(),
+                                                polylines: Vec::new(),
+                                                polygons: Vec::new(),
+                                                padstack_holes: Vec::new(),
+                                                pads: Vec::new(),
+                                                vias: Vec::new(),
+                                            })
+                                            .vias.push(via);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Recurse
+    for child in &node.children {
+        collect_padstacks_from_step(child, layer_contexts, primitives);
+    }
+}
+
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
 pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, anyhow::Error> {
     let total_start = std::time::Instant::now();
@@ -1736,8 +1823,13 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
 
     // 1. Collect all LayerFeature nodes and their geometries (Sequential)
     let collect_start = std::time::Instant::now();
-    let mut layer_contexts = Vec::new();
+    let mut layer_contexts = IndexMap::new();
     collect_layer_features(cad_data, &mut layer_contexts, &mut layers_seen, &line_descriptors, &padstack_defs)?;
+    
+    // Also collect PadStack instances from Step (vias defined at Step level)
+    // We need to find the Step node inside CadData
+    collect_padstacks_from_step(cad_data, &mut layer_contexts, &primitives);
+    
     let collect_time = collect_start.elapsed();
 
     // 2. Process layers in parallel (Parallel)
@@ -1746,6 +1838,8 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     // Use rayon to process layers in parallel
     // We collect results into a Vec<Result<...>> then collect into Result<Vec<...>>
     let results: Vec<Result<(LayerJSON, CullingStats), anyhow::Error>> = layer_contexts
+        .into_iter()
+        .collect::<Vec<_>>() // Convert IndexMap to Vec for par_iter
         .into_par_iter()
         .map(|(layer_ref, geometries)| {
             let mut local_culling_stats = CullingStats::default();
@@ -1815,7 +1909,7 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
 /// Recursively find LayerFeature nodes and collect geometries for each unique layer
 fn collect_layer_features(
     node: &XmlNode,
-    layer_contexts: &mut Vec<(String, LayerGeometries)>,
+    layer_contexts: &mut IndexMap<String, LayerGeometries>,
     layers_seen: &mut std::collections::HashSet<String>,
     line_descriptors: &IndexMap<String, LineDescriptor>,
     padstack_defs: &IndexMap<String, PadStackDef>,
@@ -1823,6 +1917,10 @@ fn collect_layer_features(
     // If this is a LayerFeature node, process it
     if node.name == "LayerFeature" {
         if let Some(layer_ref) = node.attributes.get("layerRef") {
+            // We still track seen layers to avoid re-processing if that was the intent,
+            // but using IndexMap allows us to retrieve the entry if we wanted to merge.
+            // For now, we keep the logic of "first LayerFeature wins" or "unique layers only"
+            // but we use IndexMap to store them.
             if !layers_seen.contains(layer_ref) {
                 layers_seen.insert(layer_ref.clone());
                 
@@ -1839,7 +1937,7 @@ fn collect_layer_features(
                 
                 // Only add layer if it has any geometry
                 if !geometries.polylines.is_empty() || !geometries.polygons.is_empty() || !geometries.padstack_holes.is_empty() || !geometries.pads.is_empty() || !geometries.vias.is_empty() {
-                    layer_contexts.push((layer_ref.clone(), geometries));
+                    layer_contexts.insert(layer_ref.clone(), geometries);
                 }
             }
         }
@@ -1962,8 +2060,6 @@ fn collect_geometries_from_node(
         collect_geometries_from_node(child, geometries, line_descriptors, padstack_defs);
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
