@@ -399,3 +399,25 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
     
     buffer
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_geometry_lod_serialization() {
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let lod = GeometryLOD {
+            vertex_data: data.clone(),
+            vertex_count: 2,
+            index_data: Some(vec![0, 1, 2]),
+            index_count: Some(3),
+            alpha_data: None,
+            instance_data: None,
+            instance_count: None,
+        };
+        let json = serde_json::to_string(&lod).unwrap();
+        assert!(json.contains("vertexData"));
+        assert!(json.contains("vertexCount"));
+    }
+}

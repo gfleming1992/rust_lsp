@@ -540,3 +540,329 @@ pub fn tessellate_padstack_holes(
     
     (ring_verts, ring_indices, hole_verts, hole_indices)
 }
+
+/// Tessellate a circle into triangle fan
+pub fn tessellate_circle(radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let mut vertices = vec![0.0, 0.0]; // Center
+    let mut indices = Vec::new();
+    
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        vertices.push(angle.cos() * radius);
+        vertices.push(angle.sin() * radius);
+    }
+    
+    for i in 0..segments {
+        indices.push(0);       // Center
+        indices.push(i + 1);   // Current vertex
+        indices.push(i + 2);   // Next vertex
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate an annular ring (donut shape) with outer and inner radii
+/// Creates a ring by connecting outer and inner circle vertices with triangle strips
+pub fn tessellate_annular_ring(outer_radius: f32, inner_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Generate interleaved vertices: outer, inner, outer, inner, ...
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        
+        // Outer circle vertex
+        vertices.push(cos_a * outer_radius);
+        vertices.push(sin_a * outer_radius);
+        
+        // Inner circle vertex
+        vertices.push(cos_a * inner_radius);
+        vertices.push(sin_a * inner_radius);
+    }
+    
+    // Generate triangle strip indices to form quads between rings
+    for i in 0..segments {
+        let base = (i * 2) as u32;
+        // Two triangles forming a quad
+        indices.push(base);         // outer[i]
+        indices.push(base + 1);     // inner[i]
+        indices.push(base + 2);     // outer[i+1]
+        
+        indices.push(base + 2);     // outer[i+1]
+        indices.push(base + 1);     // inner[i]
+        indices.push(base + 3);     // inner[i+1]
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate a rectangle
+pub fn tessellate_rectangle(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    
+    let vertices = vec![
+        -hw, -hh,  // Bottom-left
+         hw, -hh,  // Bottom-right
+         hw,  hh,  // Top-right
+        -hw,  hh,  // Top-left
+    ];
+    
+    let indices = vec![0, 1, 2, 0, 2, 3];
+    
+    (vertices, indices)
+}
+
+/// Tessellate a rectangular annular ring (rectangle with circular hole)
+pub fn tessellate_rectangular_ring(width: f32, height: f32, hole_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    let segments = 32;
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Outer rectangle vertices
+    vertices.extend_from_slice(&[
+        -hw, -hh,  // 0: Bottom-left
+         hw, -hh,  // 1: Bottom-right
+         hw,  hh,  // 2: Top-right
+        -hw,  hh,  // 3: Top-left
+    ]);
+    
+    // Inner circle vertices (hole)
+    let hole_start_idx = 4;
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        vertices.push(angle.cos() * hole_radius);
+        vertices.push(angle.sin() * hole_radius);
+    }
+    
+    // Triangulate using ear clipping approach
+    // Connect outer rectangle to inner circle with triangles
+    
+    // Bottom edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(1); // Bottom-right corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Right edge to circle  
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(2); // Top-right corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Top edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(3); // Top-left corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    // Left edge to circle
+    for i in 0..segments {
+        let circle_idx = hole_start_idx + i;
+        indices.push(0); // Bottom-left corner
+        indices.push(circle_idx);
+        indices.push(circle_idx + 1);
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate an oval (ellipse)
+pub fn tessellate_oval(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
+    let segments = 32;
+    let rx = width / 2.0;
+    let ry = height / 2.0;
+    let mut vertices = vec![0.0, 0.0]; // Center
+    let mut indices = Vec::new();
+    
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * 2.0 * PI;
+        vertices.push(angle.cos() * rx);
+        vertices.push(angle.sin() * ry);
+    }
+    
+    for i in 0..segments {
+        indices.push(0);       // Center
+        indices.push(i + 1);   // Current vertex
+        indices.push(i + 2);   // Next vertex
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate a rounded rectangle
+/// Uses triangle strip approach instead of center fan to preserve rectangular shape
+pub fn tessellate_roundrect(width: f32, height: f32, corner_radius: f32) -> (Vec<f32>, Vec<u32>) {
+    let hw = width / 2.0;
+    let hh = height / 2.0;
+    let r = corner_radius.min(hw).min(hh); // Clamp radius to half-dimensions
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    let segments_per_corner = 8;
+    
+    // Build vertices going around the perimeter clockwise from top-right
+    // Top-right corner (0° to 90°)
+    for i in 0..=segments_per_corner {
+        let angle = (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((hw - r) + angle.cos() * r);
+        vertices.push((hh - r) + angle.sin() * r);
+    }
+    
+    // Top-left corner (90° to 180°)
+    for i in 0..=segments_per_corner {
+        let angle = std::f32::consts::FRAC_PI_2 + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((-hw + r) + angle.cos() * r);
+        vertices.push((hh - r) + angle.sin() * r);
+    }
+    
+    // Bottom-left corner (180° to 270°)
+    for i in 0..=segments_per_corner {
+        let angle = PI + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((-hw + r) + angle.cos() * r);
+        vertices.push((-hh + r) + angle.sin() * r);
+    }
+    
+    // Bottom-right corner (270° to 360°)
+    for i in 0..=segments_per_corner {
+        let angle = PI + std::f32::consts::FRAC_PI_2 + (i as f32 / segments_per_corner as f32) * std::f32::consts::FRAC_PI_2;
+        vertices.push((hw - r) + angle.cos() * r);
+        vertices.push((-hh + r) + angle.sin() * r);
+    }
+    
+    // Total vertices: 4 corners * (segments_per_corner + 1)
+    let total_verts = (segments_per_corner + 1) * 4;
+    
+    // Triangulate using earcut or simple fan from first vertex
+    // Use first vertex as anchor for triangle fan
+    for i in 1..(total_verts as u32 - 1) {
+        indices.push(0);
+        indices.push(i);
+        indices.push(i + 1);
+    }
+    
+    (vertices, indices)
+}
+
+/// Tessellate a custom polygon using earcut
+pub fn tessellate_custom_polygon(points: &[Point]) -> (Vec<f32>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    for p in points {
+        vertices.push(p.x);
+        vertices.push(p.y);
+    }
+    
+    // Use earcut for triangulation
+    let indices = earcutr::earcut(&vertices, &[], 2).unwrap_or_default();
+    let indices_u32: Vec<u32> = indices.into_iter().map(|i| i as u32).collect();
+    
+    (vertices, indices_u32)
+}
+
+/// Tessellate a standard primitive shape
+pub fn tessellate_primitive(primitive: &StandardPrimitive) -> (Vec<f32>, Vec<u32>) {
+    match primitive {
+        StandardPrimitive::Circle { diameter } => {
+            tessellate_circle(diameter / 2.0)
+        }
+        StandardPrimitive::Rectangle { width, height } => {
+            tessellate_rectangle(*width, *height)
+        }
+        StandardPrimitive::Oval { width, height } => {
+            tessellate_oval(*width, *height)
+        }
+        StandardPrimitive::RoundRect { width, height, corner_radius } => {
+            tessellate_roundrect(*width, *height, *corner_radius)
+        }
+        StandardPrimitive::CustomPolygon { points } => {
+            tessellate_custom_polygon(points)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_douglas_peucker() {
+        let points = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 1.0, y: 0.1 },
+            Point { x: 2.0, y: 0.0 },
+            Point { x: 3.0, y: 1.0 },
+            Point { x: 4.0, y: 0.0 },
+        ];
+
+        let simplified = douglas_peucker(&points, 0.5);
+        assert!(simplified.len() <= points.len());
+        assert_eq!(simplified[0].x, 0.0);
+        assert_eq!(simplified[simplified.len() - 1].x, 4.0);
+    }
+
+    #[test]
+    fn test_generate_lods() {
+        let polyline = Polyline {
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 1.0, y: 1.0 },
+                Point { x: 2.0, y: 0.5 },
+                Point { x: 3.0, y: 1.5 },
+                Point { x: 4.0, y: 0.0 },
+            ],
+            width: 0.1,
+            color: [1.0, 0.0, 0.0, 1.0],
+            line_end: LineEnd::Round,
+        };
+
+        let lods = generate_polyline_lods(&polyline);
+        assert_eq!(lods.len(), 5);
+        assert_eq!(lods[0].len(), polyline.points.len()); // LOD0 is exact
+        for i in 1..5 {
+            assert!(lods[i].len() <= lods[i - 1].len()); // Each LOD has fewer or equal points
+        }
+    }
+
+    #[test]
+    fn test_tessellate_polyline() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Round);
+        
+        assert!(verts.len() >= 8); // At least 4 vertices (2 per quad)
+        assert!(indices.len() >= 6); // At least 6 indices (2 triangles)
+    }
+
+    #[test]
+    fn test_tessellate_with_round_caps() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Round);
+        
+        // Should have more vertices due to round caps
+        assert!(verts.len() > 8);
+        assert!(indices.len() > 6);
+    }
+
+    #[test]
+    fn test_tessellate_with_square_caps() {
+        let points = vec![Point { x: 0.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }];
+        let (verts, indices) = tessellate_polyline(&points, 0.1, LineEnd::Square);
+        
+        // Should have extra vertices for square caps
+        assert!(verts.len() >= 12); // 4 base + 4 for caps
+        assert!(indices.len() >= 12); // 2 triangles for line + 2 for caps
+    }
+}
