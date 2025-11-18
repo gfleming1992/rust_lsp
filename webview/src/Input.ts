@@ -50,8 +50,9 @@ export class Input {
         this.scene.state.lastY = event.clientY;
         
         if (this.scene.state.dragButton === 0 || this.scene.state.dragButton === 1) {
-          this.scene.state.panX += dx / this.scene.state.zoom;
-          this.scene.state.panY -= dy / this.scene.state.zoom;
+          const dpr = window.devicePixelRatio || 1;
+          this.scene.state.panX += (dx * dpr) / this.scene.state.zoom;
+          this.scene.state.panY -= (dy * dpr) / this.scene.state.zoom;
           this.scene.state.needsDraw = true;
         }
       }
