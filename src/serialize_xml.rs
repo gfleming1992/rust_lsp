@@ -8,6 +8,7 @@ use anyhow::{Result, Context};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use rayon::prelude::*;
 
 /// Serializes an XmlNode and all its descendants to an XML string
 /// 
@@ -34,7 +35,7 @@ pub fn xml_node_to_string(node: &XmlNode, indent_level: usize) -> String {
 /// Result indicating success or error
 pub fn xml_node_to_file<P: AsRef<Path>>(node: &XmlNode, file_path: P) -> Result<()> {
     let file = File::create(&file_path).context("Failed to create XML file")?;
-    let mut writer = BufWriter::with_capacity(1024 * 64, file);
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file); // Increased buffer to 1MB
     writer.write_all(b"<?xml version=\"1.0\"?>\n").context("Failed to write XML declaration")?;
     write_node_pretty(node, &mut writer, 0).context("Failed to serialize XML")?;
     writer.flush().context("Failed to flush XML writer")?;
@@ -56,6 +57,7 @@ pub fn xml_node_to_compact_string(node: &XmlNode) -> String {
 }
 
 /// Internal recursive function to serialize a node with formatting
+/// Uses parallel processing for nodes with many children (e.g. CadData)
 fn write_node_pretty<W: Write>(node: &XmlNode, writer: &mut W, indent_level: usize) -> io::Result<()> {
     write_indent(writer, indent_level)?;
     writer.write_all(b"<")?;
@@ -84,8 +86,27 @@ fn write_node_pretty<W: Write>(node: &XmlNode, writer: &mut W, indent_level: usi
         writer.write_all(b"\n")?;
     }
 
-    for child in &node.children {
-        write_node_pretty(child, writer, indent_level + 1)?;
+    // Parallelization threshold: if a node has many children (like CadData with layers),
+    // serialize them in parallel to memory buffers, then write sequentially.
+    // This significantly speeds up large board serialization.
+    if node.children.len() > 64 {
+        // Parallel processing
+        let child_buffers: Result<Vec<Vec<u8>>, io::Error> = node.children.par_iter()
+            .map(|child| {
+                let mut buf = Vec::with_capacity(4096);
+                write_node_pretty(child, &mut buf, indent_level + 1)?;
+                Ok(buf)
+            })
+            .collect();
+
+        for buf in child_buffers? {
+            writer.write_all(&buf)?;
+        }
+    } else {
+        // Serial processing
+        for child in &node.children {
+            write_node_pretty(child, writer, indent_level + 1)?;
+        }
     }
 
     write_indent(writer, indent_level)?;
