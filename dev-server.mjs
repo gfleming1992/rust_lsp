@@ -287,6 +287,20 @@ wss.on('connection', (ws) => {
 
 // Start esbuild in watch mode
 async function startEsbuild() {
+  // Build the worker separately
+  const workerCtx = await esbuild.context({
+    entryPoints: ['webview/src/binaryParserWorker.ts'],
+    bundle: true,
+    outfile: 'webview/dist/binaryParserWorker.js',
+    format: 'iife', // Workers need IIFE format
+    sourcemap: true,
+    target: 'es2020',
+    logLevel: 'info',
+  });
+  
+  await workerCtx.watch();
+  
+  // Build the main bundle
   const ctx = await esbuild.context({
     entryPoints: ['webview/src/main.ts'],
     bundle: true,

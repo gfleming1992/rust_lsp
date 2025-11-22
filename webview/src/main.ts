@@ -3,7 +3,7 @@ import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
 import { LayerJSON } from "./types";
-import { parseBinaryLayer } from "./binaryParser";
+import { BinaryParserPool } from "./BinaryParserPool";
 
 // Detect if running in VS Code webview or dev mode
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
@@ -33,6 +33,10 @@ async function init() {
   ui.refreshLayerLegend();
   ui.updateStats(true);
   scene.state.needsDraw = true;
+
+  // Create worker pool for parallel binary parsing
+  const workerPool = new BinaryParserPool();
+  console.log(`[INIT] Worker pool created with ${workerPool.getStats().totalWorkers} workers`);
 
   // Batch layer loading state
   let pendingLayers: LayerJSON[] = [];
@@ -70,21 +74,27 @@ async function init() {
     if (data.command === "binaryTessellationData" && data.binaryPayload) {
       const arrayBuffer = data.binaryPayload as ArrayBuffer;
       
-      console.log(`[MSG] Binary payload size: ${arrayBuffer.byteLength} bytes`);
+      console.log(`[MSG] Binary payload size: ${arrayBuffer.byteLength} bytes, delegating to worker...`);
       
+      // Parse in worker (non-blocking)
       const parseStart = performance.now();
-      const layerJson = parseBinaryLayer(arrayBuffer);
-      const parseEnd = performance.now();
-      
-      const msgEnd = performance.now();
-      console.log(`[MSG] Received binary ${layerJson.layerId} (parsed in ${(parseEnd - parseStart).toFixed(1)}ms, total: ${(msgEnd - msgStart).toFixed(1)}ms)`);
-      
-      pendingLayers.push(layerJson);
-      
-      if (batchTimeout !== null) {
-        clearTimeout(batchTimeout);
+      try {
+        const layerJson = await workerPool.parse(arrayBuffer);
+        const parseEnd = performance.now();
+        
+        const msgEnd = performance.now();
+        console.log(`[MSG] Received binary ${layerJson.layerId} (worker parsed in ${(parseEnd - parseStart).toFixed(1)}ms, total: ${(msgEnd - msgStart).toFixed(1)}ms)`);
+        console.log(`[POOL] Stats: ${JSON.stringify(workerPool.getStats())}`);
+        
+        pendingLayers.push(layerJson);
+        
+        if (batchTimeout !== null) {
+          clearTimeout(batchTimeout);
+        }
+        batchTimeout = window.setTimeout(processPendingLayers, BATCH_DELAY_MS);
+      } catch (error) {
+        console.error(`[MSG] Binary parsing failed:`, error);
       }
-      batchTimeout = window.setTimeout(processPendingLayers, BATCH_DELAY_MS);
       
     } else if (data.command === "tessellationData" && data.payload) {
       // Handle JSON tessellation data (fallback)
