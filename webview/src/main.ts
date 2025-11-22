@@ -3,6 +3,7 @@ import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
 import { LayerJSON } from "./types";
+import { parseBinaryLayer } from "./binaryParser";
 
 // Detect if running in VS Code webview or dev mode
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
@@ -36,7 +37,7 @@ async function init() {
   // Batch layer loading state
   let pendingLayers: LayerJSON[] = [];
   let batchTimeout: number | null = null;
-  const BATCH_DELAY_MS = 5; // Reduced from 50ms - render as fast as possible
+  const BATCH_DELAY_MS = 0; // Process immediately - no artificial delay
 
   function processPendingLayers() {
     if (pendingLayers.length === 0) return;
@@ -61,14 +62,35 @@ async function init() {
   }
 
   // Listen for messages from extension or dev server
-  window.addEventListener("message", (event) => {
+  window.addEventListener("message", async (event) => {
     const msgStart = performance.now();
     const data = event.data as Record<string, unknown>;
     
-    if (data.command === "tessellationData" && data.payload) {
+    // Handle binary tessellation data
+    if (data.command === "binaryTessellationData" && data.binaryPayload) {
+      const arrayBuffer = data.binaryPayload as ArrayBuffer;
+      
+      console.log(`[MSG] Binary payload size: ${arrayBuffer.byteLength} bytes`);
+      
+      const parseStart = performance.now();
+      const layerJson = parseBinaryLayer(arrayBuffer);
+      const parseEnd = performance.now();
+      
+      const msgEnd = performance.now();
+      console.log(`[MSG] Received binary ${layerJson.layerId} (parsed in ${(parseEnd - parseStart).toFixed(1)}ms, total: ${(msgEnd - msgStart).toFixed(1)}ms)`);
+      
+      pendingLayers.push(layerJson);
+      
+      if (batchTimeout !== null) {
+        clearTimeout(batchTimeout);
+      }
+      batchTimeout = window.setTimeout(processPendingLayers, BATCH_DELAY_MS);
+      
+    } else if (data.command === "tessellationData" && data.payload) {
+      // Handle JSON tessellation data (fallback)
       const layerJson = data.payload as LayerJSON;
       const msgEnd = performance.now();
-      console.log(`[MSG] Received ${layerJson.layerId} (parsed in ${(msgEnd - msgStart).toFixed(1)}ms)`);
+      console.log(`[MSG] Received JSON ${layerJson.layerId} (parsed in ${(msgEnd - msgStart).toFixed(1)}ms)`);
       
       pendingLayers.push(layerJson);
       

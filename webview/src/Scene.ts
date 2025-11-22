@@ -198,11 +198,17 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      // Decode base64 vertex data
-      const vertexBin = atob(lod.vertexData as unknown as string);
-      const vertexBytes = new Uint8Array(vertexBin.length);
-      for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
-      const lodVertices = new Float32Array(vertexBytes.buffer);
+      // Handle both base64 (from JSON) and typed arrays (from binary)
+      let lodVertices: Float32Array;
+      if (lod.vertexData instanceof Float32Array) {
+        lodVertices = lod.vertexData;
+      } else {
+        // Decode base64 vertex data
+        const vertexBin = atob(lod.vertexData as unknown as string);
+        const vertexBytes = new Uint8Array(vertexBin.length);
+        for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
+        lodVertices = new Float32Array(vertexBytes.buffer);
+      }
       
       const buffer = this.device.createBuffer({
         size: lodVertices.byteLength,
@@ -217,10 +223,14 @@ export class Scene {
 
       let alphaArr: Float32Array;
       if (lod.alphaData) {
-        const alphaBin = atob(lod.alphaData);
-        const alphaBytes = new Uint8Array(alphaBin.length);
-        for (let j = 0; j < alphaBin.length; j++) alphaBytes[j] = alphaBin.charCodeAt(j);
-        alphaArr = new Float32Array(alphaBytes.buffer);
+        if (typeof lod.alphaData === 'object' && lod.alphaData instanceof Float32Array) {
+          alphaArr = lod.alphaData;
+        } else {
+          const alphaBin = atob(lod.alphaData as string);
+          const alphaBytes = new Uint8Array(alphaBin.length);
+          for (let j = 0; j < alphaBin.length; j++) alphaBytes[j] = alphaBin.charCodeAt(j);
+          alphaArr = new Float32Array(alphaBytes.buffer);
+        }
       } else {
         alphaArr = new Float32Array(lod.vertexCount);
         alphaArr.fill(1.0);
@@ -236,11 +246,16 @@ export class Scene {
       lodAlphaBuffers.push(alphaBuf);
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        // Decode base64 index data
-        const indexBin = atob(lod.indexData as unknown as string);
-        const indexBytes = new Uint8Array(indexBin.length);
-        for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
-        const idxArr = new Uint32Array(indexBytes.buffer);
+        let idxArr: Uint32Array;
+        if (lod.indexData instanceof Uint32Array) {
+          idxArr = lod.indexData;
+        } else {
+          // Decode base64 index data
+          const indexBin = atob(lod.indexData as unknown as string);
+          const indexBytes = new Uint8Array(indexBin.length);
+          for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
+          idxArr = new Uint32Array(indexBytes.buffer);
+        }
         
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,
@@ -303,11 +318,17 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      // Decode base64 vertex data
-      const vertexBin = atob(lod.vertexData as unknown as string);
-      const vertexBytes = new Uint8Array(vertexBin.length);
-      for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
-      const lodVertices = new Float32Array(vertexBytes.buffer);
+      // Handle both base64 (from JSON) and typed arrays (from binary)
+      let lodVertices: Float32Array;
+      if (lod.vertexData instanceof Float32Array) {
+        lodVertices = lod.vertexData;
+      } else {
+        // Decode base64 vertex data
+        const vertexBin = atob(lod.vertexData as unknown as string);
+        const vertexBytes = new Uint8Array(vertexBin.length);
+        for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
+        lodVertices = new Float32Array(vertexBytes.buffer);
+      }
       
       const vertexBuffer = this.device.createBuffer({
         size: lodVertices.byteLength,
@@ -320,11 +341,16 @@ export class Scene {
       lodVertexCounts.push(lod.vertexCount);
 
       if (lod.instanceData && lod.instanceCount) {
-        // Decode base64 instance data
-        const instanceBin = atob(lod.instanceData as unknown as string);
-        const instanceBytes = new Uint8Array(instanceBin.length);
-        for (let j = 0; j < instanceBin.length; j++) instanceBytes[j] = instanceBin.charCodeAt(j);
-        const instanceArr = new Float32Array(instanceBytes.buffer);
+        let instanceArr: Float32Array;
+        if (lod.instanceData instanceof Float32Array) {
+          instanceArr = lod.instanceData;
+        } else {
+          // Decode base64 instance data
+          const instanceBin = atob(lod.instanceData as unknown as string);
+          const instanceBytes = new Uint8Array(instanceBin.length);
+          for (let j = 0; j < instanceBin.length; j++) instanceBytes[j] = instanceBin.charCodeAt(j);
+          instanceArr = new Float32Array(instanceBytes.buffer);
+        }
         
         const instanceBuffer = this.device.createBuffer({
           size: instanceArr.byteLength,
@@ -345,11 +371,16 @@ export class Scene {
       }
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        // Decode base64 index data
-        const indexBin = atob(lod.indexData as unknown as string);
-        const indexBytes = new Uint8Array(indexBin.length);
-        for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
-        const idxArr = new Uint32Array(indexBytes.buffer);
+        let idxArr: Uint32Array;
+        if (lod.indexData instanceof Uint32Array) {
+          idxArr = lod.indexData;
+        } else {
+          // Decode base64 index data
+          const indexBin = atob(lod.indexData as unknown as string);
+          const indexBytes = new Uint8Array(indexBin.length);
+          for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
+          idxArr = new Uint32Array(indexBytes.buffer);
+        }
         
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,

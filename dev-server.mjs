@@ -82,14 +82,32 @@ app.get('/', (req, res) => {
     };
     
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      
-      if (data.type === 'reload') {
-        console.log('[DevServer] File changed, reloading...');
-        location.reload();
+      // Handle both text (JSON) and binary messages
+      if (event.data instanceof ArrayBuffer) {
+        // Binary message (ArrayBuffer) - forward as binary tessellation data
+        console.log('[DevServer] Received binary WebSocket message:', event.data.byteLength, 'bytes');
+        window.dispatchEvent(new MessageEvent('message', { 
+          data: { command: 'binaryTessellationData', binaryPayload: event.data }
+        }));
+      } else if (event.data instanceof Blob) {
+        // Binary message (Blob) - convert to ArrayBuffer first
+        console.log('[DevServer] Received Blob WebSocket message:', event.data.size, 'bytes');
+        event.data.arrayBuffer().then(buffer => {
+          window.dispatchEvent(new MessageEvent('message', { 
+            data: { command: 'binaryTessellationData', binaryPayload: buffer }
+          }));
+        });
       } else {
-        // Forward LSP messages to webview as postMessage events
-        window.dispatchEvent(new MessageEvent('message', { data }));
+        // Text/JSON message
+        const data = JSON.parse(event.data);
+        
+        if (data.type === 'reload') {
+          console.log('[DevServer] File changed, reloading...');
+          location.reload();
+        } else {
+          // Forward LSP messages to webview as postMessage events
+          window.dispatchEvent(new MessageEvent('message', { data }));
+        }
       }
     };
     
@@ -126,7 +144,29 @@ function startLspServer() {
   rl.on('line', (line) => {
     try {
       if (!line.trim()) return;
-      //console.log('[DevServer] Raw LSP output:', line.substring(0, 100) + '...');
+      
+      // Check for binary response format: BINARY:<id>:<base64_data>
+      if (line.startsWith('BINARY:')) {
+        const parts = line.substring(7).split(':', 2); // Skip "BINARY:" prefix
+        if (parts.length === 2) {
+          const [id, base64Data] = parts;
+          
+          // Decode base64 to actual binary buffer
+          const binaryData = Buffer.from(base64Data, 'base64');
+          console.log(`[DevServer] Binary response for ID ${id}`);
+          console.log(`[DevServer]   Base64 length: ${base64Data.length}, Binary size: ${binaryData.length} bytes`);
+          console.log(`[DevServer]   First 32 bytes:`, binaryData.slice(0, 32));
+          
+          if (pendingRequests.has(id)) {
+            const callback = pendingRequests.get(id);
+            pendingRequests.delete(id);
+            callback({ id, binaryData, isBinary: true });
+          }
+          return;
+        }
+      }
+      
+      // Standard JSON-RPC response
       const response = JSON.parse(line);
       
       // Check if this is a response to a pending request
@@ -197,9 +237,13 @@ wss.on('connection', (ws) => {
           
           // Load all layers
           layers.forEach((layerId, index) => {
-            // Removed artificial delay
-            sendLspRequest('GetTessellation', { layer_id: layerId }, (tessResponse) => {
-              if (tessResponse.result) {
+            // Use binary protocol for faster transfer
+            sendLspRequest('GetTessellationBinary', { layer_id: layerId }, (tessResponse) => {
+              if (tessResponse.isBinary) {
+                // Send as binary WebSocket frame
+                ws.send(tessResponse.binaryData);
+              } else if (tessResponse.result) {
+                // Fallback to JSON (shouldn't happen with GetTessellationBinary)
                 ws.send(JSON.stringify({
                   command: 'tessellationData',
                   payload: tessResponse.result
@@ -219,11 +263,19 @@ wss.on('connection', (ws) => {
       });
       
     } else if (data.command === 'GetTessellation') {
-      sendLspRequest('GetTessellation', { layer_id: data.layerId }, (response) => {
-        ws.send(JSON.stringify({
-          command: 'tessellationData',
-          payload: response.result
-        }));
+      // Support both binary and JSON requests
+      const useBinary = data.useBinary !== false; // Default to binary
+      const method = useBinary ? 'GetTessellationBinary' : 'GetTessellation';
+      
+      sendLspRequest(method, { layer_id: data.layerId }, (response) => {
+        if (response.isBinary) {
+          ws.send(response.binaryData);
+        } else {
+          ws.send(JSON.stringify({
+            command: 'tessellationData',
+            payload: response.result
+          }));
+        }
       });
     }
   });

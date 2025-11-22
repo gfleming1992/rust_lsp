@@ -15,7 +15,7 @@ export interface GeometryLOD {
   indexCount?: number;
   instanceData?: number[] | Float32Array;  // Raw Float32 array: instanced=2 floats/instance (x,y), instanced_rot=3 floats/instance (x,y,rotation)
   instanceCount?: number;
-  alphaData?: string;  // Optional base64-encoded per-vertex alpha values (1 float per vertex)
+  alphaData?: string | Float32Array;  // Optional: base64-encoded string (JSON) or typed array (binary) of per-vertex alpha values
 }
 
 export interface ShaderGeometry {
