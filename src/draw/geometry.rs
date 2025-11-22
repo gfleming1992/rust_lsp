@@ -119,7 +119,7 @@ pub struct LayerGeometries {
 }
 
 /// Serializable geometry LOD for JSON
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct GeometryLOD {
     /// Raw Float32 vertex data as number array (x, y, x, y, ...)
     /// JavaScript will receive this directly as Float32Array without decoding
@@ -159,7 +159,7 @@ pub struct CullingStats {
 }
 
 /// Shader geometry organized by type
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct ShaderGeometry {
     /// For batch.wgsl - polylines without alpha (opaque, alpha=1.0 implicit)
     pub batch: Option<Vec<GeometryLOD>>,
@@ -178,7 +178,7 @@ pub struct ShaderGeometry {
 }
 
 /// Complete layer JSON structure matching main.ts
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct LayerJSON {
     #[serde(rename = "layerId")]
     pub layer_id: String,

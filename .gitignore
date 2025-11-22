@@ -36,3 +36,6 @@ Thumbs.db
 
 #exclude everything in test-data folder
 /webview/src/test-data/
+
+#node modules
+/node_modules/

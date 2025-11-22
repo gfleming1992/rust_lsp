@@ -1,13 +1,17 @@
-import { setupTestListeners } from "./tests";
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
 import { LayerJSON } from "./types";
 
+// Detect if running in VS Code webview or dev mode
+const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
+const vscode = isVSCodeWebview ? (window as any).acquireVsCodeApi() : null;
+
 async function init() {
   const initStart = performance.now();
   console.log('[INIT] Starting initialization...');
+  console.log(`[INIT] Mode: ${isVSCodeWebview ? 'VS Code Extension' : 'Dev Server'}`);
   
   const canvasElement = document.getElementById("viewer");
   if (!(canvasElement instanceof HTMLCanvasElement)) {
@@ -43,7 +47,6 @@ async function init() {
     // Load all layers
     for (const layerJson of pendingLayers) {
       scene.loadLayerData(layerJson);
-      // Apply color logic if needed, but Scene handles defaults
     }
     
     // Refresh UI and trigger single render
@@ -57,7 +60,7 @@ async function init() {
     batchTimeout = null;
   }
 
-  // Listen for messages from extension
+  // Listen for messages from extension or dev server
   window.addEventListener("message", (event) => {
     const data = event.data as Record<string, unknown>;
     
@@ -76,12 +79,6 @@ async function init() {
       console.error(`Extension error: ${data.message}`);
     }
   });
-
-  // Setup test mode
-  const testStart = performance.now();
-  setupTestListeners();
-  const testEnd = performance.now();
-  console.log(`[INIT] Test setup completed in ${(testEnd - testStart).toFixed(1)}ms`);
   
   const initEnd = performance.now();
   console.log(`[INIT] Total initialization time: ${(initEnd - initStart).toFixed(1)}ms`);
@@ -89,7 +86,6 @@ async function init() {
   // Render loop
   function loop() {
     renderer.render();
-    // We update stats every frame, but UI.ts throttles it
     ui.updateStats();
     requestAnimationFrame(loop);
   }

@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/vscode": "^1.106.1",
     "@webgpu/types": "0.1.46",
-    "typescript": "5.4.5",
+    "typescript": "^5.4.5",
     "vite": "5.1.0"
   },
   "dependencies": {

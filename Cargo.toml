@@ -18,3 +18,7 @@ rayon = "1.11.0"
 [lib]
 name = "rust_extension"
 path = "src/lib.rs"
+
+[[bin]]
+name = "lsp_server"
+path = "src/bin/lsp_server.rs"

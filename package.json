@@ -1,0 +1,57 @@
+{
+  "name": "ipc2581-viewer",
+  "displayName": "IPC-2581 PCB Viewer",
+  "description": "High-performance WebGPU-based viewer for IPC-2581 PCB layout files",
+  "version": "0.1.0",
+  "publisher": "semicove",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ipc2581.openLayout",
+        "title": "Open PCB Layout",
+        "category": "IPC-2581"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "ipc2581.openLayout",
+          "when": "resourceExtname == .xml",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ipc2581.openLayout",
+          "when": "editorLangId == xml"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:rust && npm run build:extension && npm run build:webview",
+    "build:rust": "cargo build --release --bin lsp_server && if not exist bin mkdir bin && copy target\\release\\lsp_server.exe bin\\",
+    "build:extension": "tsc -p tsconfig.extension.json",
+    "build:webview": "cd webview && npm run build",
+    "watch:extension": "tsc -watch -p tsconfig.extension.json",
+    "dev": "node dev-server.mjs",
+    "dev:extension": "npm run watch:extension"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.106.1",
+    "chokidar": "^3.5.3",
+    "esbuild": "^0.19.0",
+    "express": "^4.18.2",
+    "typescript": "^5.3.0",
+    "ws": "^8.14.2"
+  }
+}
