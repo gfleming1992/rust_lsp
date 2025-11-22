@@ -84,9 +84,9 @@ async function handleTestMessage(message: unknown, testCaseName: string) {
       const layerJson = parseBinaryLayer(arrayBuffer);
       const parseEnd = performance.now();
       
-      console.log(`[TEST] Successfully loaded layer in ${(parseEnd - startTime).toFixed(1)}ms (fetch: ${(fetchEnd - fetchStart).toFixed(1)}ms, parse: ${(parseEnd - parseStart).toFixed(1)}ms):`, layerJson);
+      console.log(`[TEST] Successfully loaded layer in ${(parseEnd - startTime).toFixed(1)}ms (fetch: ${(fetchEnd - fetchStart).toFixed(1)}ms, parse: ${(parseEnd - parseStart).toFixed(1)}ms)`);
       
-      console.log(`[TEST] Decoded keys:`, Object.keys(layerJson));
+      // console.log(`[TEST] Decoded keys:`, Object.keys(layerJson));
       
       // Simulate receiving message from extension
       // This mimics the real VS Code webview message event
@@ -173,36 +173,19 @@ export async function setupTestListeners() {
  * Get list of available test cases from output directory
  */
 export async function discoverTestLayers(): Promise<string[]> {
-  // Hardcoded list of test layers - matches files in test-data directory
-  return [
-    'Board Dimensions',
-    'Board Outline',
-    'Bottom Layer',
-    'Bottom Overlay',
-    'Bottom Paste',
-    'Bottom Solder',
-    'Drill Drawing (Top Layer - Bottom Layer)',
-    'Ground plane1',
-    'Ground plane2',
-    'Ground plane3',
-    'Keep-Out Layer',
-    'Mechanical 10',
-    'Mechanical 14',
-    'Mechanical 3',
-    'Mechanical 4',
-    'Mechanical 5',
-    'Mechanical 9',
-    'Power plane1',
-    'Power plane2',
-    'SELECTIVE PLATING BOTTOM',
-    'Signal 1',
-    'Signal 2',
-    'Signal 3',
-    'Top Layer',
-    'Top Overlay',
-    'Top Paste',
-    'Top Solder',
-  ];
+  // Use Vite's import.meta.glob to find all .bin files in test-data
+  const modules = import.meta.glob('./test-data/*.bin');
+  
+  // Extract filenames from paths (e.g., "./test-data/layer_Top Layer.bin" -> "Top Layer")
+  const layers = Object.keys(modules)
+    .map(path => {
+      const match = path.match(/layer_(.+)\.bin$/);
+      return match ? match[1] : null;
+    })
+    .filter((name): name is string => name !== null)
+    .sort();
+
+  return layers;
 }
 
 

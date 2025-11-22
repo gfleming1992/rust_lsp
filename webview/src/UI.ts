@@ -253,6 +253,15 @@ export class UI {
       `FPS: ${this.renderer.lastFps.toFixed(1)}`,
       `GPU Buffers: ${this.renderer.gpuBuffers.length} (${(this.renderer.gpuMemoryBytes / 1048576).toFixed(2)} MB)`
     ];
+
+    // Add JS memory stats if available (Chrome/Edge only)
+    const perf = performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } };
+    if (perf.memory) {
+      const usedMB = (perf.memory.usedJSHeapSize / 1048576).toFixed(2);
+      const totalMB = (perf.memory.totalJSHeapSize / 1048576).toFixed(2);
+      lines.push(`JS Heap: ${usedMB} / ${totalMB} MB`);
+    }
+
     this.fpsEl.innerHTML = lines.join("<br/>");
   }
 }
