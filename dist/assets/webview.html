@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IPC-2581 Viewer</title>
+    <!--CSP-->
+    <!--CSS-->
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #1e1e1e; }
+        #viewer { display: block; width: 100vw; height: 100vh; }
+        .ui-panel {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            pointer-events: none;
+        }
+        .ui-panel button, .ui-panel input {
+            pointer-events: auto;
+        }
+        #ui-top-left { top: 10px; left: 10px; }
+        #ui-bottom-right { bottom: 10px; right: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="viewer"></canvas>
+    
+    <div id="ui-top-left" class="ui-panel">
+        <div id="fps"></div>
+        <div id="layers" style="margin-top: 10px;"></div>
+    </div>
+    
+    <div id="ui-bottom-right" class="ui-panel">
+        <div id="coordOverlay">x: -, y: -, zoom: 1.00</div>
+    </div>
+
+    <!--SCRIPT-->
+</body>
+</html>

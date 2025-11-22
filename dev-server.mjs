@@ -15,33 +15,25 @@ import { fileURLToPath } from 'url';
 import esbuild from 'esbuild';
 import chokidar from 'chokidar';
 
+import fs from 'fs';
+import readline from 'readline';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 5173;
-const DEV_XML_PATH = path.join(__dirname, 'tests', 'pic_programmerB.xml');
+const DEV_XML_PATH = path.join(__dirname, 'tests', 'NEX40400_PROBECARD_PCB.xml');
 
 let lspServer = null;
-let lspStdout = null;
 let lspStdin = null;
+const pendingRequests = new Map(); // id -> callback
 
 // Start Express server
 const app = express();
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
-// Serve static files from webview directory
-app.use(express.static(path.join(__dirname, 'webview'), {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.js')) {
-      res.setHeader('Content-Type', 'application/javascript');
-    } else if (filePath.endsWith('.ts')) {
-      res.setHeader('Content-Type', 'application/javascript');
-    }
-  }
-}));
-
-// Serve bundled output
+// Serve bundled output FIRST (higher priority)
 app.use('/dist', express.static(path.join(__dirname, 'webview', 'dist'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.js')) {
@@ -50,37 +42,24 @@ app.use('/dist', express.static(path.join(__dirname, 'webview', 'dist'), {
   }
 }));
 
+// Serve ONLY specific static files (CSS, assets), NOT .ts files
+app.use(express.static(path.join(__dirname, 'webview'), {
+  index: false, // Don't serve index.html from static
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    }
+  },
+  // Only serve specific file types, block .ts files
+  extensions: false
+}));
+
 // Serve index.html
 app.get('/', (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IPC-2581 Viewer (Dev)</title>
-  <style>
-    body { margin: 0; padding: 0; overflow: hidden; }
-    #viewer { display: block; width: 100vw; height: 100vh; }
-    #ui {
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      background: rgba(0, 0, 0, 0.8);
-      color: white;
-      padding: 10px;
-      border-radius: 5px;
-      font-family: monospace;
-      font-size: 12px;
-    }
-  </style>
-</head>
-<body>
-  <canvas id="viewer"></canvas>
-  <div id="ui">
-    <div id="fps"></div>
-    <div id="coordOverlay"></div>
-    <div id="layers"></div>
-  </div>
+  const htmlPath = path.join(__dirname, 'assets', 'webview.html');
+  let html = fs.readFileSync(htmlPath, 'utf-8');
+
+  const script = `
   <script type="module" src="/dist/main.js"></script>
   <script>
     // Mock VS Code API for dev mode
@@ -116,9 +95,14 @@ app.get('/', (req, res) => {
     
     ws.onerror = (error) => console.error('[DevServer] WebSocket error:', error);
     ws.onclose = () => console.log('[DevServer] WebSocket closed');
-  </script>
-</body>
-</html>`);
+  </script>`;
+
+  html = html
+    .replace('<!--CSP-->', '')
+    .replace('<!--CSS-->', '')
+    .replace('<!--SCRIPT-->', script);
+
+  res.send(html);
 });
 
 // Start LSP server
@@ -132,7 +116,31 @@ function startLspServer() {
   });
   
   lspStdin = lspServer.stdin;
-  lspStdout = lspServer.stdout;
+  
+  // Use readline to handle line-based JSON-RPC output
+  const rl = readline.createInterface({
+    input: lspServer.stdout,
+    terminal: false
+  });
+
+  rl.on('line', (line) => {
+    try {
+      if (!line.trim()) return;
+      //console.log('[DevServer] Raw LSP output:', line.substring(0, 100) + '...');
+      const response = JSON.parse(line);
+      
+      // Check if this is a response to a pending request
+      if (response.id && pendingRequests.has(response.id)) {
+        const callback = pendingRequests.get(response.id);
+        pendingRequests.delete(response.id);
+        callback(response);
+      } else {
+        console.warn('[DevServer] Received response for unknown ID:', response.id);
+      }
+    } catch (e) {
+      console.error('[DevServer] Failed to parse LSP response:', e);
+    }
+  });
   
   lspServer.stderr.on('data', (data) => {
     console.log('[LSP Server]', data.toString().trim());
@@ -142,10 +150,24 @@ function startLspServer() {
     console.log('[DevServer] LSP server exited with code:', code);
     lspServer = null;
     lspStdin = null;
-    lspStdout = null;
   });
   
   console.log('[DevServer] LSP server started');
+}
+
+// Helper to send request to LSP
+let requestIdCounter = 0;
+function sendLspRequest(method, params, callback) {
+  if (!lspStdin) return;
+  
+  const id = `req-${++requestIdCounter}`; // String ID to avoid float precision issues
+  const request = { id, method, params };
+  
+  if (callback) {
+    pendingRequests.set(id, callback);
+  }
+  
+  lspStdin.write(JSON.stringify(request) + '\n');
 }
 
 // Handle WebSocket connections
@@ -154,100 +176,56 @@ wss.on('connection', (ws) => {
   
   ws.on('message', async (message) => {
     const data = JSON.parse(message.toString());
-    console.log('[DevServer] Received from client:', data);
+    console.log('[DevServer] Received from client:', data.command);
     
-    if (!lspServer || !lspStdin || !lspStdout) {
+    if (!lspServer || !lspStdin) {
       ws.send(JSON.stringify({ command: 'error', message: 'LSP server not running' }));
       return;
     }
     
-    // Map client commands to LSP methods
-    let lspRequest;
-    
     if (data.command === 'Load') {
-      lspRequest = {
-        id: Date.now(),
-        method: 'Load',
-        params: { file_path: data.filePath || DEV_XML_PATH }
-      };
-    } else if (data.command === 'GetLayers') {
-      lspRequest = {
-        id: Date.now(),
-        method: 'GetLayers',
-        params: null
-      };
-    } else if (data.command === 'GetTessellation') {
-      lspRequest = {
-        id: Date.now(),
-        method: 'GetTessellation',
-        params: { layer_id: data.layerId }
-      };
-    } else {
-      return;
-    }
-    
-    // Send to LSP server
-    lspStdin.write(JSON.stringify(lspRequest) + '\n');
-    
-    // Wait for response (simple implementation - assumes responses come back in order)
-    lspStdout.once('data', (responseData) => {
-      const response = JSON.parse(responseData.toString().trim());
-      console.log('[DevServer] LSP response:', response);
-      
-      if (response.error) {
-        ws.send(JSON.stringify({ command: 'error', message: response.error.message }));
-        return;
-      }
-      
-      // Map LSP responses to webview commands
-      if (lspRequest.method === 'Load') {
+      sendLspRequest('Load', { file_path: data.filePath || DEV_XML_PATH }, (response) => {
+        if (response.error) {
+          ws.send(JSON.stringify({ command: 'error', message: response.error.message }));
+          return;
+        }
+        
         // After load, get layers
-        const getLayersRequest = {
-          id: Date.now(),
-          method: 'GetLayers',
-          params: null
-        };
-        
-        lspStdin.write(JSON.stringify(getLayersRequest) + '\n');
-        
-        lspStdout.once('data', (layersData) => {
-          const layersResponse = JSON.parse(layersData.toString().trim());
+        sendLspRequest('GetLayers', null, (layersResponse) => {
           const layers = layersResponse.result || [];
-          
           console.log(`[DevServer] Found ${layers.length} layers`);
           
           // Load all layers
           layers.forEach((layerId, index) => {
-            setTimeout(() => {
-              const tessRequest = {
-                id: Date.now(),
-                method: 'GetTessellation',
-                params: { layer_id: layerId }
-              };
-              
-              lspStdin.write(JSON.stringify(tessRequest) + '\n');
-              
-              lspStdout.once('data', (tessData) => {
-                const tessResponse = JSON.parse(tessData.toString().trim());
-                
-                if (tessResponse.result) {
-                  ws.send(JSON.stringify({
-                    command: 'tessellationData',
-                    payload: tessResponse.result
-                  }));
-                }
-              });
-            }, index * 10); // Stagger requests slightly
+            // Removed artificial delay
+            sendLspRequest('GetTessellation', { layer_id: layerId }, (tessResponse) => {
+              if (tessResponse.result) {
+                ws.send(JSON.stringify({
+                  command: 'tessellationData',
+                  payload: tessResponse.result
+                }));
+              }
+            });
           });
         });
-        
-      } else if (lspRequest.method === 'GetTessellation') {
+      });
+      
+    } else if (data.command === 'GetLayers') {
+      sendLspRequest('GetLayers', null, (response) => {
+        ws.send(JSON.stringify({
+          command: 'layerList',
+          layers: response.result
+        }));
+      });
+      
+    } else if (data.command === 'GetTessellation') {
+      sendLspRequest('GetTessellation', { layer_id: data.layerId }, (response) => {
         ws.send(JSON.stringify({
           command: 'tessellationData',
           payload: response.result
         }));
-      }
-    });
+      });
+    }
   });
   
   ws.on('close', () => {

@@ -23,10 +23,10 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     let padstack_defs = parse_padstack_definitions(root);
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("\n=== Detailed Timing Profile ===");
-        println!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
-        println!("Parsed {} standard primitives", primitives.len());
-        println!("Parsed {} padstack definitions", padstack_defs.len());
+        eprintln!("\n=== Detailed Timing Profile ===");
+        eprintln!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
+        eprintln!("Parsed {} standard primitives", primitives.len());
+        eprintln!("Parsed {} padstack definitions", padstack_defs.len());
     }
 
     // Find Ecad node which contains all the CAD data
@@ -105,19 +105,19 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     }
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("\nTotal collection time: {:.2}ms", collect_time.as_secs_f64() * 1000.0);
-        println!("Parallel processing time: {:.2}ms", process_start.elapsed().as_secs_f64() * 1000.0);
-        println!("TOTAL TESSELLATION TIME: {:.2}ms\n", total_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("\nTotal collection time: {:.2}ms", collect_time.as_secs_f64() * 1000.0);
+        eprintln!("Parallel processing time: {:.2}ms", process_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("TOTAL TESSELLATION TIME: {:.2}ms\n", total_start.elapsed().as_secs_f64() * 1000.0);
     }
 
     // Print summary if we culled anything
     if total_culling_stats.lod_culled.iter().any(|&c| c > 0) {
-        println!("\n=== Width-Based Culling Summary ===");
-        println!("Total polylines across all layers: {}", total_culling_stats.total_polylines);
+        eprintln!("\n=== Width-Based Culling Summary ===");
+        eprintln!("Total polylines across all layers: {}", total_culling_stats.total_polylines);
         for (lod, count) in total_culling_stats.lod_culled.iter().enumerate() {
             if *count > 0 {
                 let percent = (*count as f32 / total_culling_stats.total_polylines as f32) * 100.0;
-                println!(
+                eprintln!(
                     "  LOD{}: {} polylines culled ({:.1}%, width < {:.3})",
                     lod, count, percent, MIN_VISIBLE_WIDTH_LOD[lod]
                 );
@@ -201,7 +201,7 @@ fn collect_geometries_from_node(
         
         let vias = collect_vias_from_layer(node, padstack_defs);
         if !vias.is_empty() && std::env::var("PROFILE_TIMING").is_ok() {
-            println!("      Collected {} vias", vias.len());
+            eprintln!("      Collected {} vias", vias.len());
         }
         geometries.vias.extend(vias);
     }

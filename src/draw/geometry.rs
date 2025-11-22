@@ -21,6 +21,41 @@ where
     }
 }
 
+/// Serialize Vec<f32> as base64-encoded string (non-optional)
+pub fn serialize_f32_vec_base64<S>(data: &Vec<f32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            data.as_ptr() as *const u8,
+            data.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    let encoded = general_purpose::STANDARD.encode(bytes);
+    serializer.serialize_str(&encoded)
+}
+
+/// Serialize Vec<u32> as base64-encoded string for compact JSON transmission
+pub fn serialize_u32_vec_as_base64<S>(data: &Option<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match data {
+        Some(vec) => {
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    vec.as_ptr() as *const u8,
+                    vec.len() * std::mem::size_of::<u32>(),
+                )
+            };
+            let encoded = general_purpose::STANDARD.encode(bytes);
+            serializer.serialize_some(&encoded)
+        }
+        None => serializer.serialize_none(),
+    }
+}
+
 /// A 2D point
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Point {
@@ -121,29 +156,28 @@ pub struct LayerGeometries {
 /// Serializable geometry LOD for JSON
 #[derive(Serialize, Clone)]
 pub struct GeometryLOD {
-    /// Raw Float32 vertex data as number array (x, y, x, y, ...)
-    /// JavaScript will receive this directly as Float32Array without decoding
-    #[serde(rename = "vertexData")]
+    /// Base64-encoded Float32 vertex data (x, y, x, y, ...)
+    #[serde(rename = "vertexData", serialize_with = "serialize_f32_vec_base64")]
     pub vertex_data: Vec<f32>,
     
     /// Number of vertices (not bytes)
     #[serde(rename = "vertexCount")]
     pub vertex_count: usize,
     
-    /// Optional Uint32 indices as number array
-    #[serde(rename = "indexData")]
+    /// Base64-encoded Uint32 indices
+    #[serde(rename = "indexData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_u32_vec_as_base64")]
     pub index_data: Option<Vec<u32>>,
     
     /// Optional number of indices
     #[serde(rename = "indexCount")]
     pub index_count: Option<usize>,
     
-    /// Optional per-vertex alpha values (1 float per vertex), serialized as base64 string
+    /// Base64-encoded per-vertex alpha values (1 float per vertex)
     #[serde(rename = "alphaData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
     pub alpha_data: Option<Vec<f32>>,
     
-    /// Optional instance data for instanced rendering (x, y, rotation for instanced_rot; x, y for instanced)
-    #[serde(rename = "instanceData", skip_serializing_if = "Option::is_none")]
+    /// Base64-encoded instance data for instanced rendering (x, y, rotation for instanced_rot; x, y for instanced)
+    #[serde(rename = "instanceData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
     pub instance_data: Option<Vec<f32>>,
     
     /// Optional number of instances

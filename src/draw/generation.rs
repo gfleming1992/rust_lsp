@@ -24,13 +24,13 @@ fn debug_print_polyline(
     line_end: LineEnd,
 ) {
     let (verts, indices) = tessellate_polyline(points, width, line_end);
-    println!(
+    eprintln!(
         "\nPolyline: {} points, width: {:.3}, layer: {}",
         points.len(),
         width,
         layer_id
     );
-    println!(
+    eprintln!(
         " Generated: {} triangles ({} vertices)",
         indices.len() / 3,
         verts.len() / 2
@@ -48,7 +48,7 @@ fn debug_print_polyline(
         let v0 = vertex_pairs[tri[0] as usize];
         let v1 = vertex_pairs[tri[1] as usize];
         let v2 = vertex_pairs[tri[2] as usize];
-        println!(
+        eprintln!(
             " Triangle {}: [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}]",
             tri_idx, v0.0, v0.1, v1.0, v1.1, v2.0, v2.1
         );
@@ -76,11 +76,11 @@ pub fn generate_layer_json(
     // Generate polygon geometry (with alpha) - for batch_colored.wgsl
     let polygon_lods = if !geometries.polygons.is_empty() {
         if std::env::var("PROFILE_TIMING").is_ok() {
-            println!("    [{}] Processing {} polygons", layer_name, geometries.polygons.len());
+            eprintln!("    [{}] Processing {} polygons", layer_name, geometries.polygons.len());
         }
         let lods = generate_polygon_geometry(&geometries.polygons)?;
         if std::env::var("PROFILE_TIMING").is_ok() && !lods.is_empty() {
-            println!("    [{}] Generated {} polygon LODs with {} vertices", 
+            eprintln!("    [{}] Generated {} polygon LODs with {} vertices", 
                 layer_name, lods.len(), lods[0].vertex_count);
         }
         lods
@@ -91,7 +91,7 @@ pub fn generate_layer_json(
     // Generate pad geometry (instanced with rotation) - for instanced_rot shader
     let pad_lods = if !geometries.pads.is_empty() {
         if std::env::var("PROFILE_TIMING").is_ok() {
-            println!("    [{}] Processing {} pads", layer_name, geometries.pads.len());
+            eprintln!("    [{}] Processing {} pads", layer_name, geometries.pads.len());
         }
         generate_pad_geometry(&geometries.pads, primitives)?
     } else {
@@ -101,7 +101,7 @@ pub fn generate_layer_json(
     // Generate via geometry (instanced without rotation) - for instanced shader
     let via_lods = if !geometries.vias.is_empty() {
         if std::env::var("PROFILE_TIMING").is_ok() {
-            println!("    [{}] Processing {} vias", layer_name, geometries.vias.len());
+            eprintln!("    [{}] Processing {} vias", layer_name, geometries.vias.len());
         }
         generate_via_geometry(&geometries.vias)?
     } else {
@@ -109,7 +109,7 @@ pub fn generate_layer_json(
     };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("    [{}] Total layer time: {:.2}ms\n", layer_name, layer_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("    [{}] Total layer time: {:.2}ms\n", layer_name, layer_start.elapsed().as_secs_f64() * 1000.0);
     }
     
     let mut shader_geom = ShaderGeometry::default();
@@ -135,7 +135,7 @@ pub fn generate_layer_json(
     };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("    [{}] ShaderGeometry: batch={}, batch_colored={}, instanced_rot={}, instanced={}", 
+        eprintln!("    [{}] ShaderGeometry: batch={}, batch_colored={}, instanced_rot={}, instanced={}", 
             layer_name, 
             shader_geom.batch.is_some(),
             shader_geom.batch_colored.is_some(),
@@ -146,12 +146,12 @@ pub fn generate_layer_json(
         if let Ok(json_str) = serde_json::to_string(&shader_geom) {
             let has_batch_colored = json_str.contains("batch_colored");
             let has_instanced_rot = json_str.contains("instanced_rot");
-            println!("    [{}] JSON contains batch_colored: {}, instanced_rot: {}", layer_name, has_batch_colored, has_instanced_rot);
+            eprintln!("    [{}] JSON contains batch_colored: {}, instanced_rot: {}", layer_name, has_batch_colored, has_instanced_rot);
             if !has_batch_colored && shader_geom.batch_colored.is_some() {
-                println!("    [{}] WARNING: batch_colored is Some but not in JSON!", layer_name);
+                eprintln!("    [{}] WARNING: batch_colored is Some but not in JSON!", layer_name);
             }
             if !has_instanced_rot && shader_geom.instanced_rot.is_some() {
-                println!("    [{}] WARNING: instanced_rot is Some but not in JSON!", layer_name);
+                eprintln!("    [{}] WARNING: instanced_rot is Some but not in JSON!", layer_name);
             }
         }
     }
@@ -184,7 +184,7 @@ fn generate_polyline_geometry(
     let lod_gen_time = lod_gen_start.elapsed();
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("    [{}] LOD generation: {:.2}ms ({} polylines)",
+        eprintln!("    [{}] LOD generation: {:.2}ms ({} polylines)",
                  layer_name, lod_gen_time.as_secs_f64() * 1000.0, polylines.len());
     }
 
@@ -227,11 +227,11 @@ fn generate_polyline_geometry(
                 let lod_points = all_lod_points[poly_idx][lod_idx].clone();
                 if debug_this_layer && lod_idx == 0 {
                     if !debug_header_printed {
-                        println!(
+                        eprintln!(
                             "\n=== {} Polyline Tessellation (first 200 triangles) ===",
                             layer_name
                         );
-                        println!(
+                        eprintln!(
                             " Total {} polylines: {}",
                             layer_name,
                             polylines.len()
@@ -259,7 +259,7 @@ fn generate_polyline_geometry(
         let tessellate_time = tessellate_start.elapsed();
         
         if std::env::var("PROFILE_TIMING").is_ok() && !lod_polylines_data.is_empty() {
-            println!("      LOD{}: tessellation {:.2}ms ({} polylines -> {} verts, {} indices)",
+            eprintln!("      LOD{}: tessellation {:.2}ms ({} polylines -> {} verts, {} indices)",
                      lod_idx, tessellate_time.as_secs_f64() * 1000.0,
                      lod_polylines_data.len(), verts.len() / 2, indices.len());
         }
@@ -285,7 +285,7 @@ fn generate_polyline_geometry(
     }
 
     if debug_this_layer && debug_header_printed {
-        println!(
+        eprintln!(
             "=== End of {} Tessellation (200 triangles shown) ===",
             layer_name
         );
@@ -293,7 +293,7 @@ fn generate_polyline_geometry(
         let total = polylines.len();
         for (lod, count) in culling_stats.lod_culled.iter().enumerate() {
             if *count > 0 {
-                println!(
+                eprintln!(
                     "  LOD{}: culled {}/{} polylines (width < {:.3})",
                     lod, count, total, MIN_VISIBLE_WIDTH_LOD[lod]
                 );
@@ -304,7 +304,7 @@ fn generate_polyline_geometry(
     let batch_time = batch_start.elapsed();
     
     if std::env::var("PROFILE_TIMING").is_ok() {
-        println!("    [{}] Batching/tessellation: {:.2}ms", layer_name, batch_time.as_secs_f64() * 1000.0);
+        eprintln!("    [{}] Batching/tessellation: {:.2}ms", layer_name, batch_time.as_secs_f64() * 1000.0);
     }
     
     Ok(lod_geometries)
@@ -367,7 +367,7 @@ fn generate_pad_geometry(
     }
     
     if std::env::var("DEBUG_PADS").is_ok() {
-        println!("  Generating pad geometry for {} pads", pads.len());
+        eprintln!("  Generating pad geometry for {} pads", pads.len());
     }
     
     // Group pads by shape_id for efficient instancing
@@ -379,7 +379,7 @@ fn generate_pad_geometry(
     }
     
     if std::env::var("DEBUG_PADS").is_ok() {
-        println!("  Pad shape groups: {}", shape_groups.len());
+        eprintln!("  Pad shape groups: {}", shape_groups.len());
     }
     
     let mut lod0_entries = Vec::new();
@@ -389,7 +389,7 @@ fn generate_pad_geometry(
     for (shape_id, instances) in shape_groups {
         if let Some(primitive) = primitives.get(&shape_id) {
             if std::env::var("DEBUG_PADS").is_ok() {
-                println!("    Shape {}: {} instances, primitive: {:?}", shape_id, instances.len(), primitive);
+                eprintln!("    Shape {}: {} instances, primitive: {:?}", shape_id, instances.len(), primitive);
             }
             
             // Tessellate the base shape once
@@ -441,10 +441,10 @@ fn generate_pad_geometry(
                 instance_count: Some(inst_count),
             });
         } else if std::env::var("DEBUG_PADS").is_ok() {
-            println!("    WARNING: Shape {} not found in primitives! ({} instances skipped)", shape_id, instances.len());
+            eprintln!("    WARNING: Shape {} not found in primitives! ({} instances skipped)", shape_id, instances.len());
             // Show first few positions to help locate them
             for (i, inst) in instances.iter().take(3).enumerate() {
-                println!("      Instance {}: x={:.2}, y={:.2}, rotation={:.1}°", i, inst.x, inst.y, inst.rotation);
+                eprintln!("      Instance {}: x={:.2}, y={:.2}, rotation={:.1}°", i, inst.x, inst.y, inst.rotation);
             }
         }
     }
@@ -456,7 +456,7 @@ fn generate_pad_geometry(
     all_lods.extend(lod2_entries);
     
     if std::env::var("DEBUG_PADS").is_ok() {
-        println!("  Generated {} total pad LOD entries ({} shapes x 3 LODs)", all_lods.len(), all_lods.len() / 3);
+        eprintln!("  Generated {} total pad LOD entries ({} shapes x 3 LODs)", all_lods.len(), all_lods.len() / 3);
     }
     
     Ok(all_lods)
@@ -542,7 +542,7 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
             let hole_radius = first_via.hole_diameter / 2.0;
             
             if std::env::var("DEBUG_VIA").is_ok() {
-                println!("  Via shape {:?}: {} instances", shape_key, instances.len());
+                eprintln!("  Via shape {:?}: {} instances", shape_key, instances.len());
             }
             
             // Create instance data (x, y) for this shape group
@@ -604,7 +604,7 @@ fn generate_via_geometry(vias: &[ViaInstance]) -> Result<Vec<GeometryLOD>, anyho
             let needs_shape_at_lod2 = pixels_at_lod2 >= 30.0;
             
             if std::env::var("DEBUG_VIA").is_ok() {
-                println!("    Pixels: LOD0={:.1}px, LOD1={:.1}px, LOD2={:.1}px", 
+                eprintln!("    Pixels: LOD0={:.1}px, LOD1={:.1}px, LOD2={:.1}px", 
                     pixels_at_lod0, pixels_at_lod1, pixels_at_lod2);
             }
             

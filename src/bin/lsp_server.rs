@@ -2,8 +2,8 @@ use rust_extension::draw::geometry::LayerJSON;
 use rust_extension::parse_xml::parse_xml_file;
 use rust_extension::draw::parsing::extract_and_generate_layers;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::time::Instant;
 
 /// JSON-RPC Request format
 #[derive(Debug, Deserialize)]
@@ -29,11 +29,20 @@ struct ErrorResponse {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct TypedResponse<T: Serialize> {
+    id: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorResponse>,
+}
+
 /// In-memory state: DOM and layer cache
 struct ServerState {
     xml_file_path: Option<String>,
     layers: Vec<LayerJSON>,
-    layer_cache: HashMap<String, LayerJSON>,
+    // layer_cache removed as we don't need it with zero-copy serialization
 }
 
 impl ServerState {
@@ -41,7 +50,6 @@ impl ServerState {
         Self {
             xml_file_path: None,
             layers: Vec::new(),
-            layer_cache: HashMap::new(),
         }
     }
 }
@@ -75,21 +83,23 @@ fn main() {
 
         eprintln!("[LSP Server] Received method: {}", request.method);
 
-        let response = match request.method.as_str() {
-            "Load" => handle_load(&mut state, request.id, request.params),
-            "GetLayers" => handle_get_layers(&state, request.id),
-            "GetTessellation" => handle_get_tessellation(&mut state, request.id, request.params),
-            _ => Response {
-                id: request.id,
-                result: None,
-                error: Some(ErrorResponse {
-                    code: -32601,
-                    message: format!("Method not found: {}", request.method),
-                }),
+        let response_json = match request.method.as_str() {
+            "Load" => serde_json::to_string(&handle_load(&mut state, request.id, request.params)).unwrap(),
+            "GetLayers" => serde_json::to_string(&handle_get_layers(&state, request.id)).unwrap(),
+            "GetTessellation" => handle_get_tessellation_json(&mut state, request.id, request.params),
+            _ => {
+                let response = Response {
+                    id: request.id,
+                    result: None,
+                    error: Some(ErrorResponse {
+                        code: -32601,
+                        message: format!("Method not found: {}", request.method),
+                    }),
+                };
+                serde_json::to_string(&response).unwrap()
             },
         };
 
-        let response_json = serde_json::to_string(&response).unwrap();
         writeln!(stdout, "{}", response_json).unwrap();
         stdout.flush().unwrap();
     }
@@ -119,7 +129,10 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
 
     eprintln!("[LSP Server] Loading file: {}", params.file_path);
 
+    let start_total = Instant::now();
+
     // Parse XML file
+    let start_parse = Instant::now();
     let root = match parse_xml_file(&params.file_path) {
         Ok(doc) => doc,
         Err(e) => {
@@ -133,8 +146,10 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
             };
         }
     };
+    eprintln!("[LSP Server] XML Parse time: {:.2?}", start_parse.elapsed());
 
     // Extract and generate layer geometries
+    let start_gen = Instant::now();
     let layers = match extract_and_generate_layers(&root) {
         Ok(layers) => layers,
         Err(e) => {
@@ -148,12 +163,13 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
             };
         }
     };
+    eprintln!("[LSP Server] Layer Generation (Tessellation) time: {:.2?}", start_gen.elapsed());
+    eprintln!("[LSP Server] Total Load time: {:.2?}", start_total.elapsed());
 
     eprintln!("[LSP Server] Generated {} layers", layers.len());
 
     state.xml_file_path = Some(params.file_path.clone());
     state.layers = layers;
-    state.layer_cache.clear();
 
     eprintln!("[LSP Server] File loaded successfully");
 
@@ -189,11 +205,11 @@ fn handle_get_layers(state: &ServerState, id: Option<serde_json::Value>) -> Resp
     }
 }
 
-fn handle_get_tessellation(
+fn handle_get_tessellation_json(
     state: &mut ServerState,
     id: Option<serde_json::Value>,
     params: Option<serde_json::Value>,
-) -> Response {
+) -> String {
     #[derive(Deserialize)]
     struct TessellationParams {
         layer_id: String,
@@ -202,7 +218,7 @@ fn handle_get_tessellation(
     let params: TessellationParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
         None => {
-            return Response {
+            let response = TypedResponse::<()> {
                 id,
                 result: None,
                 error: Some(ErrorResponse {
@@ -210,11 +226,12 @@ fn handle_get_tessellation(
                     message: "Invalid params: expected {layer_id: string}".to_string(),
                 }),
             };
+            return serde_json::to_string(&response).unwrap();
         }
     };
 
     if state.xml_file_path.is_none() {
-        return Response {
+        let response = TypedResponse::<()> {
             id,
             result: None,
             error: Some(ErrorResponse {
@@ -222,46 +239,41 @@ fn handle_get_tessellation(
                 message: "No file loaded. Call Load first.".to_string(),
             }),
         };
+        return serde_json::to_string(&response).unwrap();
     }
 
     eprintln!("[LSP Server] Tessellating layer: {}", params.layer_id);
-
-    // Check cache first
-    if let Some(cached) = state.layer_cache.get(&params.layer_id) {
-        eprintln!("[LSP Server] Returning cached tessellation for layer: {}", params.layer_id);
-        return Response {
-            id,
-            result: Some(serde_json::to_value(cached).unwrap()),
-            error: None,
-        };
-    }
 
     // Find the layer in the generated layers
     let layer = state.layers.iter().find(|l| l.layer_id == params.layer_id);
 
     match layer {
         Some(layer_json) => {
-            // Cache the result (clone since layer_json is a reference)
-            let layer_clone = layer_json.clone();
-            state.layer_cache.insert(params.layer_id.clone(), layer_clone.clone());
+            let start_serialize = Instant::now();
+            
+            let response = TypedResponse {
+                id,
+                result: Some(layer_json),
+                error: None,
+            };
+            
+            let result_string = serde_json::to_string(&response).unwrap();
+            eprintln!("[LSP Server] Serialization time for layer {}: {:.2?}", params.layer_id, start_serialize.elapsed());
 
             eprintln!("[LSP Server] Returning tessellation for layer: {}", params.layer_id);
 
-            Response {
-                id,
-                result: Some(serde_json::to_value(&layer_clone).unwrap()),
-                error: None,
-            }
+            result_string
         }
         None => {
-            Response {
+            let response = TypedResponse::<()> {
                 id,
                 result: None,
                 error: Some(ErrorResponse {
                     code: 3,
                     message: format!("Layer not found: {}", params.layer_id),
                 }),
-            }
+            };
+            serde_json::to_string(&response).unwrap()
         }
     }
 }

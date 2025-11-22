@@ -36,7 +36,7 @@ async function init() {
   // Batch layer loading state
   let pendingLayers: LayerJSON[] = [];
   let batchTimeout: number | null = null;
-  const BATCH_DELAY_MS = 50;
+  const BATCH_DELAY_MS = 5; // Reduced from 50ms - render as fast as possible
 
   function processPendingLayers() {
     if (pendingLayers.length === 0) return;
@@ -62,11 +62,13 @@ async function init() {
 
   // Listen for messages from extension or dev server
   window.addEventListener("message", (event) => {
+    const msgStart = performance.now();
     const data = event.data as Record<string, unknown>;
     
     if (data.command === "tessellationData" && data.payload) {
       const layerJson = data.payload as LayerJSON;
-      console.log(`[BATCH] Queued layer: ${layerJson.layerId} (${pendingLayers.length + 1} total)`);
+      const msgEnd = performance.now();
+      console.log(`[MSG] Received ${layerJson.layerId} (parsed in ${(msgEnd - msgStart).toFixed(1)}ms)`);
       
       pendingLayers.push(layerJson);
       

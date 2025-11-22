@@ -120,6 +120,7 @@ export class Scene {
   }
 
   public loadLayerData(layerJson: LayerJSON) {
+    const loadStart = performance.now();
     if (!this.device || !this.pipelines) {
       console.warn("Cannot load layer data: Device or pipelines not set");
       return;
@@ -173,6 +174,9 @@ export class Scene {
       console.warn(`No geometry data found for layer ${layerJson.layerId}`);
     }
     
+    const loadEnd = performance.now();
+    console.log(`[SCENE] Loaded ${layerJson.layerId} in ${(loadEnd - loadStart).toFixed(1)}ms`);
+    
     this.state.needsDraw = true;
   }
 
@@ -194,7 +198,12 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      const lodVertices = lod.vertexData instanceof Float32Array ? lod.vertexData : new Float32Array(lod.vertexData);
+      // Decode base64 vertex data
+      const vertexBin = atob(lod.vertexData as unknown as string);
+      const vertexBytes = new Uint8Array(vertexBin.length);
+      for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
+      const lodVertices = new Float32Array(vertexBytes.buffer);
+      
       const buffer = this.device.createBuffer({
         size: lodVertices.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -227,7 +236,12 @@ export class Scene {
       lodAlphaBuffers.push(alphaBuf);
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        const idxArr = lod.indexData instanceof Uint32Array ? lod.indexData : new Uint32Array(lod.indexData);
+        // Decode base64 index data
+        const indexBin = atob(lod.indexData as unknown as string);
+        const indexBytes = new Uint8Array(indexBin.length);
+        for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
+        const idxArr = new Uint32Array(indexBytes.buffer);
+        
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
@@ -289,7 +303,12 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      const lodVertices = lod.vertexData instanceof Float32Array ? lod.vertexData : new Float32Array(lod.vertexData);
+      // Decode base64 vertex data
+      const vertexBin = atob(lod.vertexData as unknown as string);
+      const vertexBytes = new Uint8Array(vertexBin.length);
+      for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
+      const lodVertices = new Float32Array(vertexBytes.buffer);
+      
       const vertexBuffer = this.device.createBuffer({
         size: lodVertices.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -301,7 +320,12 @@ export class Scene {
       lodVertexCounts.push(lod.vertexCount);
 
       if (lod.instanceData && lod.instanceCount) {
-        const instanceArr = lod.instanceData instanceof Float32Array ? lod.instanceData : new Float32Array(lod.instanceData);
+        // Decode base64 instance data
+        const instanceBin = atob(lod.instanceData as unknown as string);
+        const instanceBytes = new Uint8Array(instanceBin.length);
+        for (let j = 0; j < instanceBin.length; j++) instanceBytes[j] = instanceBin.charCodeAt(j);
+        const instanceArr = new Float32Array(instanceBytes.buffer);
+        
         const instanceBuffer = this.device.createBuffer({
           size: instanceArr.byteLength,
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -321,7 +345,12 @@ export class Scene {
       }
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        const idxArr = lod.indexData instanceof Uint32Array ? lod.indexData : new Uint32Array(lod.indexData);
+        // Decode base64 index data
+        const indexBin = atob(lod.indexData as unknown as string);
+        const indexBytes = new Uint8Array(indexBin.length);
+        for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
+        const idxArr = new Uint32Array(indexBytes.buffer);
+        
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,

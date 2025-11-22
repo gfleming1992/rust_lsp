@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
+import * as fs from 'fs';
 
 let lspServer: ChildProcess | null = null;
 let requestId = 1;
@@ -53,10 +54,10 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (isDev) {
             // DEV MODE: Load from Vite server at localhost:5173
-            panel.webview.html = getDevHtml();
+            panel.webview.html = getDevHtml(context.extensionPath);
         } else {
             // PROD MODE: Load built assets from disk
-            panel.webview.html = getProdHtml(panel.webview, context.extensionUri);
+            panel.webview.html = getProdHtml(panel.webview, context.extensionUri, context.extensionPath);
         }
 
         // Handle messages from webview
@@ -168,62 +169,42 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
     });
 }
 
-function getDevHtml(): string {
-    return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>IPC-2581 Viewer (Dev)</title>
-        <meta http-equiv="Content-Security-Policy" content="
-            default-src 'none';
-            img-src * 'self' data: https:;
-            script-src 'unsafe-inline' 'unsafe-eval' http://localhost:5173;
-            style-src 'unsafe-inline' http://localhost:5173;
-            connect-src ws://localhost:5173 http://localhost:5173;
-        ">
-    </head>
-    <body>
-        <div id="app"></div>
-        <canvas id="viewer" style="width: 100%; height: 100vh; display: block;"></canvas>
-        <div id="ui" style="position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 10px; border-radius: 5px;">
-            <div id="fps"></div>
-            <div id="coordOverlay"></div>
-            <div id="layers"></div>
-        </div>
-        <script type="module" src="http://localhost:5173/@vite/client"></script>
-        <script type="module" src="http://localhost:5173/src/main.ts"></script>
-    </body>
-    </html>`;
+function getDevHtml(extensionPath: string): string {
+    const htmlPath = path.join(extensionPath, 'assets', 'webview.html');
+    let html = fs.readFileSync(htmlPath, 'utf-8');
+
+    const csp = `
+        default-src 'none';
+        img-src * 'self' data: https:;
+        script-src 'unsafe-inline' 'unsafe-eval' http://localhost:5173;
+        style-src 'unsafe-inline' http://localhost:5173;
+        connect-src ws://localhost:5173 http://localhost:5173;
+    `;
+
+    const script = `<script type="module" src="http://localhost:5173/dist/main.js"></script>`;
+
+    return html
+        .replace('<!--CSP-->', `<meta http-equiv="Content-Security-Policy" content="${csp}">`)
+        .replace('<!--CSS-->', '')
+        .replace('<!--SCRIPT-->', script);
 }
 
-function getProdHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function getProdHtml(webview: vscode.Webview, extensionUri: vscode.Uri, extensionPath: string): string {
     const webviewPath = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewPath, 'index.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewPath, 'index.css'));
+    
+    const htmlPath = path.join(extensionPath, 'assets', 'webview.html');
+    let html = fs.readFileSync(htmlPath, 'utf-8');
 
-    return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>IPC-2581 Viewer</title>
-        <meta http-equiv="Content-Security-Policy" content="
-            default-src 'none';
-            style-src ${webview.cspSource} 'unsafe-inline';
-            script-src ${webview.cspSource};
-        ">
-        <link href="${styleUri}" rel="stylesheet">
-    </head>
-    <body>
-        <div id="app"></div>
-        <canvas id="viewer" style="width: 100%; height: 100vh; display: block;"></canvas>
-        <div id="ui" style="position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 10px; border-radius: 5px;">
-            <div id="fps"></div>
-            <div id="coordOverlay"></div>
-            <div id="layers"></div>
-        </div>
-        <script type="module" src="${scriptUri}"></script>
-    </body>
-    </html>`;
+    const csp = `
+        default-src 'none';
+        style-src ${webview.cspSource} 'unsafe-inline';
+        script-src ${webview.cspSource};
+    `;
+
+    return html
+        .replace('<!--CSP-->', `<meta http-equiv="Content-Security-Policy" content="${csp}">`)
+        .replace('<!--CSS-->', `<link href="${styleUri}" rel="stylesheet">`)
+        .replace('<!--SCRIPT-->', `<script type="module" src="${scriptUri}"></script>`);
 }
