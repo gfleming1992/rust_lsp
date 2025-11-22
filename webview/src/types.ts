@@ -9,11 +9,11 @@ export interface LayerInfo {
 
 // Geometry data for a specific shader type at a specific LOD level
 export interface GeometryLOD {
-  vertexData: number[];  // Raw Float32 array (no base64 encoding needed)
+  vertexData: number[] | Float32Array;  // Raw Float32 array
   vertexCount: number;
-  indexData?: number[];  // Raw Uint32 array (no base64 encoding needed)
+  indexData?: number[] | Uint32Array;  // Raw Uint32 array
   indexCount?: number;
-  instanceData?: number[];  // Raw Float32 array: instanced=2 floats/instance (x,y), instanced_rot=3 floats/instance (x,y,rotation)
+  instanceData?: number[] | Float32Array;  // Raw Float32 array: instanced=2 floats/instance (x,y), instanced_rot=3 floats/instance (x,y,rotation)
   instanceCount?: number;
   alphaData?: string;  // Optional base64-encoded per-vertex alpha values (1 float per vertex)
 }

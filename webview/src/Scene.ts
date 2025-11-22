@@ -194,7 +194,7 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      const lodVertices = new Float32Array(lod.vertexData);
+      const lodVertices = lod.vertexData instanceof Float32Array ? lod.vertexData : new Float32Array(lod.vertexData);
       const buffer = this.device.createBuffer({
         size: lodVertices.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -227,7 +227,7 @@ export class Scene {
       lodAlphaBuffers.push(alphaBuf);
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        const idxArr = new Uint32Array(lod.indexData);
+        const idxArr = lod.indexData instanceof Uint32Array ? lod.indexData : new Uint32Array(lod.indexData);
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
@@ -289,7 +289,7 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      const lodVertices = new Float32Array(lod.vertexData);
+      const lodVertices = lod.vertexData instanceof Float32Array ? lod.vertexData : new Float32Array(lod.vertexData);
       const vertexBuffer = this.device.createBuffer({
         size: lodVertices.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -301,7 +301,7 @@ export class Scene {
       lodVertexCounts.push(lod.vertexCount);
 
       if (lod.instanceData && lod.instanceCount) {
-        const instanceArr = new Float32Array(lod.instanceData);
+        const instanceArr = lod.instanceData instanceof Float32Array ? lod.instanceData : new Float32Array(lod.instanceData);
         const instanceBuffer = this.device.createBuffer({
           size: instanceArr.byteLength,
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -321,7 +321,7 @@ export class Scene {
       }
 
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
-        const idxArr = new Uint32Array(lod.indexData);
+        const idxArr = lod.indexData instanceof Uint32Array ? lod.indexData : new Uint32Array(lod.indexData);
         const idxBuf = this.device.createBuffer({
           size: idxArr.byteLength,
           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
