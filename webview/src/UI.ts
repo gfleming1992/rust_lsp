@@ -42,6 +42,7 @@ export class UI {
         <button type="button" data-layer-action="all" style="padding:2px 6px;">All</button>
         <button type="button" data-layer-action="none" style="padding:2px 6px;">None</button>
         <button type="button" data-layer-action="invert" style="padding:2px 6px;">Invert</button>
+        <button type="button" id="savePcbBtn" style="padding:2px 6px; background:#4a9eff; color:#fff; border:1px solid #3a8eef; border-radius:3px; font-weight:bold;">💾 Save</button>
       </div>
     `);
 
@@ -94,6 +95,38 @@ export class UI {
         this.showColorPicker(layerId, current);
       });
     });
+
+    // Add save button handler
+    const saveBtn = document.getElementById("savePcbBtn");
+    saveBtn?.addEventListener("click", () => {
+      this.handleSave();
+    });
+  }
+
+  private async handleSave() {
+    // Check if running in VS Code webview
+    const vscode = (window as any).vscode;
+    if (!vscode) {
+      console.warn("[SAVE] Save is only available in VS Code extension mode");
+      alert("Save is only available when running in VS Code.\n\nTo use save:\n1. Press F5 in VS Code to launch Extension Development Host\n2. Open a PCB file\n3. Click the Save button");
+      
+      const saveBtn = document.getElementById("savePcbBtn") as HTMLButtonElement | null;
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "💾 Save";
+      }
+      return;
+    }
+    
+    console.log("[SAVE] Requesting save...");
+    const saveBtn = document.getElementById("savePcbBtn") as HTMLButtonElement | null;
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = "💾 Saving...";
+    }
+    
+    // Send save request - response will come via window message event
+    vscode.postMessage({ command: 'Save' });
   }
 
   private createLegendRow(layerId: string, color: LayerColor, visible: boolean): string {
@@ -188,6 +221,7 @@ export class UI {
         const [r, g, b] = colorStr.split(",").map(parseFloat);
         const color: LayerColor = [r, g, b, 1];
         this.scene.setLayerColor(layerId, color);
+        this.notifyColorChange(layerId, color);
         this.refreshLayerLegend();
         modal.remove();
       });
@@ -204,6 +238,7 @@ export class UI {
         const b = parseInt(cleaned.slice(4, 6), 16) / 255;
         const color: LayerColor = [r, g, b, 1];
         this.scene.setLayerColor(layerId, color);
+        this.notifyColorChange(layerId, color);
         this.refreshLayerLegend();
         modal.remove();
       }
@@ -263,5 +298,19 @@ export class UI {
     }
 
     this.fpsEl.innerHTML = lines.join("<br/>");
+  }
+
+  private notifyColorChange(layerId: string, color: LayerColor) {
+    const vscode = (window as any).vscode;
+    if (!vscode) {
+      return; // Dev server mode - no persistence
+    }
+    
+    console.log(`[COLOR] Notifying extension of color change for ${layerId}:`, color);
+    vscode.postMessage({ 
+      command: 'UpdateLayerColor', 
+      layerId: layerId,
+      color: color
+    });
   }
 }

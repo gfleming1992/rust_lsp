@@ -1,9 +1,11 @@
 use rust_extension::draw::geometry::{LayerJSON, LayerBinary};
-use rust_extension::parse_xml::parse_xml_file;
+use rust_extension::parse_xml::{parse_xml_file, XmlNode};
 use rust_extension::draw::parsing::extract_and_generate_layers;
+use rust_extension::serialize_xml::xml_node_to_file;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
+use std::collections::HashMap;
 
 /// JSON-RPC Request format
 #[derive(Debug, Deserialize)]
@@ -38,18 +40,21 @@ struct TypedResponse<T: Serialize> {
     error: Option<ErrorResponse>,
 }
 
-/// In-memory state: DOM and layer cache
+/// In-memory state: DOM, layers, and layer colors
 struct ServerState {
     xml_file_path: Option<String>,
+    xml_root: Option<XmlNode>,
     layers: Vec<LayerJSON>,
-    // layer_cache removed as we don't need it with zero-copy serialization
+    layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA
 }
 
 impl ServerState {
     fn new() -> Self {
         Self {
             xml_file_path: None,
+            xml_root: None,
             layers: Vec::new(),
+            layer_colors: HashMap::new(),
         }
     }
 }
@@ -88,6 +93,8 @@ fn main() {
             "GetLayers" => serde_json::to_string(&handle_get_layers(&state, request.id)).unwrap(),
             "GetTessellation" => handle_get_tessellation_json(&mut state, request.id, request.params),
             "GetTessellationBinary" => handle_get_tessellation_binary(&mut state, request.id, request.params),
+            "UpdateLayerColor" => serde_json::to_string(&handle_update_layer_color(&mut state, request.id, request.params)).unwrap(),
+            "Save" => serde_json::to_string(&handle_save(&mut state, request.id, request.params)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -169,8 +176,14 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
 
     eprintln!("[LSP Server] Generated {} layers", layers.len());
 
+    // Parse DictionaryColor from XML to get layer colors
+    let layer_colors = parse_dictionary_colors(&root);
+    eprintln!("[LSP Server] Parsed {} layer colors from DictionaryColor", layer_colors.len());
+
     state.xml_file_path = Some(params.file_path.clone());
+    state.xml_root = Some(root);
     state.layers = layers;
+    state.layer_colors = layer_colors;
 
     eprintln!("[LSP Server] File loaded successfully");
 
@@ -359,5 +372,244 @@ fn handle_get_tessellation_binary(
             };
             serde_json::to_string(&response).unwrap()
         }
+    }
+}
+
+/// Parse DictionaryColor from XML root to extract layer colors
+fn parse_dictionary_colors(root: &XmlNode) -> HashMap<String, [f32; 4]> {
+    let mut colors = HashMap::new();
+    
+    // Find Content > DictionaryColor
+    if let Some(content) = root.children.iter().find(|n| n.name == "Content") {
+        if let Some(dict_color) = content.children.iter().find(|n| n.name == "DictionaryColor") {
+            for entry in &dict_color.children {
+                if entry.name == "EntryColor" {
+                    if let Some(id) = entry.attributes.get("id") {
+                        // Find Color child element
+                        if let Some(color_node) = entry.children.iter().find(|n| n.name == "Color") {
+                            let r = color_node.attributes.get("r")
+                                .and_then(|v| v.parse::<u8>().ok())
+                                .unwrap_or(255) as f32 / 255.0;
+                            let g = color_node.attributes.get("g")
+                                .and_then(|v| v.parse::<u8>().ok())
+                                .unwrap_or(255) as f32 / 255.0;
+                            let b = color_node.attributes.get("b")
+                                .and_then(|v| v.parse::<u8>().ok())
+                                .unwrap_or(255) as f32 / 255.0;
+                            
+                            colors.insert(id.clone(), [r, g, b, 1.0]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    colors
+}
+
+/// Handle UpdateLayerColor request - updates layer color in memory
+fn handle_update_layer_color(
+    state: &mut ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+) -> Response {
+    #[derive(Deserialize)]
+    struct UpdateColorParams {
+        layer_id: String,
+        color: [f32; 4], // RGBA
+    }
+
+    let params: UpdateColorParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {layer_id: string, color: [f32; 4]}".to_string(),
+                }),
+            };
+        }
+    };
+
+    if state.xml_root.is_none() {
+        return Response {
+            id,
+            result: None,
+            error: Some(ErrorResponse {
+                code: 2,
+                message: "No file loaded. Call Load first.".to_string(),
+            }),
+        };
+    }
+
+    eprintln!("[LSP Server] Updating color for layer {}: {:?}", params.layer_id, params.color);
+
+    // Ensure we use the LAYER_COLOR_ prefix for storage
+    let color_key = if params.layer_id.starts_with("LAYER_COLOR_") {
+        params.layer_id.clone()
+    } else {
+        format!("LAYER_COLOR_{}", params.layer_id)
+    };
+
+    // Update in-memory color map with prefixed key
+    state.layer_colors.insert(color_key, params.color);
+
+    // Update layer's default_color if it exists
+    if let Some(layer) = state.layers.iter_mut().find(|l| l.layer_id == params.layer_id) {
+        layer.default_color = params.color;
+    }
+
+    Response {
+        id,
+        result: Some(serde_json::json!({
+            "status": "ok"
+        })),
+        error: None,
+    }
+}
+
+/// Handle Save request - serializes XML with updated colors to disk
+fn handle_save(
+    state: &mut ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+) -> Response {
+    #[derive(Deserialize)]
+    struct SaveParams {
+        #[serde(default)]
+        file_path: Option<String>,
+    }
+
+    let params: SaveParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => SaveParams { file_path: None },
+    };
+
+    if state.xml_root.is_none() || state.xml_file_path.is_none() {
+        return Response {
+            id,
+            result: None,
+            error: Some(ErrorResponse {
+                code: 2,
+                message: "No file loaded. Call Load first.".to_string(),
+            }),
+        };
+    }
+
+    let original_path = state.xml_file_path.as_ref().unwrap();
+    
+    // Generate output path: add _serialized before extension
+    let output_path = params.file_path.unwrap_or_else(|| {
+        let path = std::path::Path::new(original_path);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("xml");
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        parent.join(format!("{}_serialized.{}", stem, ext))
+            .to_string_lossy()
+            .to_string()
+    });
+
+    eprintln!("[LSP Server] Saving file to: {}", output_path);
+
+    // Clone root for modification
+    let mut root_clone = state.xml_root.as_ref().unwrap().clone();
+    
+    // Update DictionaryColor in the XML tree
+    update_dictionary_colors(&mut root_clone, &state.layer_colors);
+
+    // Serialize to file
+    match xml_node_to_file(&root_clone, &output_path) {
+        Ok(_) => {
+            eprintln!("[LSP Server] File saved successfully");
+            Response {
+                id,
+                result: Some(serde_json::json!({
+                    "status": "ok",
+                    "file_path": output_path
+                })),
+                error: None,
+            }
+        }
+        Err(e) => {
+            Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: 4,
+                    message: format!("Failed to save file: {}", e),
+                }),
+            }
+        }
+    }
+}
+
+/// Update DictionaryColor in XML tree with current layer colors
+fn update_dictionary_colors(root: &mut XmlNode, layer_colors: &HashMap<String, [f32; 4]>) {
+    // Find or create Content node
+    let content = if let Some(content) = root.children.iter_mut().find(|n| n.name == "Content") {
+        content
+    } else {
+        // Insert Content after LogisticHeader/HistoryRecord if they exist, or at beginning
+        let insert_pos = root.children.iter().position(|n| {
+            n.name != "LogisticHeader" && n.name != "HistoryRecord"
+        }).unwrap_or(0);
+        
+        root.children.insert(insert_pos, XmlNode {
+            name: "Content".to_string(),
+            attributes: indexmap::IndexMap::new(),
+            children: Vec::new(),
+            text_content: String::new(),
+        });
+        
+        root.children.get_mut(insert_pos).unwrap()
+    };
+    
+    // Find or create DictionaryColor
+    let dict_color = if let Some(dict) = content.children.iter_mut().find(|n| n.name == "DictionaryColor") {
+        // Clear existing entries
+        dict.children.clear();
+        dict
+    } else {
+        // Add DictionaryColor at start of Content
+        content.children.insert(0, XmlNode {
+            name: "DictionaryColor".to_string(),
+            attributes: indexmap::IndexMap::new(),
+            children: Vec::new(),
+            text_content: String::new(),
+        });
+        
+        content.children.get_mut(0).unwrap()
+    };
+    
+    // Add EntryColor for each layer color
+    for (layer_id, color) in layer_colors {
+        let mut entry_attrs = indexmap::IndexMap::new();
+        entry_attrs.insert("id".to_string(), layer_id.clone());
+        
+        let r = (color[0] * 255.0).round() as u8;
+        let g = (color[1] * 255.0).round() as u8;
+        let b = (color[2] * 255.0).round() as u8;
+        
+        let mut color_attrs = indexmap::IndexMap::new();
+        color_attrs.insert("r".to_string(), r.to_string());
+        color_attrs.insert("g".to_string(), g.to_string());
+        color_attrs.insert("b".to_string(), b.to_string());
+        
+        let entry = XmlNode {
+            name: "EntryColor".to_string(),
+            attributes: entry_attrs,
+            children: vec![XmlNode {
+                name: "Color".to_string(),
+                attributes: color_attrs,
+                children: Vec::new(),
+                text_content: String::new(),
+            }],
+            text_content: String::new(),
+        };
+        
+        dict_color.children.push(entry);
     }
 }

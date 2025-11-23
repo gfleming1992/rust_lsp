@@ -125,7 +125,10 @@ app.get('/', (req, res) => {
 
 // Start LSP server
 function startLspServer() {
-  const serverPath = path.join(__dirname, 'target', 'release', 'lsp_server.exe');
+  // Try release first, fall back to debug
+  const releasePath = path.join(__dirname, 'target', 'release', 'lsp_server.exe');
+  const debugPath = path.join(__dirname, 'target', 'debug', 'lsp_server.exe');
+  const serverPath = fs.existsSync(releasePath) ? releasePath : debugPath;
   
   console.log('[DevServer] Starting LSP server:', serverPath);
   
@@ -274,6 +277,38 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({
             command: 'tessellationData',
             payload: response.result
+          }));
+        }
+      });
+      
+    } else if (data.command === 'UpdateLayerColor') {
+      console.log(`[DevServer] UpdateLayerColor: ${data.layerId}`, data.color);
+      sendLspRequest('UpdateLayerColor', { 
+        layer_id: data.layerId, 
+        color: data.color 
+      }, (response) => {
+        if (response.error) {
+          console.error('[DevServer] UpdateLayerColor error:', response.error);
+          ws.send(JSON.stringify({ command: 'error', message: response.error.message }));
+        } else {
+          console.log('[DevServer] UpdateLayerColor success');
+        }
+      });
+      
+    } else if (data.command === 'Save') {
+      console.log('[DevServer] Save request');
+      sendLspRequest('Save', data.filePath ? { file_path: data.filePath } : null, (response) => {
+        if (response.error) {
+          console.error('[DevServer] Save error:', response.error);
+          ws.send(JSON.stringify({ 
+            command: 'saveError', 
+            error: response.error.message 
+          }));
+        } else if (response.result?.file_path) {
+          console.log('[DevServer] Save success:', response.result.file_path);
+          ws.send(JSON.stringify({ 
+            command: 'saveComplete', 
+            filePath: response.result.file_path 
           }));
         }
       });

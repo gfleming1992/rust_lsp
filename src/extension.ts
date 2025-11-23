@@ -92,6 +92,61 @@ export function activate(context: vscode.ExtensionContext) {
                     case 'GetTessellation':
                         await sendToLspServer({ method: 'GetTessellation', params: { layer_id: message.layerId } }, panel);
                         break;
+                    case 'UpdateLayerColor':
+                        await sendToLspServer({ 
+                            method: 'UpdateLayerColor', 
+                            params: { 
+                                layer_id: message.layerId, 
+                                color: message.color 
+                            } 
+                        }, panel);
+                        break;
+                    case 'Save':
+                        console.log('[Extension] Received Save command from webview');
+                        try {
+                            console.log('[Extension] Calling sendToLspServer for Save...');
+                            const saveResponse = await sendToLspServer({ 
+                                method: 'Save', 
+                                params: message.filePath ? { file_path: message.filePath } : null 
+                            }, panel);
+                            
+                            console.log('[Extension] Save response:', saveResponse);
+                            
+                            if (saveResponse?.result?.file_path) {
+                                const filePath = saveResponse.result.file_path;
+                                console.log('[Extension] Save successful:', filePath);
+                                vscode.window.showInformationMessage(`PCB saved to: ${filePath}`);
+                                
+                                // Send confirmation back to webview
+                                panel.webview.postMessage({ 
+                                    command: 'saveComplete', 
+                                    filePath: filePath 
+                                });
+                            } else if (saveResponse?.error) {
+                                console.error('[Extension] Save error from LSP:', saveResponse.error);
+                                vscode.window.showErrorMessage(`Save failed: ${saveResponse.error.message}`);
+                                panel.webview.postMessage({ 
+                                    command: 'saveError', 
+                                    error: saveResponse.error.message 
+                                });
+                            } else {
+                                console.error('[Extension] Save failed: No valid response');
+                                vscode.window.showErrorMessage('Save failed: No response from LSP server');
+                                panel.webview.postMessage({ 
+                                    command: 'saveError', 
+                                    error: 'No response from LSP server' 
+                                });
+                            }
+                        } catch (error) {
+                            console.error('[Extension] Save exception:', error);
+                            const errorMsg = error instanceof Error ? error.message : String(error);
+                            vscode.window.showErrorMessage(`Save failed: ${errorMsg}`);
+                            panel.webview.postMessage({ 
+                                command: 'saveError', 
+                                error: errorMsg 
+                            });
+                        }
+                        break;
                 }
             },
             undefined,
@@ -198,10 +253,10 @@ function startLspServer(context: vscode.ExtensionContext) {
     console.log('[Extension] LSP server started');
 }
 
-async function sendToLspServer(request: { method: string; params: any }, panel: vscode.WebviewPanel) {
+async function sendToLspServer(request: { method: string; params: any }, panel: vscode.WebviewPanel): Promise<any> {
     if (!lspServer || !lspServer.stdin) {
         vscode.window.showErrorMessage('LSP server is not running');
-        return;
+        return null;
     }
 
     const id = String(requestId++);
@@ -222,7 +277,7 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
 
         if (response.error) {
             vscode.window.showErrorMessage(`LSP Error: ${response.error.message}`);
-            return;
+            return response;
         }
 
         // Forward response to webview
@@ -243,8 +298,11 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
             // After load, automatically get layers
             sendToLspServer({ method: 'GetLayers', params: null }, panel);
         }
+        
+        return response;
     } catch (error) {
         console.error('[Extension] LSP request failed:', error);
+        return null;
     }
 }
 

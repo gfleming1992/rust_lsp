@@ -9,6 +9,11 @@ import { BinaryParserPool } from "./BinaryParserPool";
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
 const vscode = isVSCodeWebview ? (window as any).acquireVsCodeApi() : null;
 
+// Make vscode API globally available for UI components
+if (vscode) {
+  (window as any).vscode = vscode;
+}
+
 // Create debug console overlay for dev server
 if (!isVSCodeWebview) {
     const debugConsole = document.createElement('div');
@@ -214,6 +219,34 @@ async function init() {
   window.addEventListener("message", async (event) => {
     const msgStart = performance.now();
     const data = event.data as Record<string, unknown>;
+    
+    // Handle save completion
+    if (data.command === "saveComplete") {
+      const filePath = data.filePath as string | undefined;
+      console.log(`[SAVE] Save completed: ${filePath || 'unknown path'}`);
+      
+      const saveBtn = document.getElementById("savePcbBtn") as HTMLButtonElement | null;
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "💾 Save";
+      }
+      
+      return;
+    }
+    
+    // Handle save error
+    if (data.command === "saveError") {
+      const error = data.error as string | undefined;
+      console.error(`[SAVE] Save failed: ${error || 'unknown error'}`);
+      
+      const saveBtn = document.getElementById("savePcbBtn") as HTMLButtonElement | null;
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "💾 Save";
+      }
+      
+      return;
+    }
     
     // Handle binary tessellation data
     if (data.command === "binaryTessellationData" && data.binaryPayload) {
