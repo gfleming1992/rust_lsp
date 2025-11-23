@@ -59,6 +59,12 @@ async function init() {
   ui.updateStats(true);
   scene.state.needsDraw = true;
 
+  // Notify extension that webview is ready
+  if (isVSCodeWebview && vscode) {
+    console.log('[INIT] Notifying extension that webview is ready');
+    vscode.postMessage({ command: 'ready' });
+  }
+
   // Create worker pool for parallel binary parsing
   const workerPool = new BinaryParserPool();
   console.log(`[INIT] Worker pool created with ${workerPool.getStats().totalWorkers} workers`);
@@ -162,5 +168,3 @@ init().catch((error) => {
     panel.appendChild(message);
   }
 });
-
-// End of main.ts

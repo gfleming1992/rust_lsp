@@ -78,6 +78,11 @@ export function activate(context: vscode.ExtensionContext) {
                 console.log('[Extension] Received message from webview:', message);
 
                 switch (message.command) {
+                    case 'ready':
+                        // Webview is ready (initial load or moved to new window)
+                        console.log('[Extension] Webview ready, loading file:', filePath);
+                        await sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
+                        break;
                     case 'Load':
                         await sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
                         break;
@@ -97,6 +102,16 @@ export function activate(context: vscode.ExtensionContext) {
         setTimeout(() => {
             sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
         }, 100);
+
+        // Handle panel state changes (e.g., moved to new window)
+        panel.onDidChangeViewState(() => {
+            if (panel.visible) {
+                console.log('[Extension] Panel became visible, re-triggering load');
+                setTimeout(() => {
+                    sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
+                }, 100);
+            }
+        }, null, context.subscriptions);
     });
 
     context.subscriptions.push(disposable);
