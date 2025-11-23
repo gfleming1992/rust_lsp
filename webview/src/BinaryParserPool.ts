@@ -25,11 +25,22 @@ export class BinaryParserPool {
   constructor(numWorkers: number = navigator.hardwareConcurrency || 4) {
     console.log(`[BinaryParserPool] Creating ${numWorkers} workers`);
     
+    // Check for embedded worker source (VS Code extension mode)
+    const workerSourceScript = document.getElementById('worker-source');
+    let workerUrl = '';
+    
+    if (workerSourceScript && workerSourceScript.textContent) {
+        const blob = new Blob([workerSourceScript.textContent], { type: 'application/javascript' });
+        workerUrl = URL.createObjectURL(blob);
+        console.log('[BinaryParserPool] Using embedded worker source');
+    } else {
+        // Dev mode fallback
+        workerUrl = '/dist/binaryParserWorker.js';
+        console.log('[BinaryParserPool] Using external worker file');
+    }
+    
     for (let i = 0; i < numWorkers; i++) {
-      // In dev mode, worker is bundled separately by esbuild
-      // In production (VS Code extension), use the bundled worker from dist
-      const workerPath = '/dist/binaryParserWorker.js';
-      const worker = new Worker(workerPath);
+      const worker = new Worker(workerUrl);
 
       worker.onmessage = (event) => this.handleWorkerMessage(event, worker);
       worker.onerror = (error) => {

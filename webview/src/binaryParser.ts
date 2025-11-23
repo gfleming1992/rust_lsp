@@ -197,5 +197,50 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
     geometry.instanced_rot = instancedRotLods;
   }
 
+  // Parse instanced geometry (vias without rotation)
+  const numInstancedLods = view.getUint32(offset, true);
+  offset += 4;
+
+  if (numInstancedLods > 0) {
+    const instancedLods: GeometryLOD[] = [];
+    for (let i = 0; i < numInstancedLods; i++) {
+      const vertexCount = view.getUint32(offset, true); // Number of vertices (not floats)
+      offset += 4;
+      const indexCount = view.getUint32(offset, true);
+      offset += 4;
+      const instanceCount = view.getUint32(offset, true);
+      offset += 4;
+
+      // Read vertex_data (base shape) - each vertex is 2 floats (x, y)
+      const numFloats = vertexCount * 2;
+      const vertexData = new Float32Array(buffer, offset, numFloats);
+      offset += numFloats * 4;
+
+      // Read index_data if present
+      let indexData: Uint32Array | undefined;
+      if (indexCount > 0) {
+        indexData = new Uint32Array(buffer, offset, indexCount);
+        offset += indexCount * 4;
+      }
+
+      // Read instance_data (x, y per instance)
+      let instanceData: Float32Array | undefined;
+      if (instanceCount > 0) {
+        instanceData = new Float32Array(buffer, offset, instanceCount * 2);
+        offset += instanceCount * 2 * 4;
+      }
+
+      instancedLods.push({
+        vertexCount: vertexCount,
+        indexCount: indexCount > 0 ? indexCount : undefined,
+        instanceCount: instanceCount > 0 ? instanceCount : undefined,
+        vertexData: vertexData,
+        indexData: indexData,
+        instanceData: instanceData,
+      });
+    }
+    geometry.instanced = instancedLods;
+  }
+
   return geometry;
 }

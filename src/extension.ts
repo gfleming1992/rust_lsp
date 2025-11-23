@@ -2,9 +2,12 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
+import * as readline from 'readline';
 
 let lspServer: ChildProcess | null = null;
 let requestId = 1;
+let rl: readline.Interface | null = null;
+const pendingRequests = new Map<string, { resolve: (response: any) => void, reject: (error: any) => void }>();
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('[Extension] IPC-2581 Viewer activating...');
@@ -44,13 +47,14 @@ export function activate(context: vscode.ExtensionContext) {
                 enableScripts: true,
                 retainContextWhenHidden: true,
                 localResourceRoots: [
-                    vscode.Uri.file(path.join(context.extensionPath, 'dist', 'webview'))
+                    vscode.Uri.file(path.join(context.extensionPath, 'webview', 'dist'))
                 ]
             }
         );
 
         // Check if we are in development mode
-        const isDev = context.extensionMode === vscode.ExtensionMode.Development;
+        // const isDev = context.extensionMode === vscode.ExtensionMode.Development;
+        const isDev = false; // FORCE PROD MODE to load built files from disk
 
         if (isDev) {
             // DEV MODE: Load from Vite server at localhost:5173
@@ -63,6 +67,14 @@ export function activate(context: vscode.ExtensionContext) {
         // Handle messages from webview
         panel.webview.onDidReceiveMessage(
             async (message) => {
+                // Forward console logs from webview
+                if (message.command?.startsWith('console.')) {
+                    const level = message.command.substring(8);
+                    const args = message.args || [];
+                    console.log(`[Webview ${level}]`, ...args);
+                    return;
+                }
+
                 console.log('[Extension] Received message from webview:', message);
 
                 switch (message.command) {
@@ -114,6 +126,54 @@ function startLspServer(context: vscode.ExtensionContext) {
         return;
     }
 
+    // Use readline to handle line-based JSON-RPC output
+    rl = readline.createInterface({
+        input: lspServer.stdout,
+        terminal: false
+    });
+
+    rl.on('line', (line) => {
+        if (!line.trim()) return;
+
+        try {
+            // Check for binary response format: BINARY:<id>:<base64_data>
+            if (line.startsWith('BINARY:')) {
+                // The format is BINARY:ID:DATA
+                const firstColon = line.indexOf(':', 7);
+                if (firstColon > -1) {
+                    const id = line.substring(7, firstColon);
+                    const base64Data = line.substring(firstColon + 1);
+                    
+                    const binaryData = Buffer.from(base64Data, 'base64');
+                    
+                    const pending = pendingRequests.get(id);
+                    if (pending) {
+                        pendingRequests.delete(id);
+                        pending.resolve({ id, binaryData, isBinary: true });
+                    } else {
+                        console.warn(`[Extension] No pending request found for binary ID ${id}`);
+                    }
+                    return;
+                }
+            }
+
+            // Skip lines that don't look like JSON (probably stderr leaking)
+            if (!line.startsWith('{') && !line.startsWith('[')) {
+                return;
+            }
+
+            // Standard JSON-RPC response
+            const response = JSON.parse(line);
+            const pending = pendingRequests.get(String(response.id));
+            if (pending) {
+                pendingRequests.delete(String(response.id));
+                pending.resolve(response);
+            }
+        } catch (e) {
+            console.error('[Extension] Failed to parse LSP response:', e);
+        }
+    });
+
     // Log stderr (Rust uses eprintln! for logging)
     lspServer.stderr?.on('data', (data) => {
         console.log('[LSP Server]', data.toString());
@@ -122,29 +182,33 @@ function startLspServer(context: vscode.ExtensionContext) {
     lspServer.on('exit', (code) => {
         console.log('[Extension] LSP server exited with code:', code);
         lspServer = null;
+        rl = null;
     });
 
     console.log('[Extension] LSP server started');
 }
 
 async function sendToLspServer(request: { method: string; params: any }, panel: vscode.WebviewPanel) {
-    if (!lspServer || !lspServer.stdin || !lspServer.stdout) {
+    if (!lspServer || !lspServer.stdin) {
         vscode.window.showErrorMessage('LSP server is not running');
         return;
     }
 
-    const id = requestId++;
+    const id = String(requestId++);
     const jsonRequest = JSON.stringify({ id, ...request }) + '\n';
 
     console.log('[Extension] Sending to LSP server:', jsonRequest.trim());
 
+    // Create promise for response
+    const responsePromise = new Promise<any>((resolve, reject) => {
+        pendingRequests.set(id, { resolve, reject });
+    });
+
     // Write request to LSP server stdin
     lspServer.stdin.write(jsonRequest);
 
-    // Read response from LSP server stdout
-    lspServer.stdout.once('data', (data) => {
-        const response = JSON.parse(data.toString().trim());
-        console.log('[Extension] Received from LSP server:', response);
+    try {
+        const response = await responsePromise;
 
         if (response.error) {
             vscode.window.showErrorMessage(`LSP Error: ${response.error.message}`);
@@ -153,20 +217,64 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
 
         // Forward response to webview
         if (request.method === 'GetLayers') {
+            const layers = response.result || [];
+            
+            // Send layer count first
             panel.webview.postMessage({
-                command: 'layerList',
-                layers: response.result
+                command: 'layerCount',
+                count: layers.length
             });
-        } else if (request.method === 'GetTessellation') {
-            panel.webview.postMessage({
-                command: 'tessellationData',
-                payload: response.result
-            });
+            
+            // Then request binary tessellation for each layer
+            for (const layerId of layers) {
+                sendBinaryTessellation(layerId, panel);
+            }
         } else if (request.method === 'Load') {
             // After load, automatically get layers
             sendToLspServer({ method: 'GetLayers', params: null }, panel);
         }
+    } catch (error) {
+        console.error('[Extension] LSP request failed:', error);
+    }
+}
+
+async function sendBinaryTessellation(layerId: string, panel: vscode.WebviewPanel) {
+    if (!lspServer || !lspServer.stdin) {
+        return;
+    }
+
+    const id = String(requestId++);
+    const jsonRequest = JSON.stringify({ 
+        id, 
+        method: 'GetTessellationBinary', 
+        params: { layer_id: layerId } 
+    }) + '\n';
+
+    const responsePromise = new Promise<any>((resolve, reject) => {
+        pendingRequests.set(id, { resolve, reject });
     });
+
+    lspServer.stdin.write(jsonRequest);
+
+    try {
+        const response = await responsePromise;
+        
+        if (response.isBinary) {
+            // Send binary data as ArrayBuffer to webview
+            // Convert Node.js Buffer to ArrayBuffer (webview can't use Buffer directly)
+            const arrayBuffer = response.binaryData.buffer.slice(
+                response.binaryData.byteOffset,
+                response.binaryData.byteOffset + response.binaryData.byteLength
+            );
+            
+            panel.webview.postMessage({
+                command: 'binaryTessellationData',
+                binaryPayload: arrayBuffer
+            });
+        }
+    } catch (error) {
+        console.error('[Extension] Binary tessellation failed:', error);
+    }
 }
 
 function getDevHtml(extensionPath: string): string {
@@ -190,9 +298,17 @@ function getDevHtml(extensionPath: string): string {
 }
 
 function getProdHtml(webview: vscode.Webview, extensionUri: vscode.Uri, extensionPath: string): string {
-    const webviewPath = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewPath, 'index.js'));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewPath, 'index.css'));
+    const webviewPath = vscode.Uri.joinPath(extensionUri, 'webview', 'dist');
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewPath, 'main.js'));
+    
+    // Read worker file content
+    const workerPath = path.join(extensionPath, 'webview', 'dist', 'binaryParserWorker.js');
+    let workerContent = '';
+    try {
+        workerContent = fs.readFileSync(workerPath, 'utf-8');
+    } catch (e) {
+        console.error('[Extension] Failed to read worker file:', e);
+    }
     
     const htmlPath = path.join(extensionPath, 'assets', 'webview.html');
     let html = fs.readFileSync(htmlPath, 'utf-8');
@@ -200,11 +316,17 @@ function getProdHtml(webview: vscode.Webview, extensionUri: vscode.Uri, extensio
     const csp = `
         default-src 'none';
         style-src ${webview.cspSource} 'unsafe-inline';
-        script-src ${webview.cspSource};
+        script-src ${webview.cspSource} 'unsafe-inline';
+        worker-src ${webview.cspSource} blob:;
     `;
 
     return html
         .replace('<!--CSP-->', `<meta http-equiv="Content-Security-Policy" content="${csp}">`)
-        .replace('<!--CSS-->', `<link href="${styleUri}" rel="stylesheet">`)
-        .replace('<!--SCRIPT-->', `<script type="module" src="${scriptUri}"></script>`);
+        .replace('<!--CSS-->', '')
+        .replace('<!--SCRIPT-->', `
+            <script id="worker-source" type="javascript/worker">
+                ${workerContent}
+            </script>
+            <script src="${scriptUri}"></script>
+        `);
 }

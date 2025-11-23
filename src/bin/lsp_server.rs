@@ -87,7 +87,10 @@ fn main() {
             "Load" => serde_json::to_string(&handle_load(&mut state, request.id, request.params)).unwrap(),
             "GetLayers" => serde_json::to_string(&handle_get_layers(&state, request.id)).unwrap(),
             "GetTessellation" => handle_get_tessellation_json(&mut state, request.id, request.params),
-            "GetTessellationBinary" => handle_get_tessellation_binary(&mut state, request.id, request.params),
+            "GetTessellationBinary" => {
+                eprintln!("[LSP Server] Main loop dispatching to handle_get_tessellation_binary");
+                handle_get_tessellation_binary(&mut state, request.id, request.params)
+            },
             _ => {
                 let response = Response {
                     id: request.id,
@@ -285,6 +288,8 @@ fn handle_get_tessellation_binary(
     id: Option<serde_json::Value>,
     params: Option<serde_json::Value>,
 ) -> String {
+    eprintln!("[LSP Server] handle_get_tessellation_binary called with params: {:?}", params);
+
     #[derive(Deserialize)]
     struct TessellationParams {
         layer_id: String,
@@ -293,6 +298,7 @@ fn handle_get_tessellation_binary(
     let params: TessellationParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
         None => {
+            eprintln!("[LSP Server] Failed to parse params for GetTessellationBinary");
             let response = TypedResponse::<()> {
                 id,
                 result: None,
@@ -325,9 +331,12 @@ fn handle_get_tessellation_binary(
     match layer {
         Some(layer_json) => {
             let start_serialize = Instant::now();
+            eprintln!("[LSP Server] Found layer {}, starting binary conversion...", params.layer_id);
             
             // Convert to binary format
             let layer_binary = LayerBinary::from_layer_json(layer_json);
+            eprintln!("[LSP Server] Converted to LayerBinary, serializing to bytes...");
+
             let binary_data = layer_binary.to_bytes();
             
             eprintln!("[LSP Server] Binary serialization time for layer {}: {:.2?}, size: {} bytes", 
@@ -344,7 +353,9 @@ fn handle_get_tessellation_binary(
             
             // Use base64 for the binary data to safely transmit over stdio
             use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+            eprintln!("[LSP Server] Encoding to Base64...");
             let encoded_data = BASE64.encode(&binary_data);
+            eprintln!("[LSP Server] Base64 encoding complete, length: {}", encoded_data.len());
             
             format!("BINARY:{}:{}", id_str, encoded_data)
         }

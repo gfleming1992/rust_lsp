@@ -9,6 +9,31 @@ import { BinaryParserPool } from "./BinaryParserPool";
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
 const vscode = isVSCodeWebview ? (window as any).acquireVsCodeApi() : null;
 
+// Forward console logs to VS Code extension
+if (isVSCodeWebview && vscode) {
+    const originalLog = console.log;
+    const originalError = console.error;
+    const originalWarn = console.warn;
+    const originalInfo = console.info;
+
+    console.log = (...args) => {
+        vscode.postMessage({ command: 'console.log', args });
+        originalLog.apply(console, args);
+    };
+    console.error = (...args) => {
+        vscode.postMessage({ command: 'console.error', args });
+        originalError.apply(console, args);
+    };
+    console.warn = (...args) => {
+        vscode.postMessage({ command: 'console.warn', args });
+        originalWarn.apply(console, args);
+    };
+    console.info = (...args) => {
+        vscode.postMessage({ command: 'console.info', args });
+        originalInfo.apply(console, args);
+    };
+}
+
 async function init() {
   const initStart = performance.now();
   console.log('[INIT] Starting initialization...');
@@ -137,3 +162,5 @@ init().catch((error) => {
     panel.appendChild(message);
   }
 });
+
+// End of main.ts
