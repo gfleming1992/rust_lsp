@@ -42,7 +42,8 @@
     "build:extension": "tsc -p tsconfig.extension.json && if not exist dist\\assets mkdir dist\\assets && copy assets\\webview.html dist\\assets\\",
     "build:webview": "node build-webview.mjs",
     "watch:extension": "tsc -watch -p tsconfig.extension.json",
-    "dev": "nodemon --watch dev-server.mjs dev-server.mjs",
+    "clean": "powershell -ExecutionPolicy Bypass -File kill-all.ps1",
+    "dev": "npm run clean && nodemon --watch dev-server.mjs dev-server.mjs",
     "dev:extension": "npm run watch:extension"
   },
   "devDependencies": {
