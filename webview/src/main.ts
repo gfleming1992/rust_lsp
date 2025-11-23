@@ -164,10 +164,6 @@ async function init() {
   console.log('[INIT] Initializing WebGPU renderer...');
   await renderer.init();
   console.log('[INIT] WebGPU renderer initialized');
-  console.log('[INIT] Initial GPU stats:', {
-    buffers: renderer.gpuBuffers.length,
-    memoryMB: (renderer.gpuMemoryBytes / 1048576).toFixed(2)
-  });
   
   // Setup Input handling
   new Input(scene, renderer, ui);
@@ -209,10 +205,6 @@ async function init() {
     
     const batchEnd = performance.now();
     console.log(`[BATCH] Loaded ${pendingLayers.length} layers in ${(batchEnd - batchStart).toFixed(1)}ms`);
-    console.log('[BATCH] GPU stats after batch:', {
-      buffers: renderer.gpuBuffers.length,
-      memoryMB: (renderer.gpuMemoryBytes / 1048576).toFixed(2)
-    });
     
     pendingLayers = [];
     batchTimeout = null;
@@ -268,10 +260,6 @@ async function init() {
   
   const initEnd = performance.now();
   console.log(`[INIT] Total initialization time: ${(initEnd - initStart).toFixed(1)}ms`);
-  console.log('[INIT] Post-init GPU stats:', {
-    buffers: renderer.gpuBuffers.length,
-    memoryMB: (renderer.gpuMemoryBytes / 1048576).toFixed(2)
-  });
 
   // Trigger GC if available (for debugging memory in VS Code)
   if ((globalThis as any).gc) {

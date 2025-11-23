@@ -42,43 +42,18 @@ export class Renderer {
   }
 
   public async init() {
-    console.log('[RENDERER] WebGPU initialization started');
     const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
     if (!gpu) {
       throw new Error("WebGPU is not available in this browser");
     }
-    console.log('[RENDERER] GPU object acquired');
 
     const adapter = await gpu.requestAdapter();
     if (!adapter) {
       throw new Error("Unable to acquire WebGPU adapter");
     }
-    
-    // Log adapter info if available
-    try {
-      if (adapter.info) {
-        console.log('[RENDERER] WebGPU adapter acquired:', {
-          vendor: adapter.info.vendor || 'unknown',
-          architecture: adapter.info.architecture || 'unknown',
-          device: adapter.info.device || 'unknown',
-          description: adapter.info.description || 'unknown'
-        });
-      } else {
-        console.log('[RENDERER] WebGPU adapter acquired (no info available)');
-      }
-    } catch (e) {
-      console.log('[RENDERER] WebGPU adapter acquired (info not accessible)');
-    }
 
     this.device = await adapter.requestDevice();
-    console.log('[RENDERER] WebGPU device created');
-    
-    try {
-      this.wrapCreateBuffer(this.device);
-    } catch (e) {
-      console.error('[RENDERER] Error wrapping createBuffer:', e);
-      throw e;
-    }
+    this.wrapCreateBuffer(this.device);
 
     const ctx = this.canvas.getContext("webgpu");
     if (!ctx) {
@@ -87,14 +62,7 @@ export class Renderer {
     this.context = ctx;
     this.canvasFormat = gpu.getPreferredCanvasFormat();
 
-    console.log('[RENDERER] Creating render pipelines...');
-    try {
-      this.createPipelines();
-      console.log('[RENDERER] Render pipelines created');
-    } catch (e) {
-      console.error('[RENDERER] Error creating pipelines:', e);
-      throw e;
-    }
+    this.createPipelines();
     
     // Pass device and pipelines to Scene so it can load data
     this.scene.setDevice(this.device, {
@@ -242,10 +210,8 @@ export class Renderer {
 
   private wrapCreateBuffer(gpuDevice: GPUDevice) {
     if ((gpuDevice as unknown as { __wrappedCreateBuffer?: boolean }).__wrappedCreateBuffer) {
-      console.warn('[RENDERER] WARNING: createBuffer already wrapped! This device was already tracked.');
       return;
     }
-    console.log('[RENDERER] Wrapping createBuffer for device');
     const original = gpuDevice.createBuffer.bind(gpuDevice);
     gpuDevice.createBuffer = ((descriptor: GPUBufferDescriptor) => {
       const buffer = original(descriptor);
@@ -254,11 +220,6 @@ export class Renderer {
       const bufferInfo = { buffer, size };
       this.gpuBuffers.push(bufferInfo);
       
-      // Only log significant buffers or milestones
-      if (size > 100000 || this.gpuBuffers.length % 100 === 0) {
-        console.log(`[GPU BUFFER] Milestone: ${this.gpuBuffers.length} buffers, ${(this.gpuMemoryBytes / 1048576).toFixed(2)} MB total`);
-      }
-      
       // Track buffer destruction to update memory stats
       const originalDestroy = buffer.destroy.bind(buffer);
       buffer.destroy = () => {
@@ -266,7 +227,6 @@ export class Renderer {
         if (index !== -1) {
           this.gpuMemoryBytes -= size;
           this.gpuBuffers.splice(index, 1);
-          console.log(`[GPU BUFFER] Destroyed: ${size} bytes, remaining: ${(this.gpuMemoryBytes / 1048576).toFixed(2)} MB (${this.gpuBuffers.length} buffers)`);
         }
         originalDestroy();
       };
@@ -274,7 +234,6 @@ export class Renderer {
       return buffer;
     }) as typeof gpuDevice.createBuffer;
     (gpuDevice as unknown as { __wrappedCreateBuffer: boolean }).__wrappedCreateBuffer = true;
-    console.log('[RENDERER] createBuffer wrapping complete');
   }
 
   public configureSurface() {
