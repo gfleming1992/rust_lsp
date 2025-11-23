@@ -40,6 +40,7 @@ export class GpuBufferTracker {
   private wrapped = false;
   private _totalBytes = 0;
   private _bufferCount = 0;
+  private bufferSizes = new WeakMap<GPUBuffer, number>();
 
   wrap(device: GPUDevice) {
     if (this.wrapped) {
@@ -51,6 +52,20 @@ export class GpuBufferTracker {
       const size = descriptor.size ?? 0;
       this._totalBytes += size;
       this._bufferCount += 1;
+      this.bufferSizes.set(buffer, size);
+      
+      // Wrap destroy to track deletions
+      const originalDestroy = buffer.destroy.bind(buffer);
+      buffer.destroy = () => {
+        const bufferSize = this.bufferSizes.get(buffer);
+        if (bufferSize !== undefined) {
+          this._totalBytes -= bufferSize;
+          this._bufferCount -= 1;
+          this.bufferSizes.delete(buffer);
+        }
+        originalDestroy();
+      };
+      
       return buffer;
     }) as typeof device.createBuffer;
     this.wrapped = true;

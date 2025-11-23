@@ -100,9 +100,7 @@ export class BinaryParserPool {
     this.taskResolvers.delete(id);
 
     if (type === "parsed") {
-      if (parseTime !== undefined) {
-        console.log(`[BinaryParserPool] Task ${id} parsed in ${parseTime.toFixed(2)}ms`);
-      }
+      // Remove verbose per-task logging
       resolvers.resolve(layer);
     } else if (type === "error") {
       console.error(`[BinaryParserPool] Task ${id} failed:`, error);

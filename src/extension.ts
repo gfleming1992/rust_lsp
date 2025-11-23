@@ -98,11 +98,6 @@ export function activate(context: vscode.ExtensionContext) {
             context.subscriptions
         );
 
-        // Automatically load the file when the panel opens
-        setTimeout(() => {
-            sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
-        }, 100);
-
         // Handle panel state changes (e.g., moved to new window)
         panel.onDidChangeViewState(() => {
             if (panel.visible) {
