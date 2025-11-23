@@ -54,9 +54,9 @@ async function init() {
       scene.loadLayerData(layerJson);
     }
     
-    // Refresh UI and trigger single render
+    // Refresh UI and trigger render
     ui.refreshLayerLegend();
-    scene.state.needsDraw = true;
+    renderer.finishLoading(); // Allow rendering to begin
     
     const batchEnd = performance.now();
     console.log(`[BATCH] Loaded ${pendingLayers.length} layers in ${(batchEnd - batchStart).toFixed(1)}ms`);

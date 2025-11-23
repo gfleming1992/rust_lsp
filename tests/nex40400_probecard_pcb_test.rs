@@ -1,5 +1,5 @@
 // Import the library functions
-use rust_extension::{parse_xml_file, print_xml_tree, xml_node_to_file};
+use rust_extension::{parse_xml_file, xml_node_to_file};
 use std::time::Instant;
 
 #[cfg(test)]
@@ -22,11 +22,45 @@ mod tests {
         println!("  Root element: {}", root.name);
         println!("  Number of child elements: {}", root.children.len());
         println!("Parsing time: {:.3}ms", elapsed.as_secs_f64() * 1000.0);
-        #[cfg(debug_assertions)]
-        {
-            println!("\nParsed structure:");
-            print_xml_tree(&root, 0);
+        
+        // Debug: Inspect Top Layer geometry
+        use rust_extension::extract_and_generate_layers;
+        let layers = extract_and_generate_layers(&root).expect("Failed to generate layers");
+        
+        if let Some(top_layer) = layers.iter().find(|l| l.layer_id == "Top Layer") {
+            println!("\n=== Top Layer Analysis ===");
+            let polyline_count = top_layer.geometry.batch.as_ref()
+                .map(|lods| lods.iter().map(|lod| lod.vertex_count).sum::<usize>())
+                .unwrap_or(0);
+            let polygon_count = top_layer.geometry.batch_colored.as_ref()
+                .map(|lods| lods.iter().map(|lod| lod.vertex_count).sum::<usize>())
+                .unwrap_or(0);
+
+            println!("Total vertices in Top Layer (Polylines): {}", polyline_count);
+            println!("Total vertices in Top Layer (Polygons): {}", polygon_count);
+            println!("Total vertices in Top Layer (Total): {}", polyline_count + polygon_count);
         }
+
+        if let Some(outline_layer) = layers.iter().find(|l| l.layer_id == "Board Outline") {
+            println!("\n=== Board Outline Analysis ===");
+            let polyline_count = outline_layer.geometry.batch.as_ref()
+                .map(|lods| lods.iter().map(|lod| lod.vertex_count).sum::<usize>())
+                .unwrap_or(0);
+            let polygon_count = outline_layer.geometry.batch_colored.as_ref()
+                .map(|lods| lods.iter().map(|lod| lod.vertex_count).sum::<usize>())
+                .unwrap_or(0);
+
+            println!("Total vertices in Board Outline (Polylines): {}", polyline_count);
+            println!("Total vertices in Board Outline (Polygons): {}", polygon_count);
+            println!("Total vertices in Board Outline (Total): {}", polyline_count + polygon_count);
+        }
+        
+        // Removed verbose tree printing
+        // #[cfg(debug_assertions)]
+        // {
+        //     println!("\nParsed structure:");
+        //     print_xml_tree(&root, 0);
+        // }
     }
 
     #[test]

@@ -65,7 +65,7 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
  * so they can be transferred (not copied) back to main thread
  */
 function extractTransferables(layer: LayerJSON): Transferable[] {
-  const transferables: Transferable[] = [];
+  const bufferSet = new Set<ArrayBuffer>();
 
   const processGeometry = (geometry: any) => {
     if (!geometry) return;
@@ -76,21 +76,21 @@ function extractTransferables(layer: LayerJSON): Transferable[] {
 
       for (const lod of lods) {
         if (lod.vertexData?.buffer instanceof ArrayBuffer) {
-          transferables.push(lod.vertexData.buffer);
+          bufferSet.add(lod.vertexData.buffer);
         }
         if (lod.indexData?.buffer instanceof ArrayBuffer) {
-          transferables.push(lod.indexData.buffer);
+          bufferSet.add(lod.indexData.buffer);
         }
         if (lod.instanceData?.buffer instanceof ArrayBuffer) {
-          transferables.push(lod.instanceData.buffer);
+          bufferSet.add(lod.instanceData.buffer);
         }
         if (lod.alphaData?.buffer instanceof ArrayBuffer) {
-          transferables.push(lod.alphaData.buffer);
+          bufferSet.add(lod.alphaData.buffer);
         }
       }
     }
   };
 
   processGeometry(layer.geometry);
-  return transferables;
+  return Array.from(bufferSet);
 }

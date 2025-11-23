@@ -32,6 +32,9 @@ export class Renderer {
   // Debug stats
   public gpuMemoryBytes = 0;
   public gpuBuffers: GPUBufferInfo[] = [];
+  
+  // Loading state - keep canvas black until first layer batch is loaded
+  private isLoading = true;
 
   constructor(canvas: HTMLCanvasElement, scene: Scene) {
     this.canvas = canvas;
@@ -319,6 +322,13 @@ export class Renderer {
 
     let totalVertices = 0;
     let totalIndices = 0;
+    
+    // If still loading, just clear to black and skip rendering
+    if (this.isLoading) {
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+      return;
+    }
 
     for (const layerId of this.scene.layerOrder) {
       if (this.scene.layerVisible.get(layerId) === false) continue;
@@ -489,5 +499,13 @@ export class Renderer {
       this.frameCount = 0;
       this.lastFpsUpdate = now;
     }
+  }
+  
+  /**
+   * Mark loading as complete - allows rendering to begin
+   */
+  public finishLoading() {
+    this.isLoading = false;
+    this.scene.state.needsDraw = true;
   }
 }
