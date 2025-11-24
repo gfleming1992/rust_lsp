@@ -182,17 +182,30 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     let layer_colors = parse_dictionary_colors(&root);
     eprintln!("[LSP Server] Parsed {} layer colors from DictionaryColor", layer_colors.len());
 
+    // Debug: Print all layer IDs and colors
+    eprintln!("[LSP Server] Available layer IDs:");
+    for layer in &layers {
+        eprintln!("  - '{}' (current color: {:?})", layer.layer_id, layer.default_color);
+    }
+    
+    eprintln!("[LSP Server] Dictionary colors:");
+    for (key, color) in &layer_colors {
+        eprintln!("  - '{}': {:?}", key, color);
+    }
+
     // Apply DictionaryColor values to layers
     let mut layers = layers;
     for layer in &mut layers {
         // Check both with and without LAYER_COLOR_ prefix
         let color_key = format!("LAYER_COLOR_{}", layer.layer_id);
         if let Some(&color) = layer_colors.get(&color_key) {
-            eprintln!("[LSP Server] Applying color from DictionaryColor to layer: {}", layer.layer_id);
+            eprintln!("[LSP Server] Applying color from DictionaryColor to layer '{}': {:?}", layer.layer_id, color);
             layer.default_color = color;
         } else if let Some(&color) = layer_colors.get(&layer.layer_id) {
-            eprintln!("[LSP Server] Applying color from DictionaryColor to layer: {}", layer.layer_id);
+            eprintln!("[LSP Server] Applying color from DictionaryColor to layer '{}': {:?}", layer.layer_id, color);
             layer.default_color = color;
+        } else {
+            eprintln!("[LSP Server] No DictionaryColor found for layer '{}'", layer.layer_id);
         }
     }
 

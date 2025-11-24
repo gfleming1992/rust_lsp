@@ -135,9 +135,11 @@ export class Scene {
     if (!this.layerOrder.includes(id)) {
       this.layerOrder.push(id);
     }
-    if (!this.layerColors.has(id)) {
-      this.layerColors.set(id, [...defaultColor] as LayerColor);
-    }
+    
+    // Always use XML defaultColor, overriding localStorage if present
+    // This ensures DictionaryColor from the XML file takes precedence
+    this.layerColors.set(id, [...defaultColor] as LayerColor);
+    
     if (!this.layerVisible.has(id)) {
       this.layerVisible.set(id, true);
     }
