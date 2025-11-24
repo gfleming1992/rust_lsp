@@ -78,6 +78,8 @@ fn main() {
             continue;
         }
 
+        eprintln!("[LSP Server] Received line: {}", line);
+
         let request: Request = match serde_json::from_str(&line) {
             Ok(req) => req,
             Err(e) => {
@@ -179,6 +181,20 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     // Parse DictionaryColor from XML to get layer colors
     let layer_colors = parse_dictionary_colors(&root);
     eprintln!("[LSP Server] Parsed {} layer colors from DictionaryColor", layer_colors.len());
+
+    // Apply DictionaryColor values to layers
+    let mut layers = layers;
+    for layer in &mut layers {
+        // Check both with and without LAYER_COLOR_ prefix
+        let color_key = format!("LAYER_COLOR_{}", layer.layer_id);
+        if let Some(&color) = layer_colors.get(&color_key) {
+            eprintln!("[LSP Server] Applying color from DictionaryColor to layer: {}", layer.layer_id);
+            layer.default_color = color;
+        } else if let Some(&color) = layer_colors.get(&layer.layer_id) {
+            eprintln!("[LSP Server] Applying color from DictionaryColor to layer: {}", layer.layer_id);
+            layer.default_color = color;
+        }
+    }
 
     state.xml_file_path = Some(params.file_path.clone());
     state.xml_root = Some(root);

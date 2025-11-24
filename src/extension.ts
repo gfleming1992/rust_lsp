@@ -264,16 +264,33 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
 
     console.log('[Extension] Sending to LSP server:', jsonRequest.trim());
 
-    // Create promise for response
+    // Create promise for response with timeout
     const responsePromise = new Promise<any>((resolve, reject) => {
         pendingRequests.set(id, { resolve, reject });
+        
+        // Add 30 second timeout
+        setTimeout(() => {
+            if (pendingRequests.has(id)) {
+                pendingRequests.delete(id);
+                reject(new Error(`Timeout waiting for LSP response (id: ${id}, method: ${request.method})`));
+            }
+        }, 30000);
     });
 
     // Write request to LSP server stdin
-    lspServer.stdin.write(jsonRequest);
+    try {
+        const writeSuccess = lspServer.stdin.write(jsonRequest);
+        console.log('[Extension] Write to LSP stdin:', writeSuccess ? 'success' : 'buffered');
+    } catch (writeError) {
+        console.error('[Extension] Failed to write to LSP stdin:', writeError);
+        pendingRequests.delete(id);
+        throw writeError;
+    }
 
     try {
+        console.log('[Extension] Awaiting response for id:', id);
         const response = await responsePromise;
+        console.log('[Extension] Received response for id:', id, 'method:', request.method);
 
         if (response.error) {
             vscode.window.showErrorMessage(`LSP Error: ${response.error.message}`);
