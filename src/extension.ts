@@ -279,8 +279,7 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
 
     // Write request to LSP server stdin
     try {
-        const writeSuccess = lspServer.stdin.write(jsonRequest);
-        console.log('[Extension] Write to LSP stdin:', writeSuccess ? 'success' : 'buffered');
+        lspServer.stdin.write(jsonRequest);
     } catch (writeError) {
         console.error('[Extension] Failed to write to LSP stdin:', writeError);
         pendingRequests.delete(id);
@@ -288,9 +287,7 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
     }
 
     try {
-        console.log('[Extension] Awaiting response for id:', id);
         const response = await responsePromise;
-        console.log('[Extension] Received response for id:', id, 'method:', request.method);
 
         if (response.error) {
             vscode.window.showErrorMessage(`LSP Error: ${response.error.message}`);
