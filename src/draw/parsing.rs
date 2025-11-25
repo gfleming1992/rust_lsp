@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
-pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, anyhow::Error> {
+pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Vec<ObjectRange>), anyhow::Error> {
     let total_start = std::time::Instant::now();
     let mut layers_seen = HashSet::new();
 
@@ -59,11 +59,12 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
     
     // Use rayon to process layers in parallel
     // We collect results into a Vec<Result<...>> then collect into Result<Vec<...>>
-    let results: Vec<Result<(LayerJSON, CullingStats), anyhow::Error>> = layer_contexts
+    let results: Vec<Result<(LayerJSON, Vec<ObjectRange>, CullingStats), anyhow::Error>> = layer_contexts
         .into_iter()
         .collect::<Vec<_>>() // Convert IndexMap to Vec for par_iter
         .into_par_iter()
-        .map(|(layer_ref, geometries)| {
+        .enumerate() // Get index for layer ID generation
+        .map(|(idx, (layer_ref, geometries))| {
             let mut local_culling_stats = CullingStats::default();
             
             // Extract layer name from layerRef (e.g., "LAYER:Design" -> "Design")
@@ -76,8 +77,9 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
             // Generate default color based on layer type
             let color = get_layer_color(&layer_ref);
             
-            let layer_json = generate_layer_json(
+            let (layer_json, object_ranges) = generate_layer_json(
                 &layer_ref,
+                idx as u32, // Pass layer index
                 &layer_name,
                 color,
                 &geometries,
@@ -85,17 +87,19 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
                 &primitives,
             )?;
             
-            Ok((layer_json, local_culling_stats))
+            Ok((layer_json, object_ranges, local_culling_stats))
         })
         .collect();
 
     // 3. Aggregate results and stats
     let mut layer_jsons = Vec::with_capacity(results.len());
+    let mut all_object_ranges = Vec::new();
     let mut total_culling_stats = CullingStats::default();
     
     for result in results {
-        let (layer_json, stats) = result?;
+        let (layer_json, ranges, stats) = result?;
         layer_jsons.push(layer_json);
+        all_object_ranges.extend(ranges);
         
         // Aggregate stats
         total_culling_stats.total_polylines += stats.total_polylines;
@@ -125,7 +129,7 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<Vec<LayerJSON>, any
         }
     }
 
-    Ok(layer_jsons)
+    Ok((layer_jsons, all_object_ranges))
 }
 
 /// Recursively find LayerFeature nodes and collect geometries for each unique layer

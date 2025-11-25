@@ -13,6 +13,11 @@ export class UI {
   
   private lastStatsUpdate = 0;
 
+  private highlightBox: HTMLDivElement;
+  private contextMenu: HTMLDivElement;
+  private currentHighlightBounds: [number, number, number, number] | null = null;
+  private onDelete: (() => void) | null = null;
+
   constructor(scene: Scene, renderer: Renderer) {
     this.scene = scene;
     this.renderer = renderer;
@@ -22,7 +27,151 @@ export class UI {
     this.fpsEl = document.getElementById("fps") as HTMLSpanElement | null;
     this.debugLogEl = document.getElementById("debugLog") as HTMLDivElement | null;
     
+    this.highlightBox = document.createElement('div');
+    this.highlightBox.style.position = 'absolute';
+    this.highlightBox.style.border = '2px solid #ff00ff';
+    this.highlightBox.style.backgroundColor = 'rgba(255, 0, 255, 0.2)';
+    this.highlightBox.style.pointerEvents = 'none';
+    this.highlightBox.style.display = 'none';
+    this.highlightBox.style.zIndex = '999';
+    
+    this.contextMenu = document.createElement('div');
+    this.contextMenu.style.position = 'fixed';
+    this.contextMenu.style.background = '#252526';
+    this.contextMenu.style.border = '1px solid #454545';
+    this.contextMenu.style.boxShadow = '0 2px 8px rgba(0,0,0,0.5)';
+    this.contextMenu.style.padding = '4px 0';
+    this.contextMenu.style.display = 'none';
+    this.contextMenu.style.zIndex = '10000';
+    this.contextMenu.style.minWidth = '120px';
+    
+    const deleteOption = document.createElement('div');
+    deleteOption.textContent = 'Delete';
+    deleteOption.style.padding = '6px 12px';
+    deleteOption.style.cursor = 'pointer';
+    deleteOption.style.color = '#cccccc';
+    deleteOption.style.fontSize = '13px';
+    deleteOption.style.fontFamily = 'Segoe UI, sans-serif';
+    
+    deleteOption.addEventListener('mouseenter', () => {
+        deleteOption.style.backgroundColor = '#094771';
+        deleteOption.style.color = '#ffffff';
+    });
+    deleteOption.addEventListener('mouseleave', () => {
+        deleteOption.style.backgroundColor = 'transparent';
+        deleteOption.style.color = '#cccccc';
+    });
+    deleteOption.addEventListener('click', () => {
+        if (this.onDelete) {
+            this.onDelete();
+        }
+        this.contextMenu.style.display = 'none';
+    });
+    
+    this.contextMenu.appendChild(deleteOption);
+    document.body.appendChild(this.contextMenu);
+
+    // Append to canvas parent if possible, or body
+    if (this.renderer.canvas.parentElement) {
+        this.renderer.canvas.parentElement.style.position = 'relative'; // Ensure parent is relative
+        this.renderer.canvas.parentElement.appendChild(this.highlightBox);
+    } else {
+        document.body.appendChild(this.highlightBox);
+    }
+
+    // Context menu listener
+    document.addEventListener('contextmenu', (e) => {
+        if (this.currentHighlightBounds) {
+            e.preventDefault();
+            console.log('[UI] Opening context menu at', e.clientX, e.clientY);
+            this.contextMenu.style.display = 'block';
+            this.contextMenu.style.left = `${e.clientX}px`;
+            this.contextMenu.style.top = `${e.clientY}px`;
+        } else {
+            console.log('[UI] Context menu ignored - no selection');
+        }
+    });
+
+    // Close context menu on click elsewhere
+    document.addEventListener('click', (e) => {
+        if (this.contextMenu.style.display === 'block' && !this.contextMenu.contains(e.target as Node)) {
+            this.contextMenu.style.display = 'none';
+        }
+    });
+
     this.interceptConsoleLog(this.debugLogEl);
+    this.createDebugControls();
+  }
+
+  public setOnDelete(callback: () => void) {
+    this.onDelete = callback;
+  }
+
+  public highlightObject(bounds: [number, number, number, number]) {
+    this.currentHighlightBounds = bounds;
+    this.updateHighlightPosition();
+  }
+
+  public updateHighlightPosition() {
+    if (!this.currentHighlightBounds) return;
+    
+    const [minX, minY, maxX, maxY] = this.currentHighlightBounds;
+    
+    const p1 = this.renderer.worldToScreen(minX, minY);
+    const p2 = this.renderer.worldToScreen(maxX, maxY);
+    
+    const left = Math.min(p1.x, p2.x);
+    const top = Math.min(p1.y, p2.y);
+    const width = Math.abs(p2.x - p1.x);
+    const height = Math.abs(p2.y - p1.y);
+    
+    this.highlightBox.style.display = 'block';
+    this.highlightBox.style.left = `${left}px`;
+    this.highlightBox.style.top = `${top}px`;
+    this.highlightBox.style.width = `${width}px`;
+    this.highlightBox.style.height = `${height}px`;
+  }
+
+  public clearHighlight() {
+    this.currentHighlightBounds = null;
+    this.highlightBox.style.display = 'none';
+  }
+
+
+  private createDebugControls() {
+    if (!this.layersEl) return;
+
+    const debugContainer = document.createElement('div');
+    debugContainer.style.marginTop = '10px';
+    debugContainer.style.borderTop = '1px solid #444';
+    debugContainer.style.paddingTop = '5px';
+    debugContainer.style.pointerEvents = 'auto';
+    debugContainer.innerHTML = `
+      <div style="margin-bottom: 5px; font-weight: bold;">Debug Render</div>
+      <select id="debugRenderType" style="width: 100%; background: #333; color: white; border: 1px solid #555; margin-bottom: 5px;">
+        <option value="all">All Geometry</option>
+        <option value="batch">Polylines Only (Batch)</option>
+        <option value="instanced">Vias Only (Instanced)</option>
+        <option value="instanced_rot">Pads Only (InstancedRot)</option>
+      </select>
+      <button id="debugLogFrame" style="width: 100%; background: #444; color: white; border: 1px solid #555; cursor: pointer;">Log Next Frame</button>
+    `;
+
+    this.layersEl.parentElement?.insertBefore(debugContainer, this.layersEl.nextSibling);
+
+    const select = debugContainer.querySelector('#debugRenderType') as HTMLSelectElement;
+    select.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value as any;
+      this.renderer.debugRenderType = val;
+      this.scene.state.needsDraw = true;
+    });
+
+    const btn = debugContainer.querySelector('#debugLogFrame') as HTMLButtonElement;
+    btn.addEventListener('click', () => {
+      this.renderer.debugLogNextFrame = true;
+      this.scene.state.needsDraw = true;
+      console.log("Next frame will be logged to console...");
+    });
   }
 
   private interceptConsoleLog(target: HTMLDivElement | null) {

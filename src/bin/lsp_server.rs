@@ -1,4 +1,4 @@
-use rust_extension::draw::geometry::{LayerJSON, LayerBinary};
+use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange};
 use rust_extension::parse_xml::{parse_xml_file, XmlNode};
 use rust_extension::draw::parsing::extract_and_generate_layers;
 use rust_extension::serialize_xml::xml_node_to_file;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 use std::collections::HashMap;
+use rstar::RTree;
 
 /// JSON-RPC Request format
 #[derive(Debug, Deserialize)]
@@ -46,6 +47,7 @@ struct ServerState {
     xml_root: Option<XmlNode>,
     layers: Vec<LayerJSON>,
     layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA
+    spatial_index: Option<RTree<SelectableObject>>,
 }
 
 impl ServerState {
@@ -55,6 +57,7 @@ impl ServerState {
             xml_root: None,
             layers: Vec::new(),
             layer_colors: HashMap::new(),
+            spatial_index: None,
         }
     }
 }
@@ -95,6 +98,7 @@ fn main() {
             "GetTessellationBinary" => handle_get_tessellation_binary(&mut state, request.id, request.params),
             "UpdateLayerColor" => serde_json::to_string(&handle_update_layer_color(&mut state, request.id, request.params)).unwrap(),
             "Save" => serde_json::to_string(&handle_save(&mut state, request.id, request.params)).unwrap(),
+            "Select" => serde_json::to_string(&handle_select(&state, request.id, request.params)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -158,8 +162,8 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
 
     // Extract and generate layer geometries
     let start_gen = Instant::now();
-    let layers = match extract_and_generate_layers(&root) {
-        Ok(layers) => layers,
+    let (layers, object_ranges) = match extract_and_generate_layers(&root) {
+        Ok((layers, ranges)) => (layers, ranges),
         Err(e) => {
             return Response {
                 id,
@@ -172,6 +176,15 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
         }
     };
     eprintln!("[LSP Server] Layer Generation (Tessellation) time: {:.2?}", start_gen.elapsed());
+    
+    // Build spatial index
+    let start_index = Instant::now();
+    let selectable_objects: Vec<SelectableObject> = object_ranges.into_iter()
+        .map(SelectableObject::new)
+        .collect();
+    let spatial_index = RTree::bulk_load(selectable_objects);
+    eprintln!("[LSP Server] Spatial Index build time: {:.2?}", start_index.elapsed());
+    
     eprintln!("[LSP Server] Total Load time: {:.2?}", start_total.elapsed());
 
     eprintln!("[LSP Server] Generated {} layers", layers.len());
@@ -196,6 +209,7 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     state.xml_root = Some(root);
     state.layers = layers;
     state.layer_colors = layer_colors;
+    state.spatial_index = Some(spatial_index);
 
     eprintln!("[LSP Server] File loaded successfully");
 
@@ -623,5 +637,48 @@ fn update_dictionary_colors(root: &mut XmlNode, layer_colors: &HashMap<String, [
         };
         
         dict_color.children.push(entry);
+    }
+}
+
+/// Handle Select request - performs spatial selection based on x, y coordinates
+fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    #[derive(Deserialize)]
+    struct SelectParams {
+        x: f32,
+        y: f32,
+    }
+
+    let params: SelectParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {x: number, y: number}".to_string(),
+                }),
+            };
+        }
+    };
+
+    if let Some(tree) = &state.spatial_index {
+        let point = [params.x, params.y];
+        // Find all objects whose AABB contains the point
+        let results: Vec<ObjectRange> = tree.locate_all_at_point(&point)
+            .map(|obj| obj.range.clone())
+            .collect();
+            
+        Response {
+            id,
+            result: Some(serde_json::to_value(results).unwrap()),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!([])),
+            error: None,
+        }
     }
 }

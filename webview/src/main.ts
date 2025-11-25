@@ -2,7 +2,7 @@ import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
-import { LayerJSON } from "./types";
+import { LayerJSON, ObjectRange } from "./types";
 import { BinaryParserPool } from "./BinaryParserPool";
 
 // Detect if running in VS Code webview or dev mode
@@ -171,7 +171,62 @@ async function init() {
   console.log('[INIT] WebGPU renderer initialized');
   
   // Setup Input handling
-  new Input(scene, renderer, ui);
+  const input = new Input(scene, renderer, ui, (x, y) => {
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'Select', x, y });
+    } else {
+      console.log(`[Dev] Select at ${x}, ${y}`);
+    }
+  });
+
+  // Handle deletion
+  let selectedObjects: ObjectRange[] = [];
+  let deletedObjectIds = new Set<number>(); // Track deleted object IDs
+  
+  ui.setOnDelete(() => {
+    if (selectedObjects.length > 0) {
+      // Only delete the topmost (first) object to avoid accidental multi-layer deletion
+      const objToDelete = selectedObjects[0];
+      console.log(`[Delete] Deleting topmost object ${objToDelete.id}`);
+      
+      // Hide the object visually
+      scene.hideObject(objToDelete);
+      deletedObjectIds.add(objToDelete.id); // Mark as deleted
+      ui.clearHighlight();
+      
+      // Send delete command to backend
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ command: 'Delete', object: objToDelete });
+      } else {
+        console.log('[Dev] Delete object:', objToDelete);
+      }
+      
+      selectedObjects = [];
+    }
+  });
+  
+  // Also hook up Input's delete handler (keyboard shortcut)
+  input.setOnDelete(() => {
+    if (selectedObjects.length > 0) {
+      // Only delete the topmost (first) object to avoid accidental multi-layer deletion
+      const objToDelete = selectedObjects[0];
+      console.log(`[Delete] Deleting topmost object ${objToDelete.id} (keyboard)`);
+      
+      // Hide the object visually
+      scene.hideObject(objToDelete);
+      deletedObjectIds.add(objToDelete.id); // Mark as deleted
+      ui.clearHighlight();
+      
+      // Send delete command to backend
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ command: 'Delete', object: objToDelete });
+      } else {
+        console.log('[Dev] Delete object:', objToDelete);
+      }
+      
+      selectedObjects = [];
+    }
+  });
 
   // Initial UI update
   ui.refreshLayerLegend();
@@ -288,6 +343,29 @@ async function init() {
       
     } else if (data.command === "error") {
       console.error(`Extension error: ${data.message}`);
+    } else if (data.command === "selectionResult" && data.ranges) {
+      const ranges = data.ranges as ObjectRange[];
+      console.log(`[Select] Received ${ranges.length} selected objects`);
+      
+      // Filter out deleted objects and objects from invisible layers
+      const visibleRanges = ranges.filter(range => {
+        const isDeleted = deletedObjectIds.has(range.id);
+        const isLayerVisible = scene.layerVisible.get(range.layer_id) !== false;
+        return !isDeleted && isLayerVisible;
+      });
+      console.log(`[Select] After filtering deleted/hidden layers: ${visibleRanges.length} visible objects`);
+      
+      if (visibleRanges.length > 0) {
+        // For single point selection, only select the topmost (first) object
+        // For box selection, keep all objects
+        selectedObjects = visibleRanges;
+        
+        // Highlight only the first object's bounds
+        ui.highlightObject(visibleRanges[0].bounds);
+      } else {
+        selectedObjects = [];
+        ui.clearHighlight();
+      }
     }
   });
   
@@ -302,10 +380,23 @@ async function init() {
     }, 5000);
   }
 
+  // Expose debug controls
+  (window as any).debugRender = (type: 'all' | 'batch' | 'instanced' | 'instanced_rot') => {
+    renderer.debugRenderType = type;
+    scene.state.needsDraw = true;
+    console.log(`[Debug] Set render type to: ${type}`);
+  };
+  
+  (window as any).logFrame = () => {
+    renderer.debugLogNextFrame = true;
+    scene.state.needsDraw = true;
+  };
+
   // Render loop
   function loop() {
     renderer.render();
     ui.updateStats();
+    ui.updateHighlightPosition();
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);

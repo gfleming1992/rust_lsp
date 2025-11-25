@@ -82,6 +82,12 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       offset += 4;
       const indexCount = view.getUint32(offset, true);
       offset += 4;
+      
+      // Read visibility flag
+      const hasVisibility = view.getUint8(offset) === 1;
+      offset += 1;
+      // Skip padding (3 bytes)
+      offset += 3;
 
       // Read vertex_data as Float32Array (zero-copy view)
       // Each vertex is 2 floats (x, y), so multiply vertexCount by 2
@@ -95,12 +101,20 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
         indexData = new Uint32Array(buffer, offset, indexCount);
         offset += indexCount * 4;
       }
+      
+      // Read visibility_data if present - 1 float per vertex
+      let visibilityData: Float32Array | undefined;
+      if (hasVisibility) {
+        visibilityData = new Float32Array(buffer, offset, vertexCount);
+        offset += vertexCount * 4;
+      }
 
       batchLods.push({
         vertexCount: vertexCount,
         indexCount: indexCount > 0 ? indexCount : undefined,
         vertexData: vertexData,
         indexData: indexData,
+        visibilityData: visibilityData,
       });
     }
     geometry.batch = batchLods;
@@ -117,7 +131,11 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       offset += 4;
       const indexCount = view.getUint32(offset, true);
       offset += 4;
-      const hasAlpha = view.getUint8(offset) === 1;
+      
+      // Read flags: bit 0 = alpha, bit 1 = visibility
+      const flags = view.getUint8(offset);
+      const hasAlpha = (flags & 1) !== 0;
+      const hasVisibility = (flags & 2) !== 0;
       offset += 1;
       // Skip padding (3 bytes)
       offset += 3;
@@ -140,6 +158,13 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
         alphaData = new Float32Array(buffer, offset, vertexCount);
         offset += vertexCount * 4;
       }
+      
+      // Read visibility_data if present - 1 float per vertex
+      let visibilityData: Float32Array | undefined;
+      if (hasVisibility) {
+        visibilityData = new Float32Array(buffer, offset, vertexCount);
+        offset += vertexCount * 4;
+      }
 
       batchColoredLods.push({
         vertexCount: vertexCount,
@@ -147,6 +172,7 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
         vertexData: vertexData,
         indexData: indexData,
         alphaData: alphaData,
+        visibilityData: visibilityData,
       });
     }
     geometry.batch_colored = batchColoredLods;
@@ -166,6 +192,10 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       const instanceCount = view.getUint32(offset, true);
       offset += 4;
 
+      if (vertexCount > 10000000) {
+        throw new Error(`[BinaryParser] Sanity check failed: instanced_rot vertexCount ${vertexCount} is too large`);
+      }
+
       // Read vertex_data (base shape) - each vertex is 2 floats (x, y)
       const numFloats = vertexCount * 2;
       const vertexData = new Float32Array(buffer, offset, numFloats);
@@ -181,6 +211,7 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       // Read instance_data (x, y, rotation per instance)
       let instanceData: Float32Array | undefined;
       if (instanceCount > 0) {
+        // MUST match Rust serialization (3 floats per instance)
         instanceData = new Float32Array(buffer, offset, instanceCount * 3);
         offset += instanceCount * 3 * 4;
       }
@@ -211,6 +242,10 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       const instanceCount = view.getUint32(offset, true);
       offset += 4;
 
+      if (vertexCount > 10000000) {
+        throw new Error(`[BinaryParser] Sanity check failed: instanced vertexCount ${vertexCount} is too large`);
+      }
+
       // Read vertex_data (base shape) - each vertex is 2 floats (x, y)
       const numFloats = vertexCount * 2;
       const vertexData = new Float32Array(buffer, offset, numFloats);
@@ -223,11 +258,12 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
         offset += indexCount * 4;
       }
 
-      // Read instance_data (x, y per instance)
+      // Read instance_data (x, y, packed_vis per instance)
       let instanceData: Float32Array | undefined;
       if (instanceCount > 0) {
-        instanceData = new Float32Array(buffer, offset, instanceCount * 2);
-        offset += instanceCount * 2 * 4;
+        // MUST match Rust serialization (3 floats per instance)
+        instanceData = new Float32Array(buffer, offset, instanceCount * 3);
+        offset += instanceCount * 3 * 4;
       }
 
       instancedLods.push({

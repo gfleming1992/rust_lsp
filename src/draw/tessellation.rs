@@ -391,11 +391,13 @@ pub fn tessellate_polyline(points: &[Point], width: f32, line_end: LineEnd) -> (
 
 /// Batch all polylines for a layer into a single vertex/index buffer
 /// Each polyline maintains its own width and line_end style
+/// Returns (vertices, indices, per_object_vertex_counts)
 pub fn batch_polylines_with_styles(
     polylines_data: &[(Vec<Point>, f32, LineEnd)],
-) -> (Vec<f32>, Vec<u32>) {
+) -> (Vec<f32>, Vec<u32>, Vec<usize>) {
     let mut all_verts = Vec::new();
     let mut all_indices = Vec::new();
+    let mut vertex_counts = Vec::new(); // Track vertices per polyline
 
     for (points, width, line_end) in polylines_data {
         let (verts, mut indices) = tessellate_polyline(points, *width, *line_end);
@@ -406,11 +408,14 @@ pub fn batch_polylines_with_styles(
             *idx += vert_offset;
         }
         
+        let vert_count = verts.len() / 2; // Number of vertices for this polyline
+        vertex_counts.push(vert_count);
+        
         all_verts.extend(verts);
         all_indices.extend(indices);
     }
 
-    (all_verts, all_indices)
+    (all_verts, all_indices, vertex_counts)
 }
 
 /// Tessellate a filled polygon using earcut triangulation

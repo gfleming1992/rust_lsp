@@ -1,6 +1,7 @@
 // Instanced shader with rotation support.
 // For rendering repeated geometry at different positions with arbitrary rotations.
-// Instance data: vec3<f32> = (offsetX, offsetY, rotationRadians)
+// Instance data: vec3<f32> = (offsetX, offsetY, packedRotationVisibility)
+// Packed format: [16-bit angle][15-bit unused][1-bit visibility]
 
 struct VSOut {
   @builtin(position) Position : vec4<f32>,
@@ -20,8 +21,21 @@ struct Uniforms {
 fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut {
   var out : VSOut;
   
-  // Extract rotation angle in radians
-  let angle = inst.z;
+  // Unpack rotation and visibility
+  let packed = bitcast<u32>(inst.z);
+  let visible = (packed & 1u) != 0u;
+  
+  if (!visible) {
+    // Discard vertex by moving it outside clip space
+    out.Position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    out.color = vec4<f32>(0.0);
+    return out;
+  }
+  
+  let angle_u16 = packed >> 16u;
+  let angle_normalized = f32(angle_u16) / 65535.0;
+  let angle = angle_normalized * 6.28318530718; // 2 * PI
+  
   let c = cos(angle);
   let s = sin(angle);
   

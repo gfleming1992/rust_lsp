@@ -281,6 +281,39 @@ wss.on('connection', (ws) => {
         }
       });
       
+    } else if (data.command === 'Select') {
+      console.log(`[DevServer] Select at ${data.x}, ${data.y}`);
+      sendLspRequest('Select', { x: data.x, y: data.y }, (response) => {
+        if (response.result) {
+          ws.send(JSON.stringify({
+            command: 'selectionResult',
+            ranges: response.result
+          }));
+        }
+      });
+      
+    } else if (data.command === 'BoxSelect') {
+      console.log(`[DevServer] BoxSelect: (${data.minX}, ${data.minY}) to (${data.maxX}, ${data.maxY})`);
+      sendLspRequest('BoxSelect', { 
+        min_x: data.minX, 
+        min_y: data.minY, 
+        max_x: data.maxX, 
+        max_y: data.maxY 
+      }, (response) => {
+        if (response.result) {
+          console.log(`[DevServer] BoxSelect returned ${response.result.length} objects`);
+          ws.send(JSON.stringify({
+            command: 'selectionResult',
+            ranges: response.result
+          }));
+        }
+      });
+      
+    } else if (data.command === 'Delete') {
+      console.log(`[DevServer] Delete object:`, data.object);
+      // TODO: Implement backend delete
+      // For now, just acknowledge
+      
     } else if (data.command === 'UpdateLayerColor') {
       console.log(`[DevServer] UpdateLayerColor: ${data.layerId}`, data.color);
       sendLspRequest('UpdateLayerColor', { 

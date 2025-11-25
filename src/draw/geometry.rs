@@ -1,5 +1,7 @@
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Serializer, Deserialize};
 use base64::{Engine as _, engine::general_purpose};
+use rstar::{RTreeObject, AABB};
+use std::f32::consts::PI;
 
 /// Serialize Vec<f32> as base64-encoded string for compact JSON transmission
 pub fn serialize_f32_vec_as_base64<S>(data: &Option<Vec<f32>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -53,6 +55,64 @@ where
             serializer.serialize_some(&encoded)
         }
         None => serializer.serialize_none(),
+    }
+}
+
+/// Helper to pack rotation angle (radians) and visibility into a single f32
+/// Format: [16-bit quantized angle][15-bit unused][1-bit visibility]
+pub fn pack_rotation_visibility(angle: f32, visible: bool) -> f32 {
+    // Normalize angle to 0..1 range
+    let angle_normalized = angle.rem_euclid(2.0 * PI) / (2.0 * PI);
+    // Quantize to 16 bits (0..65535)
+    let angle_u16 = (angle_normalized * 65535.0) as u16;
+    
+    // Pack: angle in upper 16 bits, visibility in LSB
+    let mut packed = (angle_u16 as u32) << 16;
+    if visible {
+        packed |= 1;
+    }
+    
+    f32::from_bits(packed)
+}
+
+/// Metadata for a selectable object in the spatial index
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObjectRange {
+    pub id: u64,
+    pub layer_id: String,
+    pub obj_type: u8, // 0=Polyline, 1=Polygon, 2=Via, 3=Pad
+    pub vertex_ranges: Vec<(u32, u32)>, // (start, count) for each LOD
+    pub instance_index: Option<u32>,    // For instanced types
+    pub bounds: [f32; 4], // min_x, min_y, max_x, max_y
+}
+
+/// Object wrapper for R-tree spatial indexing
+#[derive(Clone, Debug)]
+pub struct SelectableObject {
+    pub range: ObjectRange,
+    pub bounds: AABB<[f32; 2]>,
+}
+
+impl SelectableObject {
+    pub fn new(range: ObjectRange) -> Self {
+        let bounds = AABB::from_corners(
+            [range.bounds[0], range.bounds[1]],
+            [range.bounds[2], range.bounds[3]],
+        );
+        Self { range, bounds }
+    }
+}
+
+impl RTreeObject for SelectableObject {
+    type Envelope = AABB<[f32; 2]>;
+    fn envelope(&self) -> Self::Envelope {
+        self.bounds
+    }
+}
+
+impl rstar::PointDistance for SelectableObject {
+    fn distance_2(&self, point: &[f32; 2]) -> f32 {
+        self.bounds.distance_2(point)
     }
 }
 
@@ -175,6 +235,10 @@ pub struct GeometryLOD {
     /// Base64-encoded per-vertex alpha values (1 float per vertex)
     #[serde(rename = "alphaData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
     pub alpha_data: Option<Vec<f32>>,
+
+    /// Base64-encoded per-vertex visibility values (1 float per vertex) - for batched geometry
+    #[serde(rename = "visibilityData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
+    pub visibility_data: Option<Vec<f32>>,
     
     /// Base64-encoded instance data for instanced rendering (x, y, rotation for instanced_rot; x, y for instanced)
     #[serde(rename = "instanceData", skip_serializing_if = "Option::is_none", serialize_with = "serialize_f32_vec_as_base64")]
@@ -305,6 +369,12 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
             // Index count
             let index_count = lod.index_count.unwrap_or(0);
             buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
+            // Has visibility flag
+            let has_vis = lod.visibility_data.is_some();
+            buffer.push(if has_vis { 1 } else { 0 });
+            // Padding to maintain 4-byte alignment
+            buffer.extend_from_slice(&[0u8, 0u8, 0u8]);
+
             // Raw vertex data (Float32)
             for &f in &lod.vertex_data {
                 buffer.extend_from_slice(&f.to_le_bytes());
@@ -313,6 +383,12 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
             if let Some(indices) = &lod.index_data {
                 for &idx in indices {
                     buffer.extend_from_slice(&idx.to_le_bytes());
+                }
+            }
+            // Visibility data (Float32) if present
+            if let Some(vis_values) = &lod.visibility_data {
+                for &v in vis_values {
+                    buffer.extend_from_slice(&v.to_le_bytes());
                 }
             }
         }
@@ -333,7 +409,15 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
             buffer.extend_from_slice(&(index_count as u32).to_le_bytes());
             // Has alpha flag
             let has_alpha = lod.alpha_data.is_some();
-            buffer.push(if has_alpha { 1 } else { 0 });
+            // Has visibility flag
+            let has_vis = lod.visibility_data.is_some();
+            
+            // Pack flags: bit 0 = alpha, bit 1 = visibility
+            let mut flags = 0u8;
+            if has_alpha { flags |= 1; }
+            if has_vis { flags |= 2; }
+            buffer.push(flags);
+            
             // Padding to maintain 4-byte alignment
             buffer.extend_from_slice(&[0u8, 0u8, 0u8]);
             
@@ -351,6 +435,12 @@ fn serialize_geometry_binary(geometry: &ShaderGeometry) -> Vec<u8> {
             if let Some(alpha_values) = &lod.alpha_data {
                 for &alpha in alpha_values {
                     buffer.extend_from_slice(&alpha.to_le_bytes());
+                }
+            }
+            // Visibility data (Float32) if present
+            if let Some(vis_values) = &lod.visibility_data {
+                for &v in vis_values {
+                    buffer.extend_from_slice(&v.to_le_bytes());
                 }
             }
         }
@@ -447,6 +537,7 @@ mod tests {
             index_data: Some(vec![0, 1, 2]),
             index_count: Some(3),
             alpha_data: None,
+            visibility_data: None,
             instance_data: None,
             instance_count: None,
         };

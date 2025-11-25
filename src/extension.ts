@@ -101,6 +101,19 @@ export function activate(context: vscode.ExtensionContext) {
                             } 
                         }, panel);
                         break;
+                    case 'Select':
+                        const selectResponse = await sendToLspServer({ 
+                            method: 'Select', 
+                            params: { x: message.x, y: message.y } 
+                        }, panel);
+                        
+                        if (selectResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'selectionResult',
+                                ranges: selectResponse.result
+                            });
+                        }
+                        break;
                     case 'Save':
                         console.log('[Extension] Received Save command from webview');
                         try {

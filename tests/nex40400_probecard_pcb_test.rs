@@ -25,7 +25,7 @@ mod tests {
         
         // Debug: Inspect Top Layer geometry
         use rust_extension::extract_and_generate_layers;
-        let layers = extract_and_generate_layers(&root).expect("Failed to generate layers");
+        let (layers, _) = extract_and_generate_layers(&root).expect("Failed to generate layers");
         
         if let Some(top_layer) = layers.iter().find(|l| l.layer_id == "Top Layer") {
             println!("\n=== Top Layer Analysis ===");

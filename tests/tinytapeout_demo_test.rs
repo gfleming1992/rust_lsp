@@ -60,7 +60,7 @@ mod tests {
         println!("XML parsing: {:.3}ms", parse_time.as_secs_f64() * 1000.0);
         
         let start = Instant::now();
-        let layer_jsons = extract_and_generate_layers(&root)
+        let (layer_jsons, _) = extract_and_generate_layers(&root)
             .expect("Failed to extract layers and generate LODs");
         let tessellation_time = start.elapsed();
         

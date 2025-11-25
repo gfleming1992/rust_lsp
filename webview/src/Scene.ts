@@ -5,7 +5,9 @@ import {
   LayerColor, 
   LayerInfo, 
   ShaderGeometry, 
-  GeometryLOD 
+  GeometryLOD,
+  GeometryType,
+  ObjectRange
 } from "./types";
 
 export class Scene {
@@ -192,6 +194,8 @@ export class Scene {
 
     const lodBuffers: GPUBuffer[] = [];
     const lodAlphaBuffers: (GPUBuffer | null)[] = [];
+    const lodVisibilityBuffers: (GPUBuffer | null)[] = [];
+    const cpuVisibilityBuffers: (Float32Array | null)[] = [];
     const lodVertexCounts: number[] = [];
     const lodIndexBuffers: (GPUBuffer | null)[] = [];
     const lodIndexCounts: number[] = [];
@@ -205,7 +209,6 @@ export class Scene {
       if (lod.vertexData instanceof Float32Array) {
         lodVertices = lod.vertexData;
       } else {
-        // Decode base64 vertex data
         const vertexBin = atob(lod.vertexData as unknown as string);
         const vertexBytes = new Uint8Array(vertexBin.length);
         for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
@@ -223,6 +226,7 @@ export class Scene {
       lodBuffers.push(buffer);
       lodVertexCounts.push(lod.vertexCount);
 
+      // Handle Alpha Data
       let alphaArr: Float32Array;
       if (lod.alphaData) {
         if (typeof lod.alphaData === 'object' && lod.alphaData instanceof Float32Array) {
@@ -247,12 +251,37 @@ export class Scene {
       alphaBuf.unmap();
       lodAlphaBuffers.push(alphaBuf);
 
+      // Handle Visibility Data
+      let visArr: Float32Array;
+      if (lod.visibilityData) {
+        if (typeof lod.visibilityData === 'object' && lod.visibilityData instanceof Float32Array) {
+          visArr = lod.visibilityData;
+        } else {
+          const visBin = atob(lod.visibilityData as string);
+          const visBytes = new Uint8Array(visBin.length);
+          for (let j = 0; j < visBin.length; j++) visBytes[j] = visBin.charCodeAt(j);
+          visArr = new Float32Array(visBytes.buffer);
+        }
+      } else {
+        visArr = new Float32Array(lod.vertexCount);
+        visArr.fill(1.0); // Default visible
+      }
+      
+      const visBuf = this.device.createBuffer({
+        size: visArr.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(visBuf.getMappedRange()).set(visArr);
+      visBuf.unmap();
+      lodVisibilityBuffers.push(visBuf);
+      cpuVisibilityBuffers.push(visArr);
+
       if (lod.indexData && lod.indexCount && lod.indexCount > 0) {
         let idxArr: Uint32Array;
         if (lod.indexData instanceof Uint32Array) {
           idxArr = lod.indexData;
         } else {
-          // Decode base64 index data
           const indexBin = atob(lod.indexData as unknown as string);
           const indexBytes = new Uint8Array(indexBin.length);
           for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
@@ -292,6 +321,9 @@ export class Scene {
       shaderType: shaderKey,
       lodBuffers,
       lodAlphaBuffers,
+      lodVisibilityBuffers,
+      cpuVisibilityBuffers,
+      cpuInstanceBuffers: [],
       lodVertexCounts,
       lodIndexBuffers,
       lodIndexCounts,
@@ -311,6 +343,7 @@ export class Scene {
 
     const lodBuffers: GPUBuffer[] = [];
     const lodInstanceBuffers: GPUBuffer[] = [];
+    const cpuInstanceBuffers: (Float32Array | null)[] = [];
     const lodVertexCounts: number[] = [];
     const lodInstanceCounts: number[] = [];
     const lodIndexBuffers: (GPUBuffer | null)[] = [];
@@ -320,12 +353,10 @@ export class Scene {
       const lod = geometryLODs[i];
       if (!lod) continue;
       
-      // Handle both base64 (from JSON) and typed arrays (from binary)
       let lodVertices: Float32Array;
       if (lod.vertexData instanceof Float32Array) {
         lodVertices = lod.vertexData;
       } else {
-        // Decode base64 vertex data
         const vertexBin = atob(lod.vertexData as unknown as string);
         const vertexBytes = new Uint8Array(vertexBin.length);
         for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
@@ -347,7 +378,6 @@ export class Scene {
         if (lod.instanceData instanceof Float32Array) {
           instanceArr = lod.instanceData;
         } else {
-          // Decode base64 instance data
           const instanceBin = atob(lod.instanceData as unknown as string);
           const instanceBytes = new Uint8Array(instanceBin.length);
           for (let j = 0; j < instanceBin.length; j++) instanceBytes[j] = instanceBin.charCodeAt(j);
@@ -362,6 +392,7 @@ export class Scene {
         new Float32Array(instanceBuffer.getMappedRange()).set(instanceArr);
         instanceBuffer.unmap();
         lodInstanceBuffers.push(instanceBuffer);
+        cpuInstanceBuffers.push(instanceArr);
         lodInstanceCounts.push(lod.instanceCount);
       } else {
         const emptyBuffer = this.device.createBuffer({
@@ -369,6 +400,7 @@ export class Scene {
           usage: GPUBufferUsage.VERTEX
         });
         lodInstanceBuffers.push(emptyBuffer);
+        cpuInstanceBuffers.push(null);
         lodInstanceCounts.push(0);
       }
 
@@ -377,7 +409,6 @@ export class Scene {
         if (lod.indexData instanceof Uint32Array) {
           idxArr = lod.indexData;
         } else {
-          // Decode base64 index data
           const indexBin = atob(lod.indexData as unknown as string);
           const indexBytes = new Uint8Array(indexBin.length);
           for (let j = 0; j < indexBin.length; j++) indexBytes[j] = indexBin.charCodeAt(j);
@@ -418,6 +449,9 @@ export class Scene {
       lodBuffers,
       lodInstanceBuffers,
       lodAlphaBuffers: [],
+      lodVisibilityBuffers: [],
+      cpuVisibilityBuffers: [],
+      cpuInstanceBuffers,
       lodVertexCounts,
       lodInstanceCounts,
       lodIndexBuffers,
@@ -426,6 +460,143 @@ export class Scene {
       uniformBuffer: layerUniformBuffer,
       bindGroup: layerBindGroup
     });
+  }
+
+  public hideObject(range: ObjectRange) {
+    console.log('[Scene] hideObject called with:', range);
+    const shaderKey = this.getShaderKey(range.obj_type);
+    if (!shaderKey) {
+      console.warn('[Scene] No shader key for obj_type:', range.obj_type);
+      return;
+    }
+
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
+    console.log(`[Scene] Looking for renderKey: ${renderKey}, shaderKey: ${shaderKey}`);
+    const renderData = this.layerRenderData.get(renderKey);
+    if (!renderData) {
+      console.warn('[Scene] No render data for key:', renderKey);
+      console.log('[Scene] Available render keys:', Array.from(this.layerRenderData.keys()));
+      return;
+    }
+    
+    console.log(`[Scene] Found renderData, shaderType: ${renderData.shaderType}, LOD buffers: ${renderData.lodVisibilityBuffers.length}`);
+
+    // Hide object in ALL LOD levels to ensure it disappears regardless of zoom
+    if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced - hide across all LODs
+        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+            const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+            const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            const idx = range.instance_index;
+            
+            if (shaderKey === 'instanced') {
+                // 3 floats: x, y, packed_vis (u32 as float)
+                // Stride = 3
+                const offset = idx * 3 + 2;
+                if (offset < cpuBuffer.length) {
+                    const view = new DataView(cpuBuffer.buffer);
+                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                    
+                    const currentPacked = view.getUint32(byteOffset, true);
+                    const newPacked = currentPacked & ~1; // Clear LSB
+                    view.setUint32(byteOffset, newPacked, true);
+                    
+                    this.device?.queue.writeBuffer(
+                        gpuBuffer,
+                        offset * 4,
+                        cpuBuffer.buffer,
+                        byteOffset,
+                        4
+                    );
+                }
+            } else if (shaderKey === 'instanced_rot') {
+                // 3 floats: x, y, packed_rot_vis (f32)
+                // Stride = 3
+                const offset = idx * 3 + 2;
+                if (offset < cpuBuffer.length) {
+                    const view = new DataView(cpuBuffer.buffer);
+                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                    
+                    const currentPacked = view.getUint32(byteOffset, true);
+                    const newPacked = currentPacked & ~1; // Clear LSB
+                    view.setUint32(byteOffset, newPacked, true);
+                    
+                    this.device?.queue.writeBuffer(
+                        gpuBuffer,
+                        offset * 4,
+                        cpuBuffer.buffer,
+                        byteOffset,
+                        4
+                    );
+                }
+            }
+        }
+    } else {
+        // Batched - hide across all LODs
+        console.log('[Scene] Hiding batched geometry, vertex_ranges:', range.vertex_ranges);
+        
+        for (let lodIndex = 0; lodIndex < range.vertex_ranges.length; lodIndex++) {
+            const [start, count] = range.vertex_ranges[lodIndex];
+            if (count === 0) continue; // Skip empty ranges
+            
+            const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+            const gpuBuffer = renderData.lodVisibilityBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) {
+                console.warn(`[Scene] No CPU or GPU visibility buffer for LOD ${lodIndex}`);
+                continue;
+            }
+
+            console.log(`[Scene] LOD${lodIndex}: Hiding vertices ${start} to ${start + count - 1} (${count} vertices)`);
+            
+            // Check bounds
+            if (start + count > cpuBuffer.length) {
+                console.error(`[Scene] ERROR: Trying to hide vertices ${start}-${start + count - 1} but cpuBuffer.length is only ${cpuBuffer.length}!`);
+                continue;
+            }
+            
+            // Set range to 0.0
+            for (let i = 0; i < count; i++) {
+                cpuBuffer[start + i] = 0.0;
+            }
+            
+            console.log(`[Scene] Updated CPU buffer, first vertex now = ${cpuBuffer[start]}`);
+            
+            // Update GPU
+            this.device?.queue.writeBuffer(
+                gpuBuffer,
+                start * 4,
+                cpuBuffer.buffer,
+                cpuBuffer.byteOffset + start * 4,
+                count * 4
+            );
+            console.log(`[Scene] GPU buffer updated for LOD${lodIndex}`);
+        }
+    }
+    
+    // Force immediate GPU queue submission
+    if (this.device) {
+        this.device.queue.submit([]);
+        console.log('[Scene] GPU queue flushed');
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  private getShaderKey(type: GeometryType): keyof ShaderGeometry | null {
+    switch (type) {
+      case GeometryType.Batch: return 'batch';
+      case GeometryType.BatchColored: return 'batch_colored';
+      case GeometryType.BatchInstanced: return 'batch_instanced';
+      case GeometryType.BatchInstancedRot: return 'batch_instanced_rot';
+      case GeometryType.InstancedRotColored: return 'instanced_rot_colored';
+      case GeometryType.InstancedRot: return 'instanced_rot';
+      case GeometryType.InstancedColored: return 'instanced_colored';
+      case GeometryType.Instanced: return 'instanced';
+      case GeometryType.Basic: return 'basic';
+      default: return null;
+    }
   }
 
   private hashStr(input: string): number {

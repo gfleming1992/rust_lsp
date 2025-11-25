@@ -33,6 +33,10 @@ export class Renderer {
   public gpuMemoryBytes = 0;
   public gpuBuffers: GPUBufferInfo[] = [];
   
+  // Debug control
+  public debugRenderType: 'all' | 'batch' | 'instanced' | 'instanced_rot' = 'all';
+  public debugLogNextFrame = false;
+
   // Loading state - keep canvas black until first layer batch is loaded
   private isLoading = true;
 
@@ -102,6 +106,10 @@ export class Renderer {
           {
             arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
             attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
+          },
+          { // Visibility buffer
+            arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
+            attributes: [{ shaderLocation: 2, offset: 0, format: "float32" }]
           }
         ]
       },
@@ -128,6 +136,10 @@ export class Renderer {
           {
             arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
             attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+          },
+          { // Visibility buffer
+            arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
+            attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
           }
         ]
       },
@@ -156,9 +168,9 @@ export class Renderer {
             attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
           },
           {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+            arrayStride: 3 * Float32Array.BYTES_PER_ELEMENT, // Changed to 3 floats (x, y, packed)
             stepMode: "instance",
-            attributes: [{ shaderLocation: 1, offset: 0, format: "float32x2" }]
+            attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }]
           }
         ]
       },
@@ -310,6 +322,36 @@ export class Renderer {
     return { x: worldX, y: worldY };
   }
 
+  public worldToScreen(worldX: number, worldY: number): { x: number; y: number } {
+    const width = Math.max(1, this.canvas.width);
+    const height = Math.max(1, this.canvas.height);
+    const state = this.scene.state;
+    
+    const fx = state.flipX ? -1 : 1;
+    const fy = state.flipY ? -1 : 1;
+    const scaleX = (2 * state.zoom) / width;
+    const scaleY = (2 * state.zoom) / height;
+
+    // Inverse of screenToWorld
+    // worldX = ((xNdc / fx + 1) / scaleX) - width / 2 - state.panX
+    // worldX + width/2 + state.panX = (xNdc / fx + 1) / scaleX
+    // (worldX + width/2 + state.panX) * scaleX = xNdc / fx + 1
+    // (worldX + width/2 + state.panX) * scaleX - 1 = xNdc / fx
+    // ((worldX + width/2 + state.panX) * scaleX - 1) * fx = xNdc
+    
+    const xNdc = ((worldX + width / 2 + state.panX) * scaleX - 1) * fx;
+    const yNdc = (1 - (worldY + height / 2 + state.panY) * scaleY) / fy;
+
+    // xNdc = (2 * cssX) / clientWidth - 1
+    // xNdc + 1 = (2 * cssX) / clientWidth
+    // (xNdc + 1) * clientWidth / 2 = cssX
+    
+    const cssX = (xNdc + 1) * Math.max(1, this.canvas.clientWidth) / 2;
+    const cssY = (1 - yNdc) * Math.max(1, this.canvas.clientHeight) / 2;
+    
+    return { x: cssX, y: cssY };
+  }
+
   public render() {
     if (!this.scene.state.needsDraw) {
       return;
@@ -318,8 +360,20 @@ export class Renderer {
     this.configureSurface();
     this.updateUniforms();
 
+    if ((window as any).debugRenderType) {
+        this.debugRenderType = (window as any).debugRenderType;
+    }
+    if ((window as any).debugLogNextFrame) {
+        this.debugLogNextFrame = true;
+        (window as any).debugLogNextFrame = false;
+    }
+
     const currentLOD = this.selectLODForZoom(this.scene.state.zoom);
     
+    if (this.debugLogNextFrame) {
+        console.log(`[Render] Frame start. Zoom: ${this.scene.state.zoom}, LOD: ${currentLOD}`);
+    }
+
     const encoder = this.device.createCommandEncoder();
     const textureView = this.context.getCurrentTexture().createView();
     const pass = encoder.beginRenderPass({
@@ -348,15 +402,30 @@ export class Renderer {
       
       for (const [renderKey, data] of this.scene.layerRenderData.entries()) {
         if (data.layerId !== layerId) continue;
-        if (renderKey.endsWith('_instanced')) continue;
         
-        if (data.shaderType === 'instanced_rot') {
+        // Debug filtering
+        if (this.debugRenderType !== 'all') {
+            if (this.debugRenderType === 'batch' && data.shaderType !== 'batch' && data.shaderType !== 'batch_colored') continue;
+            if (this.debugRenderType === 'instanced' && data.shaderType !== 'instanced') continue;
+            if (this.debugRenderType === 'instanced_rot' && data.shaderType !== 'instanced_rot') continue;
+        }
+
+        // Handle instanced rendering (both rot and non-rot)
+        if (data.shaderType === 'instanced' || data.shaderType === 'instanced_rot') {
           const totalLODs = data.lodBuffers.length;
           const numShapes = totalLODs / 3;
-          const lodStartIdx = currentLOD * numShapes;
+          
+          // Clamp LOD to max available (2)
+          const effectiveLOD = Math.min(currentLOD, 2);
+          
+          const lodStartIdx = effectiveLOD * numShapes;
           const lodEndIdx = lodStartIdx + numShapes;
           
-          pass.setPipeline(this.pipelineInstancedRot);
+          const pipeline = data.shaderType === 'instanced_rot' 
+             ? this.pipelineInstancedRot 
+             : this.pipelineInstanced;
+          
+          pass.setPipeline(pipeline);
           
           for (let idx = lodStartIdx; idx < lodEndIdx && idx < totalLODs; idx++) {
             const vb = data.lodBuffers[idx];
@@ -366,6 +435,10 @@ export class Renderer {
             
             if (!vb || !count || !instanceBuf || instanceCount === 0) continue;
             
+            if (this.debugLogNextFrame) {
+                console.log(`[Render] Drawing instanced ${data.shaderType} layer=${layerId} idx=${idx} verts=${count} instances=${instanceCount}`);
+            }
+
             pass.setVertexBuffer(0, vb);
             pass.setVertexBuffer(1, instanceBuf);
             
@@ -393,11 +466,13 @@ export class Renderer {
         if (!vb || !count) continue;
         totalVertices += count;
 
+        if (this.debugLogNextFrame) {
+            console.log(`[Render] Drawing batch ${data.shaderType} layer=${layerId} LOD=${actualLOD} verts=${count}`);
+        }
+
         let usePipeline: GPURenderPipeline;
         if (data.shaderType === 'batch') {
           usePipeline = this.pipelineNoAlpha;
-        } else if (renderKey.endsWith('_instanced')) {
-          usePipeline = this.pipelineInstanced;
         } else {
           usePipeline = this.pipelineWithAlpha;
         }
@@ -405,53 +480,51 @@ export class Renderer {
         pass.setPipeline(usePipeline);
         pass.setVertexBuffer(0, vb);
         
-        if (renderKey.endsWith('_instanced')) {
-          const instanceBuf = data.lodInstanceBuffers?.[actualLOD];
-          const instanceCount = data.lodInstanceCounts?.[actualLOD] ?? 0;
-          
-          if (instanceBuf && instanceCount > 0) {
-            pass.setVertexBuffer(1, instanceBuf);
-            
-            const layerColor = this.scene.getLayerColor(data.layerId);
-            this.uniformData.set(layerColor, 0);
-            this.device.queue.writeBuffer(data.uniformBuffer, 0, this.uniformData);
-            pass.setBindGroup(0, data.bindGroup);
-            
-            const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
-            const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
-            if (ib && ic > 0) {
-              pass.setIndexBuffer(ib, "uint32");
-              pass.drawIndexed(ic, instanceCount);
-              totalIndices += ic * instanceCount;
-            } else {
-              pass.draw(count, instanceCount);
-            }
-          }
-        } else {
-          if (data.shaderType !== 'batch') {
+        if (data.shaderType !== 'batch') {
             const alphaBuf = data.lodAlphaBuffers[actualLOD];
             if (alphaBuf) {
               pass.setVertexBuffer(1, alphaBuf);
             }
-          }
-          const layerColor = this.scene.getLayerColor(data.layerId);
-          this.uniformData.set(layerColor, 0);
-          this.device.queue.writeBuffer(data.uniformBuffer, 0, this.uniformData);
+            // Bind visibility buffer for batch_colored (pipelineWithAlpha)
+            const visBuf = data.lodVisibilityBuffers[actualLOD];
+            if (visBuf) {
+              pass.setVertexBuffer(2, visBuf);
+              if (this.debugLogNextFrame && data.layerId === 'Mechanical 9') {
+                console.log(`[Render] Binding visibility buffer to slot 2 for ${data.layerId}, LOD${actualLOD}`);
+              }
+            } else if (this.debugLogNextFrame && data.layerId === 'Mechanical 9') {
+              console.log(`[Render] NO visibility buffer for ${data.layerId}, LOD${actualLOD}`);
+            }
+        } else {
+            // Bind visibility buffer for batch (pipelineNoAlpha)
+            const visBuf = data.lodVisibilityBuffers[actualLOD];
+            if (visBuf) {
+              pass.setVertexBuffer(1, visBuf);
+              if (this.debugLogNextFrame && data.layerId === 'Mechanical 9') {
+                console.log(`[Render] Binding visibility buffer to slot 1 for ${data.layerId}, LOD${actualLOD}`);
+              }
+            } else if (this.debugLogNextFrame && data.layerId === 'Mechanical 9') {
+              console.log(`[Render] NO visibility buffer for ${data.layerId}, LOD${actualLOD}`);
+            }
+        }
+        const layerColor = this.scene.getLayerColor(data.layerId);
+        this.uniformData.set(layerColor, 0);
+        this.device.queue.writeBuffer(data.uniformBuffer, 0, this.uniformData);
 
-          pass.setBindGroup(0, data.bindGroup);
-          const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
-          const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
-          if (ib && ic > 0) {
+        pass.setBindGroup(0, data.bindGroup);
+        const ib = data.lodIndexBuffers?.[actualLOD] ?? null;
+        const ic = data.lodIndexCounts?.[actualLOD] ?? 0;
+        if (ib && ic > 0) {
             pass.setIndexBuffer(ib, "uint32");
             pass.drawIndexed(ic);
             totalIndices += ic;
-          } else {
+        } else {
             pass.draw(count);
-          }
         }
       }
     }
     
+    /*
     const anyLayerVisible = Array.from(this.scene.layerVisible.values()).some(v => v);
     if (this.scene.viasVisible && anyLayerVisible) {
       const viaColor: LayerColor = [1.0, 0.9, 0.25, 1.0];
@@ -498,12 +571,18 @@ export class Renderer {
         }
       }
     }
+    */
     
     pass.end();
     this.device.queue.submit([encoder.finish()]);
 
     this.lastVertexCount = totalVertices;
     this.lastIndexCount = totalIndices;
+    
+    if (this.debugLogNextFrame) {
+        console.log(`[Render] Frame end. Total verts: ${totalVertices}, indices: ${totalIndices}`);
+        this.debugLogNextFrame = false;
+    }
 
     this.frameCount += 1;
     const now = performance.now();

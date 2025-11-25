@@ -62,7 +62,7 @@ fn test_polylines_use_line_descriptors() {
     let root = parse_xml_file(xml_path).expect("Failed to parse XML");
     
     // Generate layers - this will parse polylines and apply line descriptors
-    let layer_jsons = extract_and_generate_layers(&root)
+    let (layer_jsons, _) = extract_and_generate_layers(&root)
         .expect("Failed to extract layers");
     
     println!("Generated {} layers", layer_jsons.len());
