@@ -204,6 +204,9 @@ async function init() {
   let selectedObjects: ObjectRange[] = [];
   let deletedObjectIds = new Set<number>(); // Track deleted object IDs
   let isBoxSelect = false; // Track if current selection is from box select
+  
+  // Store full net results (including hidden layers) for "Show only net layers" feature
+  let lastNetHighlightAllObjects: ObjectRange[] = [];
 
   // Set up box select handler
   input.setOnBoxSelect((minX, minY, maxX, maxY) => {
@@ -232,12 +235,81 @@ async function init() {
     }
   });
   
+  // Set up highlight components handler
+  input.setOnHighlightComponents(() => {
+    if (selectedObjects.length === 0) {
+      console.log('[HighlightComponents] No objects selected');
+      return;
+    }
+    
+    const objectIds = selectedObjects.map(obj => obj.id);
+    console.log(`[HighlightComponents] Requesting components for ${objectIds.length} selected object(s)`);
+    
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'HighlightSelectedComponents', objectIds });
+    } else {
+      console.log(`[Dev] Highlight components for objects: ${objectIds.join(', ')}`);
+    }
+  });
+  
   // Set up net tooltip query handler
   input.setOnQueryNetAtPoint((worldX: number, worldY: number, clientX: number, clientY: number) => {
     if (isVSCodeWebview && vscode) {
       vscode.postMessage({ command: 'QueryNetAtPoint', x: worldX, y: worldY, clientX, clientY });
     } else {
       console.log(`[Dev] Query net at point: (${worldX}, ${worldY})`);
+    }
+  });
+  
+  // Set up "Show only Selected Net Layers" handler
+  input.setOnShowOnlySelectedNetLayers(() => {
+    // Use the full net highlight result if available (includes hidden layers),
+    // otherwise fall back to currently selected objects
+    const objectsToUse = lastNetHighlightAllObjects.length > 0 
+      ? lastNetHighlightAllObjects 
+      : selectedObjects;
+    
+    if (objectsToUse.length === 0) {
+      console.log('[ShowOnlyNetLayers] No objects selected');
+      return;
+    }
+    
+    // Get unique layer IDs from objects, excluding vias (obj_type 2) and PTH pads
+    // since they span all copper layers and would cause all copper layers to show
+    const selectedLayerIds = new Set<string>();
+    for (const obj of objectsToUse) {
+      // obj_type: 0=polyline, 1=polygon, 2=via, 3=pad
+      // Skip vias (type 2) - they span all copper layers
+      if (obj.obj_type === 2) continue;
+      // Skip PTH pads - check if layer_id contains multiple copper layers or is a drill layer
+      // PTH pads typically appear on multiple layers, we detect them by checking if it's a drill/PTH layer
+      if (obj.layer_id.includes('PTH') || obj.layer_id.includes('Drill')) continue;
+      selectedLayerIds.add(obj.layer_id);
+    }
+    
+    console.log(`[ShowOnlyNetLayers] Showing only layers: ${Array.from(selectedLayerIds).join(', ')}`);
+    
+    // If all objects were vias/PTH, don't change visibility
+    if (selectedLayerIds.size === 0) {
+      console.log('[ShowOnlyNetLayers] All selected objects are vias/PTH, not changing layer visibility');
+      return;
+    }
+    
+    // Hide all layers except the selected ones
+    for (const [layerId, _visible] of scene.layerVisible) {
+      const shouldBeVisible = selectedLayerIds.has(layerId);
+      scene.toggleLayerVisibility(layerId, shouldBeVisible);
+    }
+    
+    // Also update UI checkboxes
+    ui.updateLayerVisibility(selectedLayerIds);
+    
+    // Now update the selection to include all objects on the newly visible layers
+    const visibleObjects = objectsToUse.filter(obj => selectedLayerIds.has(obj.layer_id));
+    if (visibleObjects.length > 0) {
+      selectedObjects = visibleObjects;
+      scene.highlightMultipleObjects(visibleObjects);
+      console.log(`[ShowOnlyNetLayers] Updated selection to ${visibleObjects.length} objects on visible layers`);
     }
   });
   
@@ -531,12 +603,24 @@ async function init() {
           scene.highlightObject(visibleRanges[0]);
         }
         
+        // Clear stored net highlight results since this is a new selection
+        lastNetHighlightAllObjects = [];
+        
         // Update context menu state
         input.setHasSelection(true);
+        // Check if any selected object has a component_ref
+        const hasComponentRef = selectedObjects.some(obj => obj.component_ref);
+        input.setHasComponentSelection(hasComponentRef);
+        // Check if any selected object has a net_name (for "Show only net layers" option)
+        const hasNetName = selectedObjects.some(obj => obj.net_name && obj.net_name !== 'No Net');
+        input.setHasNetSelection(hasNetName);
       } else {
         selectedObjects = [];
+        lastNetHighlightAllObjects = [];
         scene.clearHighlightObject();
         input.setHasSelection(false);
+        input.setHasComponentSelection(false);
+        input.setHasNetSelection(false);
       }
     } else if (data.command === "highlightNetsResult" && data.objects) {
       const objects = data.objects as ObjectRange[];
@@ -544,7 +628,10 @@ async function init() {
       
       console.log(`[HighlightNets] Received ${objects.length} objects with nets: ${netNames.join(', ')}`);
       
-      // Filter out deleted objects and objects from invisible layers
+      // Store full result (including hidden layers) for "Show only net layers" feature
+      lastNetHighlightAllObjects = objects.filter(obj => !deletedObjectIds.has(obj.id));
+      
+      // Filter out deleted objects and objects from invisible layers for display
       const visibleObjects = objects.filter(obj => {
         const isDeleted = deletedObjectIds.has(obj.id);
         const isLayerVisible = scene.layerVisible.get(obj.layer_id) !== false;
@@ -556,6 +643,36 @@ async function init() {
         scene.highlightMultipleObjects(visibleObjects);
         console.log(`[HighlightNets] Highlighted ${visibleObjects.length} objects for nets: ${netNames.join(', ')}`);
         input.setHasSelection(true);
+        // Check if any selected object has a component_ref
+        const hasComponentRef = visibleObjects.some(obj => obj.component_ref);
+        input.setHasComponentSelection(hasComponentRef);
+        // Net highlight results always have nets, so enable "Show only net layers"
+        input.setHasNetSelection(true);
+      }
+    } else if (data.command === "highlightComponentsResult" && data.objects) {
+      const objects = data.objects as ObjectRange[];
+      const componentRefs = data.componentRefs as string[];
+      
+      console.log(`[HighlightComponents] Received ${objects.length} objects with components: ${componentRefs.join(', ')}`);
+      
+      // Filter out deleted objects and objects from invisible layers
+      const visibleObjects = objects.filter(obj => {
+        const isDeleted = deletedObjectIds.has(obj.id);
+        const isLayerVisible = scene.layerVisible.get(obj.layer_id) !== false;
+        return !isDeleted && isLayerVisible;
+      });
+      
+      if (visibleObjects.length > 0) {
+        selectedObjects = visibleObjects;
+        scene.highlightMultipleObjects(visibleObjects);
+        console.log(`[HighlightComponents] Highlighted ${visibleObjects.length} objects for components: ${componentRefs.join(', ')}`);
+        input.setHasSelection(true);
+        // Update component selection state
+        const hasComponentRef = visibleObjects.some(obj => obj.component_ref);
+        input.setHasComponentSelection(hasComponentRef);
+        // Check if any component object has a net_name
+        const hasNetName = visibleObjects.some(obj => obj.net_name && obj.net_name !== 'No Net');
+        input.setHasNetSelection(hasNetName);
       }
     } else if (data.command === "netAtPointResult") {
       // Show tooltip with net name at the cursor position
@@ -567,6 +684,19 @@ async function init() {
       if (netName && netName.trim() !== "") {
         input.showNetTooltip(netName, clientX, clientY);
       }
+    } else if (data.command === "deleteRelatedObjects" && data.objects) {
+      // Handle multi-object deletion (e.g., vias across layers)
+      const relatedObjects = data.objects as ObjectRange[];
+      console.log(`[Delete] Hiding ${relatedObjects.length} related objects (vias across layers)`);
+      
+      // Hide all the related objects and track them
+      for (const obj of relatedObjects) {
+        scene.hideObject(obj);
+        deletedObjectIds.add(obj.id);
+      }
+      
+      // Trigger a redraw to reflect visibility changes
+      scene.state.needsDraw = true;
     }
   });
   

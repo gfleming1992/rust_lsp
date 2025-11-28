@@ -516,4 +516,17 @@ export class UI {
 
     fpsEl.parentElement?.insertBefore(container, fpsEl.nextSibling);
   }
+
+  /**
+   * Update layer visibility checkboxes to match a set of visible layers.
+   * Used by "Show only Selected Net Layers" feature.
+   */
+  public updateLayerVisibility(visibleLayerIds: Set<string>) {
+    this.layersEl.querySelectorAll<HTMLInputElement>("input[data-layer-toggle]").forEach((checkbox) => {
+      const layerId = checkbox.dataset.layerToggle;
+      if (layerId) {
+        checkbox.checked = visibleLayerIds.has(layerId);
+      }
+    });
+  }
 }

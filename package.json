@@ -38,7 +38,9 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:rust && npm run build:extension && npm run build:webview",
-    "build:rust": "cargo build --release --bin lsp_server && npm run postbuild:rust",
+    "build:all": "npm run clean && npm run build:rust && npm run copy:rust && npm run build:extension && npm run build:webview",
+    "build:rust": "cargo build --release --bin lsp_server",
+    "copy:rust": "powershell -Command \"Copy-Item 'target/release/lsp_server.exe' 'bin/lsp_server.exe' -Force\"",
     "postbuild:rust": "if not exist bin mkdir bin && copy /Y target\\release\\lsp_server.exe bin\\lsp_server.exe",
     "build:extension": "tsc -p tsconfig.extension.json && if not exist dist\\assets mkdir dist\\assets && copy assets\\webview.html dist\\assets\\",
     "build:webview": "node build-webview.mjs",

@@ -79,8 +79,24 @@ export class Input {
     this.contextMenu.setOnHighlightNets(callback);
   }
 
+  public setOnHighlightComponents(callback: () => void) {
+    this.contextMenu.setOnHighlightComponents(callback);
+  }
+
+  public setOnShowOnlySelectedNetLayers(callback: () => void) {
+    this.contextMenu.setOnShowOnlySelectedNetLayers(callback);
+  }
+
   public setHasSelection(hasSelection: boolean) {
     this.contextMenu.setHasSelection(hasSelection);
+  }
+
+  public setHasComponentSelection(hasComponentSelection: boolean) {
+    this.contextMenu.setHasComponentSelection(hasComponentSelection);
+  }
+
+  public setHasNetSelection(hasNetSelection: boolean) {
+    this.contextMenu.setHasNetSelection(hasNetSelection);
   }
 
   public setOnQueryNetAtPoint(callback: (worldX: number, worldY: number, clientX: number, clientY: number) => void) {

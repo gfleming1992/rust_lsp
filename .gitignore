@@ -39,3 +39,6 @@ Thumbs.db
 
 #node modules
 /node_modules/
+bin/lsp_server.exe
+dist/extension.js.map
+dist/extension.js

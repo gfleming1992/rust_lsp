@@ -300,6 +300,7 @@ fn collect_padstacks_from_step(
                                             hole_diameter,
                                             shape: primitive.clone(),
                                             net_name: net_name.clone(),
+                                            component_ref: None, // Vias from padstacks don't have component refs
                                         };
                                         
                                         // Add to layer
@@ -590,7 +591,7 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
 
 /// Parse pad stack definitions and extract hole + outer diameter information
 /// Returns a map of pad stack name -> definition (hole dia + outer dia)
-fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
+pub fn parse_padstack_definitions(root: &XmlNode) -> IndexMap<String, PadStackDef> {
     let mut padstack_defs = IndexMap::new();
     
     // First, parse user primitive circles to get their diameters AND line widths
@@ -897,13 +898,19 @@ fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitiv
 fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<PadInstance> {
     let mut pads = Vec::new();
     
-    // Helper to recursively visit all nodes, tracking net context from Set nodes
-    fn visit_nodes(node: &XmlNode, pads: &mut Vec<PadInstance>, padstack_defs: &IndexMap<String, PadStackDef>, current_net: Option<&str>) {
-        // Check if this is a Set with a net attribute
+    // Helper to recursively visit all nodes, tracking net and component context from Set nodes
+    fn visit_nodes(node: &XmlNode, pads: &mut Vec<PadInstance>, padstack_defs: &IndexMap<String, PadStackDef>, current_net: Option<&str>, current_component: Option<&str>) {
+        // Check if this is a Set with a net attribute or componentRef
         let net_context = if node.name == "Set" {
             node.attributes.get("net").map(|s| s.as_str()).or(current_net)
         } else {
             current_net
+        };
+        
+        let component_context = if node.name == "Set" {
+            node.attributes.get("componentRef").map(|s| s.as_str()).or(current_component)
+        } else {
+            current_component
         };
         
         if node.name == "Pad" {
@@ -928,6 +935,7 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
             let mut y = 0.0;
             let mut rotation = 0.0;
             let mut shape_id = String::new();
+            let mut component_ref = component_context.map(|s| s.to_string());
             
             for child in &node.children {
                 match child.name.as_str() {
@@ -949,6 +957,12 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                             .map(|s| s.clone())
                             .unwrap_or_default();
                     }
+                    "PinRef" => {
+                        // Get componentRef from PinRef child element
+                        if let Some(comp_ref) = child.attributes.get("componentRef") {
+                            component_ref = Some(comp_ref.clone());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -960,17 +974,18 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                     y,
                     rotation,
                     net_name: net_context.map(|s| s.to_string()),
+                    component_ref,
                 });
             }
         }
         
-        // Recursively visit children with net context
+        // Recursively visit children with net and component context
         for child in &node.children {
-            visit_nodes(child, pads, padstack_defs, net_context);
+            visit_nodes(child, pads, padstack_defs, net_context, component_context);
         }
     }
     
-    visit_nodes(layer_node, &mut pads, padstack_defs, None);
+    visit_nodes(layer_node, &mut pads, padstack_defs, None, None);
     pads
 }
 
@@ -979,63 +994,43 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
 fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<ViaInstance> {
     let mut vias = Vec::new();
     
-    // Helper to recursively visit all nodes, tracking net context from Set nodes
-    fn visit_nodes(node: &XmlNode, vias: &mut Vec<ViaInstance>, padstack_defs: &IndexMap<String, PadStackDef>, parent_is_via_set: bool, current_net: Option<&str>) {
+    // Helper to recursively visit all nodes, tracking net and component context from Set nodes
+    // Collect both explicit vias (in Set padUsage="VIA") and PTH pads (pads with holes)
+    // Both types span multiple layers and should be treated the same for deletion
+    fn visit_nodes(node: &XmlNode, vias: &mut Vec<ViaInstance>, padstack_defs: &IndexMap<String, PadStackDef>, parent_is_via_set: bool, current_net: Option<&str>, current_component: Option<&str>) {
         // Check if this is a Set with padUsage="VIA"
         let is_via_set = node.name == "Set" && node.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
         
-        // Check if this Set has a net attribute
+        // Check if this Set has a net attribute or componentRef
         let net_context = if node.name == "Set" {
             node.attributes.get("net").map(|s| s.as_str()).or(current_net)
         } else {
             current_net
         };
         
+        let component_context = if node.name == "Set" {
+            node.attributes.get("componentRef").map(|s| s.as_str()).or(current_component)
+        } else {
+            current_component
+        };
+        
         if node.name == "Pad" {
-            // Collect if in a via Set
-            if parent_is_via_set {
-                let mut x = 0.0;
-                let mut y = 0.0;
-                let mut padstack_ref = String::new();
-                
-                // Get padstackDefRef from Pad attributes
-                if let Some(ref_name) = node.attributes.get("padstackDefRef") {
-                    padstack_ref = ref_name.clone();
-                }
-                
-                for child in &node.children {
-                    if child.name == "Location" {
-                        x = child.attributes.get("x")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0);
-                        y = child.attributes.get("y")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0);
-                    }
-                }
-                
-                // Look up padstack definition to get diameters and shape
-                if let Some(def) = padstack_defs.get(&padstack_ref) {
-                    vias.push(ViaInstance {
-                        x,
-                        y,
-                        diameter: def.outer_diameter,
-                        hole_diameter: def.hole_diameter,
-                        shape: def.shape.clone(),
-                        net_name: net_context.map(|s| s.to_string()),
-                    });
-                }
-            } else if node.attributes.contains_key("padstackDefRef") {
-                // Check if this padstack has an actual hole (PTH vs SMD)
-                if let Some(ref_name) = node.attributes.get("padstackDefRef") {
-                    if let Some(def) = padstack_defs.get(ref_name) {
-                        // Only collect if there's a significant hole (> 0.01mm to filter SMD pads)
-                        if def.hole_diameter > 0.01 {
-                            let mut x = 0.0;
-                            let mut y = 0.0;
-                            
-                            for child in &node.children {
-                                if child.name == "Location" {
+            // Collect pads that are either:
+            // 1. Inside a Set with padUsage="VIA" (explicit vias)
+            // 2. Have a padstack with a hole > 0.01mm (PTH pads - also span multiple layers)
+            let in_via_set = parent_is_via_set || is_via_set;
+            
+            if let Some(ref_name) = node.attributes.get("padstackDefRef") {
+                if let Some(def) = padstack_defs.get(ref_name) {
+                    // Collect if in via set OR has a significant hole (PTH pad)
+                    if in_via_set || def.hole_diameter > 0.01 {
+                        let mut x = 0.0;
+                        let mut y = 0.0;
+                        let mut component_ref = component_context.map(|s| s.to_string());
+                        
+                        for child in &node.children {
+                            match child.name.as_str() {
+                                "Location" => {
                                     x = child.attributes.get("x")
                                         .and_then(|v| v.parse().ok())
                                         .unwrap_or(0.0);
@@ -1043,29 +1038,37 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                                         .and_then(|v| v.parse().ok())
                                         .unwrap_or(0.0);
                                 }
+                                "PinRef" => {
+                                    // Get componentRef from PinRef child element
+                                    if let Some(comp_ref) = child.attributes.get("componentRef") {
+                                        component_ref = Some(comp_ref.clone());
+                                    }
+                                }
+                                _ => {}
                             }
-                            
-                            vias.push(ViaInstance {
-                                x,
-                                y,
-                                diameter: def.outer_diameter,
-                                hole_diameter: def.hole_diameter,
-                                shape: def.shape.clone(),
-                                net_name: net_context.map(|s| s.to_string()),
-                            });
                         }
+                        
+                        vias.push(ViaInstance {
+                            x,
+                            y,
+                            diameter: def.outer_diameter,
+                            hole_diameter: def.hole_diameter,
+                            shape: def.shape.clone(),
+                            net_name: net_context.map(|s| s.to_string()),
+                            component_ref,
+                        });
                     }
                 }
             }
         }
         
-        // Recursively visit children, passing down via_set status and net context
+        // Recursively visit children, passing down via_set status and net/component context
         for child in &node.children {
-            visit_nodes(child, vias, padstack_defs, is_via_set || parent_is_via_set, net_context);
+            visit_nodes(child, vias, padstack_defs, is_via_set || parent_is_via_set, net_context, component_context);
         }
     }
     
-    visit_nodes(layer_node, &mut vias, padstack_defs, false, None);
+    visit_nodes(layer_node, &mut vias, padstack_defs, false, None, None);
     vias
 }
 

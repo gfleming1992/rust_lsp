@@ -4,7 +4,11 @@
 export class ContextMenu {
   private container: HTMLDivElement;
   private onHighlightNets: (() => void) | null = null;
+  private onHighlightComponents: (() => void) | null = null;
+  private onShowOnlySelectedNetLayers: (() => void) | null = null;
   private hasSelection: boolean = false;
+  private hasComponentSelection: boolean = false;
+  private hasNetSelection: boolean = false;
 
   constructor() {
     this.container = document.createElement('div');
@@ -47,8 +51,24 @@ export class ContextMenu {
     this.onHighlightNets = callback;
   }
 
+  public setOnHighlightComponents(callback: () => void) {
+    this.onHighlightComponents = callback;
+  }
+
+  public setOnShowOnlySelectedNetLayers(callback: () => void) {
+    this.onShowOnlySelectedNetLayers = callback;
+  }
+
   public setHasSelection(hasSelection: boolean) {
     this.hasSelection = hasSelection;
+  }
+
+  public setHasComponentSelection(hasComponentSelection: boolean) {
+    this.hasComponentSelection = hasComponentSelection;
+  }
+
+  public setHasNetSelection(hasNetSelection: boolean) {
+    this.hasNetSelection = hasNetSelection;
   }
 
   private createMenuItem(label: string, enabled: boolean, onClick: () => void): HTMLDivElement {
@@ -103,6 +123,31 @@ export class ContextMenu {
       }
     );
     this.container.appendChild(highlightNetsItem);
+    
+    const highlightComponentsItem = this.createMenuItem(
+      'Highlight Selected Component(s)', 
+      this.hasComponentSelection && this.onHighlightComponents !== null, 
+      () => {
+        if (this.onHighlightComponents) {
+          this.onHighlightComponents();
+        }
+      }
+    );
+    this.container.appendChild(highlightComponentsItem);
+    
+    // Add separator before layer visibility options
+    this.container.appendChild(this.createSeparator());
+    
+    const showOnlyNetLayersItem = this.createMenuItem(
+      'Show only Selected Net Layers', 
+      this.hasNetSelection && this.onShowOnlySelectedNetLayers !== null, 
+      () => {
+        if (this.onShowOnlySelectedNetLayers) {
+          this.onShowOnlySelectedNetLayers();
+        }
+      }
+    );
+    this.container.appendChild(showOnlyNetLayersItem);
     
     // Position the menu
     this.container.style.display = 'block';

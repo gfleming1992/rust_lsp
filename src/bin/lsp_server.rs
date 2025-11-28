@@ -1,12 +1,32 @@
-use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange};
+use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange, PadStackDef};
 use rust_extension::parse_xml::{parse_xml_file, XmlNode};
-use rust_extension::draw::parsing::extract_and_generate_layers;
+use rust_extension::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
 use rust_extension::serialize_xml::xml_node_to_file;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use rstar::RTree;
+use indexmap::IndexMap;
+
+/// Helper to log to file for debugging
+fn log_to_file(msg: &str) {
+    // Use absolute path since LSP server may run from different working directory
+    let log_path = if cfg!(windows) {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs").join("lsp_debug.txt")
+    } else {
+        std::path::PathBuf::from("logs/lsp_debug.txt")
+    };
+    
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{}", msg);
+    }
+}
 
 /// Maximum number of undo/redo events to track
 
@@ -51,6 +71,7 @@ struct ServerState {
     layers: Vec<LayerJSON>,
     layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA
     spatial_index: Option<RTree<SelectableObject>>,
+    padstack_defs: IndexMap<String, PadStackDef>, // Padstack definitions for PTH detection
     // Undo/Redo stacks for deleted objects
     deleted_objects: HashMap<u64, ObjectRange>, // Currently deleted objects (id -> ObjectRange)
     // Hidden layers (layer visibility)
@@ -65,6 +86,7 @@ impl ServerState {
             layers: Vec::new(),
             layer_colors: HashMap::new(),
             spatial_index: None,
+            padstack_defs: IndexMap::new(),
             deleted_objects: HashMap::new(),
             hidden_layers: std::collections::HashSet::new(),
         }
@@ -98,8 +120,6 @@ fn main() {
             }
         };
 
-        eprintln!("[LSP Server] Received method: {}", request.method);
-
         let response_json = match request.method.as_str() {
             "Load" => serde_json::to_string(&handle_load(&mut state, request.id, request.params)).unwrap(),
             "GetLayers" => serde_json::to_string(&handle_get_layers(&state, request.id)).unwrap(),
@@ -114,6 +134,7 @@ fn main() {
             "Undo" => serde_json::to_string(&handle_undo(&mut state, request.id, request.params)).unwrap(),
             "Redo" => serde_json::to_string(&handle_redo(&mut state, request.id, request.params)).unwrap(),
             "HighlightSelectedNets" => serde_json::to_string(&handle_highlight_selected_nets(&state, request.id, request.params)).unwrap(),
+            "HighlightSelectedComponents" => serde_json::to_string(&handle_highlight_selected_components(&state, request.id, request.params)).unwrap(),
             "QueryNetAtPoint" => serde_json::to_string(&handle_query_net_at_point(&state, request.id, request.params)).unwrap(),
             _ => {
                 let response = Response {
@@ -193,6 +214,14 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     };
     eprintln!("[LSP Server] Layer Generation (Tessellation) time: {:.2?}", start_gen.elapsed());
     
+    // Debug: Count objects with net_name and component_ref
+    let objects_with_net = object_ranges.iter().filter(|o| o.net_name.is_some()).count();
+    let objects_with_component = object_ranges.iter().filter(|o| o.component_ref.is_some()).count();
+    let pads = object_ranges.iter().filter(|o| o.obj_type == 3).count();
+    let vias = object_ranges.iter().filter(|o| o.obj_type == 2).count();
+    eprintln!("[LSP Server] Object stats: {} total, {} pads, {} vias, {} with net, {} with component",
+        object_ranges.len(), pads, vias, objects_with_net, objects_with_component);
+    
     // Build spatial index
     let start_index = Instant::now();
     let selectable_objects: Vec<SelectableObject> = object_ranges.into_iter()
@@ -200,6 +229,10 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
         .collect();
     let spatial_index = RTree::bulk_load(selectable_objects);
     eprintln!("[LSP Server] Spatial Index build time: {:.2?}", start_index.elapsed());
+    
+    // Parse padstack definitions for PTH pad detection during save
+    let padstack_defs = parse_padstack_definitions(&root);
+    eprintln!("[LSP Server] Parsed {} padstack definitions", padstack_defs.len());
     
     eprintln!("[LSP Server] Total Load time: {:.2?}", start_total.elapsed());
 
@@ -226,6 +259,7 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     state.layers = layers;
     state.layer_colors = layer_colors;
     state.spatial_index = Some(spatial_index);
+    state.padstack_defs = padstack_defs;
 
     eprintln!("[LSP Server] File loaded successfully");
 
@@ -613,7 +647,7 @@ fn handle_save(
     
     // Remove deleted objects from XML
     if !state.deleted_objects.is_empty() {
-        let removed_count = remove_deleted_objects_from_xml(&mut root_clone, &state.deleted_objects, &state.layers);
+        let removed_count = remove_deleted_objects_from_xml(&mut root_clone, &state.deleted_objects, &state.layers, &state.padstack_defs);
         eprintln!("[LSP Server] Removed {} objects from XML", removed_count);
     }
 
@@ -719,6 +753,7 @@ fn remove_deleted_objects_from_xml(
     root: &mut XmlNode,
     deleted_objects: &HashMap<u64, ObjectRange>,
     _layers: &[LayerJSON],
+    padstack_defs: &IndexMap<String, PadStackDef>,
 ) -> usize {
     // Build a map of layer_id -> set of deleted object indices by type
     // ID format: (layer_index << 40) | (obj_type << 36) | object_index
@@ -727,6 +762,8 @@ fn remove_deleted_objects_from_xml(
     for (id, range) in deleted_objects {
         let obj_index = (*id & 0xFFFFFFFFF) as usize; // Lower 36 bits
         let obj_type = range.obj_type;
+        
+        eprintln!("[XML Remove] Marking for deletion: layer={}, obj_type={}, index={}", range.layer_id, obj_type, obj_index);
         
         deleted_by_layer
             .entry(range.layer_id.clone())
@@ -740,12 +777,15 @@ fn remove_deleted_objects_from_xml(
     
     // Now traverse the XML and remove matching elements
     // We need to find LayerFeature nodes and track object indices
+    // Also track if we're inside a Set with padUsage="VIA"
     fn process_node(
         node: &mut XmlNode,
         deleted_by_layer: &HashMap<String, HashMap<u8, std::collections::HashSet<usize>>>,
         current_layer: Option<&str>,
+        in_via_set: bool,  // Track if we're inside a Set with padUsage="VIA"
         counters: &mut HashMap<String, HashMap<u8, usize>>, // layer -> type -> count
         removed: &mut usize,
+        padstack_defs: &IndexMap<String, PadStackDef>,
     ) {
         // Check if this is a LayerFeature - updates current layer context
         let layer_ref = if node.name == "LayerFeature" {
@@ -754,31 +794,53 @@ fn remove_deleted_objects_from_xml(
             current_layer
         };
         
-        // Check if this node should be removed
-        let should_remove = |child: &XmlNode, layer: Option<&str>, counters: &mut HashMap<String, HashMap<u8, usize>>| -> bool {
+        // Check if this node is or contains a Set with padUsage="VIA"
+        let is_via_set = node.name == "Set" && 
+            node.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+        let child_in_via_set = in_via_set || is_via_set;
+        
+        // Check if this node should be removed and get its object type
+        let check_should_remove = |child: &XmlNode, layer: Option<&str>, parent_in_via_set: bool, counters: &mut HashMap<String, HashMap<u8, usize>>, padstack_defs: &IndexMap<String, PadStackDef>| -> Option<bool> {
             let layer_id = match layer {
                 Some(l) => l,
-                None => return false,
+                None => return None,
             };
             
-            let deleted_for_layer = match deleted_by_layer.get(layer_id) {
-                Some(d) => d,
-                None => return false,
-            };
-            
-            // Determine object type and check if this index is deleted
+            // Determine object type - returns None if not a tracked element
             let obj_type = match child.name.as_str() {
-                "Polyline" | "Line" => 0u8,
-                "Polygon" => 1u8,
+                "Polyline" | "Line" => Some(0u8),
+                "Polygon" => Some(1u8),
                 "Pad" => {
-                    // Check if it's a via (padUsage="VIA") or regular pad
-                    if child.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA") {
-                        2u8 // Via
+                    // Check if it's a via (obj_type 2):
+                    // 1. Has padUsage="VIA" directly on the Pad
+                    // 2. Is inside a Set with padUsage="VIA"
+                    // 3. Has a padstack with a hole > 0.01mm (PTH pad - treated same as via)
+                    let has_via_attr = child.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+                    let in_via_set = parent_in_via_set;
+                    
+                    // Check if this is a PTH pad (has hole in padstack)
+                    let is_pth = if let Some(padstack_ref) = child.attributes.get("padstackDefRef") {
+                        if let Some(def) = padstack_defs.get(padstack_ref) {
+                            def.hole_diameter > 0.01
+                        } else {
+                            false
+                        }
                     } else {
-                        3u8 // Pad
+                        false
+                    };
+                    
+                    if has_via_attr || in_via_set || is_pth {
+                        Some(2u8) // Via / PTH pad
+                    } else {
+                        Some(3u8) // SMD Pad
                     }
                 }
-                _ => return false,
+                _ => None,
+            };
+            
+            let obj_type = match obj_type {
+                Some(t) => t,
+                None => return None,
             };
             
             // Get current count for this type in this layer
@@ -792,13 +854,17 @@ fn remove_deleted_objects_from_xml(
             *count += 1;
             
             // Check if this index is in the deleted set
-            if let Some(deleted_indices) = deleted_for_layer.get(&obj_type) {
-                if deleted_indices.contains(&current_idx) {
-                    return true;
+            let deleted_for_layer = deleted_by_layer.get(layer_id);
+            if let Some(deleted_for_layer) = deleted_for_layer {
+                if let Some(deleted_indices) = deleted_for_layer.get(&obj_type) {
+                    if deleted_indices.contains(&current_idx) {
+                        eprintln!("[XML Remove] Removing {} at index {} from layer {}", child.name, current_idx, layer_id);
+                        return Some(true);
+                    }
                 }
             }
             
-            false
+            Some(false)
         };
         
         // Process children - need to remove some and recurse into others
@@ -806,22 +872,26 @@ fn remove_deleted_objects_from_xml(
         while i < node.children.len() {
             let child = &node.children[i];
             
-            if should_remove(child, layer_ref, counters) {
-                node.children.remove(i);
-                *removed += 1;
-                // Don't increment i, the next element is now at position i
-            } else {
-                // Recurse into this child
-                let child_mut = &mut node.children[i];
-                process_node(child_mut, deleted_by_layer, layer_ref, counters, removed);
-                i += 1;
+            match check_should_remove(child, layer_ref, child_in_via_set, counters, padstack_defs) {
+                Some(true) => {
+                    node.children.remove(i);
+                    *removed += 1;
+                    // Don't increment i, the next element is now at position i
+                }
+                _ => {
+                    // Recurse into this child
+                    let child_mut = &mut node.children[i];
+                    process_node(child_mut, deleted_by_layer, layer_ref, child_in_via_set, counters, removed, padstack_defs);
+                    i += 1;
+                }
             }
         }
     }
     
     let mut counters: HashMap<String, HashMap<u8, usize>> = HashMap::new();
-    process_node(root, &deleted_by_layer, None, &mut counters, &mut total_removed);
+    process_node(root, &deleted_by_layer, None, false, &mut counters, &mut total_removed, padstack_defs);
     
+    eprintln!("[XML Remove] Total removed: {}", total_removed);
     total_removed
 }
 
@@ -986,10 +1056,32 @@ fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Opt
         let candidates: Vec<&SelectableObject> = tree.locate_all_at_point(&point).collect();
         
         // Fine phase: filter using actual geometry
-        let results: Vec<ObjectRange> = candidates.iter()
+        let mut results: Vec<ObjectRange> = candidates.iter()
             .filter(|obj| point_hits_object(params.x, params.y, &obj.range, &state.layers))
             .map(|obj| obj.range.clone())
             .collect();
+        
+        // Sort by priority: 
+        // 1. Objects with net_name come before those without
+        // 2. Within that, pads (3) and vias (2) come first
+        // This ensures we select the copper layer pad (with net) over paste/mask pads (no net)
+        results.sort_by(|a, b| {
+            // First priority: has net_name vs doesn't
+            let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
+            let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
+            if net_cmp != std::cmp::Ordering::Equal {
+                return net_cmp;
+            }
+            
+            // Second priority: pad=3 > via=2 > polygon=1 > polyline=0
+            let type_priority = |t: u8| match t {
+                3 => 0, // Pad - highest priority
+                2 => 1, // Via
+                1 => 2, // Polygon
+                _ => 3, // Polyline and others
+            };
+            type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
+        });
             
         Response {
             id,
@@ -1042,9 +1134,30 @@ fn handle_box_select(state: &ServerState, id: Option<serde_json::Value>, params:
         );
         
         // Find all objects that intersect with the selection box
-        let results: Vec<ObjectRange> = tree.locate_in_envelope_intersecting(&envelope)
+        let mut results: Vec<ObjectRange> = tree.locate_in_envelope_intersecting(&envelope)
             .map(|obj| obj.range.clone())
             .collect();
+        
+        // Sort by priority: 
+        // 1. Objects with net_name come before those without
+        // 2. Within that, pads (3) and vias (2) come first
+        results.sort_by(|a, b| {
+            // First priority: has net_name vs doesn't
+            let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
+            let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
+            if net_cmp != std::cmp::Ordering::Equal {
+                return net_cmp;
+            }
+            
+            // Second priority: pad=3 > via=2 > polygon=1 > polyline=0
+            let type_priority = |t: u8| match t {
+                3 => 0, // Pad - highest priority
+                2 => 1, // Via
+                1 => 2, // Polygon
+                _ => 3, // Polyline and others
+            };
+            type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
+        });
         
         eprintln!("[LSP Server] BoxSelect found {} objects", results.len());
             
@@ -1063,6 +1176,7 @@ fn handle_box_select(state: &ServerState, id: Option<serde_json::Value>, params:
 }
 
 /// Handle Delete request - marks an object as deleted
+/// For vias (obj_type=2), this also deletes all vias at the same location across all layers
 fn handle_delete(state: &mut ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
     let range: ObjectRange = match params.and_then(|p| {
         // The webview sends { object: ObjectRange }
@@ -1085,12 +1199,53 @@ fn handle_delete(state: &mut ServerState, id: Option<serde_json::Value>, params:
         }
     };
 
-    eprintln!("[LSP Server] Delete object id={}", range.id);
+    let mut related_objects: Vec<ObjectRange> = Vec::new();
+    
+    // For vias, find and delete all vias at the same location across all layers
+    if range.obj_type == 2 {
+        // Get the center position of this via from its bounds
+        let via_x = (range.bounds[0] + range.bounds[2]) / 2.0;
+        let via_y = (range.bounds[1] + range.bounds[3]) / 2.0;
+        let tolerance = 0.1; // Tolerance for floating point comparison (was 0.01, might be too tight)
+        
+        if let Some(tree) = &state.spatial_index {
+            // Find all objects at this exact point
+            for obj in tree.iter() {
+                // Only match other vias
+                if obj.range.obj_type != 2 { continue; }
+                
+                // Skip the original (will be added separately)
+                if obj.range.id == range.id { continue; }
+                // Skip already deleted
+                if state.deleted_objects.contains_key(&obj.range.id) { continue; }
+                
+                // Check if this via is at the same location
+                let other_x = (obj.range.bounds[0] + obj.range.bounds[2]) / 2.0;
+                let other_y = (obj.range.bounds[1] + obj.range.bounds[3]) / 2.0;
+                
+                let dx = (via_x - other_x).abs();
+                let dy = (via_y - other_y).abs();
+                
+                if dx < tolerance && dy < tolerance {
+                    related_objects.push(obj.range.clone());
+                    state.deleted_objects.insert(obj.range.id, obj.range.clone());
+                }
+            }
+        }
+        
+        eprintln!("[LSP Server] Delete via at ({:.2}, {:.2}): 1 + {} related vias across layers", via_x, via_y, related_objects.len());
+    } else {
+        eprintln!("[LSP Server] Delete object id={}", range.id);
+    }
+    
     state.deleted_objects.insert(range.id, range);
 
     Response {
         id,
-        result: Some(serde_json::json!({ "status": "ok" })),
+        result: Some(serde_json::json!({ 
+            "status": "ok",
+            "related_objects": related_objects
+        })),
         error: None,
     }
 }
@@ -1176,23 +1331,116 @@ fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Va
     };
 
     eprintln!("[LSP Server] HighlightSelectedNets: {} object IDs provided", params.object_ids.len());
+    log_to_file(&format!("HighlightSelectedNets: {} object IDs provided: {:?}", params.object_ids.len(), params.object_ids));
 
     if let Some(tree) = &state.spatial_index {
         // First, collect the net names from the selected objects
         let mut net_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         
+        // Also collect bounds and IDs of selected objects that don't have nets, so we can search for overlapping objects
+        // We keep the IDs so we can include the original selection in the highlight result
+        let mut no_net_objects: Vec<(u64, [f32; 4])> = Vec::new();
+        
         for obj in tree.iter() {
             if params.object_ids.contains(&obj.range.id) {
+                log_to_file(&format!("  Selected object id={}, type={}, net={:?}, component={:?}", 
+                    obj.range.id, obj.range.obj_type, obj.range.net_name, obj.range.component_ref));
                 if let Some(ref net_name) = obj.range.net_name {
                     // Skip "No Net" or empty net names
                     if !net_name.is_empty() && net_name != "No Net" {
                         net_names.insert(net_name.clone());
+                    } else {
+                        // Object has empty/no net - save its id and bounds for searching
+                        no_net_objects.push((obj.range.id, obj.range.bounds));
+                    }
+                } else {
+                    // Object has no net - save its id and bounds for searching
+                    no_net_objects.push((obj.range.id, obj.range.bounds));
+                }
+            }
+        }
+        
+        // Track IDs of originally selected objects that should be included in highlight
+        // (even though they don't have nets themselves)
+        let mut include_original_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        
+        // For objects without nets, search for overlapping objects that DO have nets
+        // This handles the case where user clicks on a paste/mask pad but expects copper behavior
+        // We match by bounds - the F.Cu pad should have the same bounds as the F.Paste/F.Mask pad
+        if !no_net_objects.is_empty() && net_names.is_empty() {
+            log_to_file(&format!("  No nets found in selection, searching {} bounds for matching objects with nets", no_net_objects.len()));
+            
+            // Tolerance for matching bounds (objects at same location with same size)
+            let tolerance = 0.01; // Small tolerance for floating point comparison
+            
+            for (orig_id, bounds) in &no_net_objects {
+                // Find the center of the object
+                let center_x = (bounds[0] + bounds[2]) / 2.0;
+                let center_y = (bounds[1] + bounds[3]) / 2.0;
+                let point = [center_x, center_y];
+                
+                let obj_width = bounds[2] - bounds[0];
+                let obj_height = bounds[3] - bounds[1];
+                
+                log_to_file(&format!("    Searching at ({:.3}, {:.3}) for bounds matching [{:.3}, {:.3}, {:.3}, {:.3}] (size: {:.3} x {:.3})", 
+                    center_x, center_y, bounds[0], bounds[1], bounds[2], bounds[3], obj_width, obj_height));
+                
+                // Search for objects at this point that have a net AND matching bounds
+                for obj in tree.locate_all_at_point(&point) {
+                    if let Some(ref net_name) = obj.range.net_name {
+                        if !net_name.is_empty() && net_name != "No Net" {
+                            // Check if bounds match (same shape on different layer)
+                            let other_bounds = obj.range.bounds;
+                            let other_width = other_bounds[2] - other_bounds[0];
+                            let other_height = other_bounds[3] - other_bounds[1];
+                            
+                            // Check if widths and heights match within tolerance
+                            let width_match = (obj_width - other_width).abs() < tolerance;
+                            let height_match = (obj_height - other_height).abs() < tolerance;
+                            // Also check position matches
+                            let x_match = (bounds[0] - other_bounds[0]).abs() < tolerance && (bounds[2] - other_bounds[2]).abs() < tolerance;
+                            let y_match = (bounds[1] - other_bounds[1]).abs() < tolerance && (bounds[3] - other_bounds[3]).abs() < tolerance;
+                            
+                            if width_match && height_match && x_match && y_match {
+                                log_to_file(&format!("      MATCH: id={}, type={}, net={}, bounds=[{:.3}, {:.3}, {:.3}, {:.3}]", 
+                                    obj.range.id, obj.range.obj_type, net_name, 
+                                    other_bounds[0], other_bounds[1], other_bounds[2], other_bounds[3]));
+                                net_names.insert(net_name.clone());
+                                // Include the original no-net object in the highlight result
+                                include_original_ids.insert(*orig_id);
+                            } else {
+                                log_to_file(&format!("      SKIP (bounds mismatch): id={}, type={}, net={}, bounds=[{:.3}, {:.3}, {:.3}, {:.3}]", 
+                                    obj.range.id, obj.range.obj_type, net_name,
+                                    other_bounds[0], other_bounds[1], other_bounds[2], other_bounds[3]));
+                            }
+                        }
                     }
                 }
             }
         }
         
-        eprintln!("[LSP Server] Found {} unique net names: {:?}", net_names.len(), net_names);
+        log_to_file(&format!("Found {} unique net names: {:?}", net_names.len(), net_names));
+        
+        // Debug: show breakdown of all objects with each net name
+        for net_name in &net_names {
+            let mut pads = 0;
+            let mut vias = 0;
+            let mut polygons = 0;
+            let mut polylines = 0;
+            for obj in tree.iter() {
+                if obj.range.net_name.as_ref() == Some(net_name) {
+                    match obj.range.obj_type {
+                        0 => polylines += 1,
+                        1 => polygons += 1,
+                        2 => vias += 1,
+                        3 => pads += 1,
+                        _ => {}
+                    }
+                }
+            }
+            log_to_file(&format!("  Net '{}': {} pads, {} vias, {} polygons, {} polylines", 
+                net_name, pads, vias, polygons, polylines));
+        }
         
         if net_names.is_empty() {
             return Response {
@@ -1205,19 +1453,28 @@ fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Va
             };
         }
         
-        // Now find all objects with matching net names
+        // Now find all objects with matching net names OR that are in the original selection set
         let matching_objects: Vec<ObjectRange> = tree.iter()
             .filter(|obj| {
+                // Include if it has a matching net name
                 if let Some(ref net_name) = obj.range.net_name {
-                    net_names.contains(net_name)
-                } else {
-                    false
+                    if net_names.contains(net_name) {
+                        return true;
+                    }
                 }
+                // Also include original selected objects that triggered the fallback search
+                include_original_ids.contains(&obj.range.id)
             })
             .map(|obj| obj.range.clone())
             .collect();
         
-        eprintln!("[LSP Server] Found {} objects with matching nets", matching_objects.len());
+        // Debug: count by type
+        let pads = matching_objects.iter().filter(|o| o.obj_type == 3).count();
+        let vias = matching_objects.iter().filter(|o| o.obj_type == 2).count();
+        let polygons = matching_objects.iter().filter(|o| o.obj_type == 1).count();
+        let polylines = matching_objects.iter().filter(|o| o.obj_type == 0).count();
+        log_to_file(&format!("Found {} objects with matching nets (including {} original selections): {} pads, {} vias, {} polygons, {} polylines", 
+            matching_objects.len(), include_original_ids.len(), pads, vias, polygons, polylines));
         
         let net_names_vec: Vec<String> = net_names.into_iter().collect();
         
@@ -1234,6 +1491,95 @@ fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Va
             id,
             result: Some(serde_json::json!({
                 "net_names": [],
+                "objects": []
+            })),
+            error: None,
+        }
+    }
+}
+
+/// Handle HighlightSelectedComponents request - finds all shapes with the same component refs as the selected shapes
+fn handle_highlight_selected_components(state: &ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    #[derive(Deserialize)]
+    struct HighlightComponentsParams {
+        object_ids: Vec<u64>,
+    }
+
+    let params: HighlightComponentsParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {object_ids: number[]}".to_string(),
+                }),
+            };
+        }
+    };
+
+    eprintln!("[LSP Server] HighlightSelectedComponents: {} object IDs provided", params.object_ids.len());
+
+    if let Some(tree) = &state.spatial_index {
+        // First, collect the component refs from the selected objects
+        let mut component_refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        
+        for obj in tree.iter() {
+            if params.object_ids.contains(&obj.range.id) {
+                eprintln!("[LSP Server] Selected object id={}, type={}, net={:?}, component={:?}", 
+                    obj.range.id, obj.range.obj_type, obj.range.net_name, obj.range.component_ref);
+                if let Some(ref comp_ref) = obj.range.component_ref {
+                    // Skip empty component refs
+                    if !comp_ref.is_empty() {
+                        component_refs.insert(comp_ref.clone());
+                    }
+                }
+            }
+        }
+        
+        eprintln!("[LSP Server] Found {} unique component refs: {:?}", component_refs.len(), component_refs);
+        
+        if component_refs.is_empty() {
+            return Response {
+                id,
+                result: Some(serde_json::json!({
+                    "component_refs": [],
+                    "objects": []
+                })),
+                error: None,
+            };
+        }
+        
+        // Now find all objects with matching component refs
+        let matching_objects: Vec<ObjectRange> = tree.iter()
+            .filter(|obj| {
+                if let Some(ref comp_ref) = obj.range.component_ref {
+                    component_refs.contains(comp_ref)
+                } else {
+                    false
+                }
+            })
+            .map(|obj| obj.range.clone())
+            .collect();
+        
+        eprintln!("[LSP Server] Found {} objects with matching components", matching_objects.len());
+        
+        let component_refs_vec: Vec<String> = component_refs.into_iter().collect();
+        
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "component_refs": component_refs_vec,
+                "objects": matching_objects
+            })),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "component_refs": [],
                 "objects": []
             })),
             error: None,
@@ -1271,23 +1617,40 @@ fn handle_query_net_at_point(
         // Query R-tree for objects at this point
         let point = [params.x as f32, params.y as f32];
         
-        // Find all objects at this point, filter by precise geometry, return first with net name
-        for obj in tree.locate_all_at_point(&point) {
-            // Skip deleted objects
-            if state.deleted_objects.contains_key(&obj.range.id) {
-                continue;
-            }
-            
-            // Skip objects on hidden layers
-            if state.hidden_layers.contains(&obj.range.layer_id) {
-                continue;
-            }
-            
-            // Skip if point doesn't actually hit the object's geometry
-            if !point_hits_object(params.x as f32, params.y as f32, &obj.range, &state.layers) {
-                continue;
-            }
-            
+        // Collect all candidates at this point
+        let mut candidates: Vec<&SelectableObject> = tree.locate_all_at_point(&point)
+            .filter(|obj| {
+                // Skip deleted objects
+                if state.deleted_objects.contains_key(&obj.range.id) {
+                    return false;
+                }
+                // Skip objects on hidden layers
+                if state.hidden_layers.contains(&obj.range.layer_id) {
+                    return false;
+                }
+                // Skip if point doesn't actually hit the object's geometry
+                if !point_hits_object(params.x as f32, params.y as f32, &obj.range, &state.layers) {
+                    return false;
+                }
+                true
+            })
+            .collect();
+        
+        // Sort by priority: pads (3) and vias (2) come first, then by layer order
+        // This matches the rendering order where pads are drawn on top
+        candidates.sort_by(|a, b| {
+            // Priority: pad=3 > via=2 > polygon=1 > polyline=0
+            let type_priority = |t: u8| match t {
+                3 => 0, // Pad - highest priority
+                2 => 1, // Via
+                1 => 2, // Polygon
+                _ => 3, // Polyline and others
+            };
+            type_priority(a.range.obj_type).cmp(&type_priority(b.range.obj_type))
+        });
+        
+        // Return first object with a valid net name
+        for obj in candidates {
             if let Some(ref net_name) = obj.range.net_name {
                 if !net_name.is_empty() {
                     return Response {

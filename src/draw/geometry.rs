@@ -86,6 +86,7 @@ pub struct ObjectRange {
     pub shape_index: Option<u32>,       // For instanced types: which shape/LOD entry group
     pub bounds: [f32; 4], // min_x, min_y, max_x, max_y
     pub net_name: Option<String>,       // Net name for highlighting
+    pub component_ref: Option<String>,  // Component reference (e.g., "CMP:C1") for component highlighting
 }
 
 /// Object wrapper for R-tree spatial indexing
@@ -188,6 +189,8 @@ pub struct PadInstance {
     pub rotation: f32,  // degrees
     #[serde(skip_serializing_if = "Option::is_none")]
     pub net_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_ref: Option<String>,  // Component reference from PinRef
 }
 
 /// Padstack definition (for vias and component pads)
@@ -208,6 +211,8 @@ pub struct ViaInstance {
     pub shape: StandardPrimitive,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub net_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_ref: Option<String>,  // Component reference for PTH pads
 }
 
 /// Represents all geometries organized by layer

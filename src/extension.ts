@@ -9,6 +9,33 @@ let requestId = 1;
 let rl: readline.Interface | null = null;
 const pendingRequests = new Map<string, { resolve: (response: any) => void, reject: (error: any) => void }>();
 
+// Rate-limited logging to prevent console spam during bulk operations
+let logCount = 0;
+let logWindowStart = Date.now();
+const LOG_LIMIT = 50; // Max logs per window
+const LOG_WINDOW_MS = 1000; // Window size in ms
+let suppressedCount = 0;
+
+function rateLimitedLog(...args: any[]) {
+    const now = Date.now();
+    // Reset window if expired
+    if (now - logWindowStart > LOG_WINDOW_MS) {
+        if (suppressedCount > 0) {
+            console.log(`[Extension] ... (${suppressedCount} messages suppressed)`);
+        }
+        logWindowStart = now;
+        logCount = 0;
+        suppressedCount = 0;
+    }
+    
+    if (logCount < LOG_LIMIT) {
+        console.log(...args);
+        logCount++;
+    } else {
+        suppressedCount++;
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('[Extension] IPC-2581 Viewer activating...');
 
@@ -75,7 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                console.log('[Extension] Received message from webview:', message);
+                rateLimitedLog('[Extension] Received message from webview:', message);
 
                 switch (message.command) {
                     case 'ready':
@@ -222,6 +249,21 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
+                    case 'HighlightSelectedComponents':
+                        // Forward highlight selected components command to LSP server
+                        const highlightComponentsResponse = await sendToLspServer({ 
+                            method: 'HighlightSelectedComponents', 
+                            params: { object_ids: message.objectIds } 
+                        }, panel);
+                        
+                        if (highlightComponentsResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'highlightComponentsResult',
+                                componentRefs: highlightComponentsResponse.result.component_refs,
+                                objects: highlightComponentsResponse.result.objects
+                            });
+                        }
+                        break;
                     case 'QueryNetAtPoint':
                         // Forward query net at point command to LSP server
                         const queryNetResponse = await sendToLspServer({ 
@@ -356,7 +398,7 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
     const id = String(requestId++);
     const jsonRequest = JSON.stringify({ id, ...request }) + '\n';
 
-    console.log('[Extension] Sending to LSP server:', jsonRequest.trim());
+    rateLimitedLog('[Extension] Sending to LSP server:', jsonRequest.trim());
 
     // Create promise for response with timeout
     const responsePromise = new Promise<any>((resolve, reject) => {
@@ -405,6 +447,15 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
         } else if (request.method === 'Load') {
             // After load, automatically get layers
             sendToLspServer({ method: 'GetLayers', params: null }, panel);
+        } else if (request.method === 'Delete' && response.result?.related_objects) {
+            // Forward related objects to webview (for via multi-layer deletion)
+            const relatedObjects = response.result.related_objects;
+            if (relatedObjects.length > 0) {
+                panel.webview.postMessage({
+                    command: 'deleteRelatedObjects',
+                    objects: relatedObjects
+                });
+            }
         }
         
         return response;

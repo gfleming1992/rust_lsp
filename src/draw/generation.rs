@@ -225,6 +225,7 @@ fn generate_polyline_geometry(
             shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polyline.net_name.clone(),
+            component_ref: None, // Polylines don't have component refs
         });
     }
 
@@ -416,6 +417,7 @@ fn generate_polygon_geometry(
             shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polygon.net_name.clone(),
+            component_ref: None, // Polygons don't have component refs
         });
 
         // Offset indices by current vertex count
@@ -541,6 +543,7 @@ fn generate_pad_geometry(
                     shape_index: Some(current_shape_index), // Which shape/LOD entry group
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
+                    component_ref: inst.component_ref.clone(),
                 });
             }
             
@@ -680,6 +683,7 @@ fn generate_via_geometry(
     let mut lod0_entries = Vec::new();
     let mut lod1_entries = Vec::new();
     let mut lod2_entries = Vec::new();
+    let mut shape_index_counter: u32 = 0;
     
     for (shape_key, instances) in shape_groups {
         if let Some((_, first_via)) = instances.first() {
@@ -688,6 +692,9 @@ fn generate_via_geometry(
             if std::env::var("DEBUG_VIA").is_ok() {
                 eprintln!("  Via shape {:?}: {} instances", shape_key, instances.len());
             }
+            
+            // Track the shape index for this group
+            let current_shape_index = shape_index_counter;
             
             // Create instance data (x, y) for this shape group
             let mut instance_data = Vec::new();
@@ -712,11 +719,14 @@ fn generate_via_geometry(
                     obj_type: 2, // Via
                     vertex_ranges: Vec::new(),
                     instance_index: Some(local_idx as u32),
-                    shape_index: None, // TODO: Add shape_index for vias if needed
+                    shape_index: Some(current_shape_index),
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
+                    component_ref: inst.component_ref.clone(),
                 });
             }
+            
+            shape_index_counter += 1;
             let inst_count = instances.len();
             
             // Tessellate geometry based on shape
