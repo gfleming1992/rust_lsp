@@ -5,11 +5,11 @@ use rust_extension::serialize_xml::xml_node_to_file;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use rstar::RTree;
 
 /// Maximum number of undo/redo events to track
-const MAX_UNDO_HISTORY: usize = 100;
+
 
 /// JSON-RPC Request format
 #[derive(Debug, Deserialize)]
@@ -53,8 +53,6 @@ struct ServerState {
     spatial_index: Option<RTree<SelectableObject>>,
     // Undo/Redo stacks for deleted objects
     deleted_objects: HashMap<u64, ObjectRange>, // Currently deleted objects (id -> ObjectRange)
-    undo_stack: VecDeque<ObjectRange>,  // Stack of deleted objects (for undo)
-    redo_stack: VecDeque<ObjectRange>,  // Stack of undone deletions (for redo)
 }
 
 impl ServerState {
@@ -66,62 +64,7 @@ impl ServerState {
             layer_colors: HashMap::new(),
             spatial_index: None,
             deleted_objects: HashMap::new(),
-            undo_stack: VecDeque::with_capacity(MAX_UNDO_HISTORY),
-            redo_stack: VecDeque::with_capacity(MAX_UNDO_HISTORY),
         }
-    }
-    
-    /// Delete an object and track it for undo
-    fn delete_object(&mut self, range: ObjectRange) {
-        self.deleted_objects.insert(range.id, range.clone());
-        
-        // Add to undo stack
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front(); // Remove oldest
-        }
-        self.undo_stack.push_back(range);
-        
-        // Clear redo stack when new action is performed
-        self.redo_stack.clear();
-    }
-    
-    /// Undo the last deletion
-    fn undo_delete(&mut self) -> Option<ObjectRange> {
-        if let Some(range) = self.undo_stack.pop_back() {
-            self.deleted_objects.remove(&range.id);
-            
-            // Add to redo stack
-            if self.redo_stack.len() >= MAX_UNDO_HISTORY {
-                self.redo_stack.pop_front();
-            }
-            self.redo_stack.push_back(range.clone());
-            
-            Some(range)
-        } else {
-            None
-        }
-    }
-    
-    /// Redo the last undone deletion
-    fn redo_delete(&mut self) -> Option<ObjectRange> {
-        if let Some(range) = self.redo_stack.pop_back() {
-            self.deleted_objects.insert(range.id, range.clone());
-            
-            // Add back to undo stack
-            if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-                self.undo_stack.pop_front();
-            }
-            self.undo_stack.push_back(range.clone());
-            
-            Some(range)
-        } else {
-            None
-        }
-    }
-    
-    /// Check if an object is deleted
-    fn is_deleted(&self, id: u64) -> bool {
-        self.deleted_objects.contains_key(&id)
     }
 }
 
@@ -166,6 +109,8 @@ fn main() {
             "Delete" => serde_json::to_string(&handle_delete(&mut state, request.id, request.params)).unwrap(),
             "Undo" => serde_json::to_string(&handle_undo(&mut state, request.id, request.params)).unwrap(),
             "Redo" => serde_json::to_string(&handle_redo(&mut state, request.id, request.params)).unwrap(),
+            "HighlightSelectedNets" => serde_json::to_string(&handle_highlight_selected_nets(&state, request.id, request.params)).unwrap(),
+            "QueryNetAtPoint" => serde_json::to_string(&handle_query_net_at_point(&state, request.id, request.params)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -724,6 +669,129 @@ fn update_dictionary_colors(root: &mut XmlNode, layer_colors: &HashMap<String, [
     }
 }
 
+/// Check if a point is inside a triangle using barycentric coordinates
+fn point_in_triangle(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
+    let area = 0.5 * (-y1 * x2 + y0 * (-x1 + x2) + x0 * (y1 - y2) + x1 * y2);
+    if area.abs() < 1e-10 {
+        return false; // Degenerate triangle
+    }
+    let s = (y0 * x2 - x0 * y2 + (y2 - y0) * px + (x0 - x2) * py) / (2.0 * area);
+    let t = (x0 * y1 - y0 * x1 + (y0 - y1) * px + (x1 - x0) * py) / (2.0 * area);
+    s >= 0.0 && t >= 0.0 && (s + t) <= 1.0
+}
+
+/// Check if a point hits an object's actual geometry (not just bounding box)
+fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]) -> bool {
+    // Find the layer this object belongs to
+    let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
+        Some(l) => l,
+        None => return true, // If layer not found, fall back to AABB (already passed)
+    };
+    
+    // Get the geometry based on object type
+    let geometry = match range.obj_type {
+        0 => layer.geometry.batch.as_ref(),           // Polyline
+        1 => layer.geometry.batch_colored.as_ref(),   // Polygon
+        2 => layer.geometry.instanced.as_ref(),       // Via (instanced)
+        3 => layer.geometry.instanced_rot.as_ref(),   // Pad (instanced with rotation)
+        _ => return true, // Unknown type, fall back to AABB
+    };
+    
+    let lods = match geometry {
+        Some(lods) if !lods.is_empty() => lods,
+        _ => return true, // No geometry data, fall back to AABB
+    };
+    
+    // Use LOD0 for precise hit testing
+    let lod0 = &lods[0];
+    
+    // Handle instanced geometry (vias, pads)
+    if range.obj_type == 2 || range.obj_type == 3 {
+        // For instanced geometry, check if point is within the instance's bounds
+        // The instance position is stored in instance_data
+        if let (Some(inst_data), Some(inst_idx)) = (&lod0.instance_data, range.instance_index) {
+            let floats_per_instance = if range.obj_type == 3 { 3 } else { 3 }; // x, y, packed_rot_vis
+            let base = (inst_idx as usize) * floats_per_instance;
+            if base + 1 < inst_data.len() {
+                let inst_x = inst_data[base];
+                let inst_y = inst_data[base + 1];
+                
+                // Check triangles of the base shape, offset by instance position
+                if let Some(ref indices) = lod0.index_data {
+                    for tri in indices.chunks(3) {
+                        if tri.len() < 3 { continue; }
+                        let i0 = tri[0] as usize * 2;
+                        let i1 = tri[1] as usize * 2;
+                        let i2 = tri[2] as usize * 2;
+                        
+                        if i2 + 1 < lod0.vertex_data.len() {
+                            let x0 = lod0.vertex_data[i0] + inst_x;
+                            let y0 = lod0.vertex_data[i0 + 1] + inst_y;
+                            let x1 = lod0.vertex_data[i1] + inst_x;
+                            let y1 = lod0.vertex_data[i1 + 1] + inst_y;
+                            let x2 = lod0.vertex_data[i2] + inst_x;
+                            let y2 = lod0.vertex_data[i2 + 1] + inst_y;
+                            
+                            if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    
+    // For batched geometry (polylines, polygons), use vertex_ranges to find our triangles
+    if range.vertex_ranges.is_empty() {
+        return true; // No vertex range info, fall back to AABB
+    }
+    
+    let (start_vertex, vertex_count) = range.vertex_ranges[0]; // LOD0
+    if vertex_count == 0 {
+        return false; // Object was culled at this LOD
+    }
+    
+    // Get the indices that reference vertices in our range
+    if let Some(ref indices) = lod0.index_data {
+        let start = start_vertex as usize;
+        let end = start + vertex_count as usize;
+        
+        for tri in indices.chunks(3) {
+            if tri.len() < 3 { continue; }
+            
+            // Check if this triangle uses vertices from our object's range
+            let idx0 = tri[0] as usize;
+            let idx1 = tri[1] as usize;
+            let idx2 = tri[2] as usize;
+            
+            // For batched geometry, triangles use absolute indices
+            // We need to check if these indices fall within our vertex range
+            if idx0 >= start && idx0 < end && idx1 >= start && idx1 < end && idx2 >= start && idx2 < end {
+                let i0 = idx0 * 2;
+                let i1 = idx1 * 2;
+                let i2 = idx2 * 2;
+                
+                if i2 + 1 < lod0.vertex_data.len() {
+                    let x0 = lod0.vertex_data[i0];
+                    let y0 = lod0.vertex_data[i0 + 1];
+                    let x1 = lod0.vertex_data[i1];
+                    let y1 = lod0.vertex_data[i1 + 1];
+                    let x2 = lod0.vertex_data[i2];
+                    let y2 = lod0.vertex_data[i2 + 1];
+                    
+                    if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    false
+}
+
 /// Handle Select request - performs spatial selection based on x, y coordinates
 fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
     #[derive(Deserialize)]
@@ -748,10 +816,16 @@ fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Opt
 
     if let Some(tree) = &state.spatial_index {
         let point = [params.x, params.y];
-        // Find all objects whose AABB contains the point
-        let results: Vec<ObjectRange> = tree.locate_all_at_point(&point)
+        // Find all objects whose AABB contains the point (coarse phase)
+        let candidates: Vec<&SelectableObject> = tree.locate_all_at_point(&point).collect();
+        
+        // Fine phase: filter using actual geometry
+        let results: Vec<ObjectRange> = candidates.iter()
+            .filter(|obj| point_hits_object(params.x, params.y, &obj.range, &state.layers))
             .map(|obj| obj.range.clone())
             .collect();
+        
+        eprintln!("[LSP Server] Select: {} AABB candidates -> {} precise hits", candidates.len(), results.len());
             
         Response {
             id,
@@ -848,7 +922,7 @@ fn handle_delete(state: &mut ServerState, id: Option<serde_json::Value>, params:
     };
 
     eprintln!("[LSP Server] Delete object id={}", range.id);
-    state.delete_object(range);
+    state.deleted_objects.insert(range.id, range);
 
     Response {
         id,
@@ -911,6 +985,157 @@ fn handle_redo(state: &mut ServerState, id: Option<serde_json::Value>, params: O
         Response {
             id,
             result: Some(serde_json::json!({ "status": "ok", "message": "no object specified" })),
+            error: None,
+        }
+    }
+}
+
+/// Handle HighlightSelectedNets request - finds all shapes with the same net names as the selected shapes
+fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    #[derive(Deserialize)]
+    struct HighlightNetsParams {
+        object_ids: Vec<u64>,
+    }
+
+    let params: HighlightNetsParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {object_ids: number[]}".to_string(),
+                }),
+            };
+        }
+    };
+
+    eprintln!("[LSP Server] HighlightSelectedNets: {} object IDs provided", params.object_ids.len());
+
+    if let Some(tree) = &state.spatial_index {
+        // First, collect the net names from the selected objects
+        let mut net_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        
+        for obj in tree.iter() {
+            if params.object_ids.contains(&obj.range.id) {
+                if let Some(ref net_name) = obj.range.net_name {
+                    // Skip "No Net" or empty net names
+                    if !net_name.is_empty() && net_name != "No Net" {
+                        net_names.insert(net_name.clone());
+                    }
+                }
+            }
+        }
+        
+        eprintln!("[LSP Server] Found {} unique net names: {:?}", net_names.len(), net_names);
+        
+        if net_names.is_empty() {
+            return Response {
+                id,
+                result: Some(serde_json::json!({
+                    "net_names": [],
+                    "objects": []
+                })),
+                error: None,
+            };
+        }
+        
+        // Now find all objects with matching net names
+        let matching_objects: Vec<ObjectRange> = tree.iter()
+            .filter(|obj| {
+                if let Some(ref net_name) = obj.range.net_name {
+                    net_names.contains(net_name)
+                } else {
+                    false
+                }
+            })
+            .map(|obj| obj.range.clone())
+            .collect();
+        
+        eprintln!("[LSP Server] Found {} objects with matching nets", matching_objects.len());
+        
+        let net_names_vec: Vec<String> = net_names.into_iter().collect();
+        
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "net_names": net_names_vec,
+                "objects": matching_objects
+            })),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "net_names": [],
+                "objects": []
+            })),
+            error: None,
+        }
+    }
+}
+
+/// Handle QueryNetAtPoint request - returns the net name of the object at a given point
+fn handle_query_net_at_point(
+    state: &ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+) -> Response {
+    #[derive(Deserialize)]
+    struct QueryNetAtPointParams {
+        x: f64,
+        y: f64,
+    }
+
+    let params: QueryNetAtPointParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {x: number, y: number}".to_string(),
+                }),
+            };
+        }
+    };
+
+    if let Some(tree) = &state.spatial_index {
+        // Query R-tree for objects at this point
+        let point = [params.x as f32, params.y as f32];
+        
+        // Find all objects at this point and return the first one with a net name
+        for obj in tree.locate_all_at_point(&point) {
+            if let Some(ref net_name) = obj.range.net_name {
+                if !net_name.is_empty() {
+                    return Response {
+                        id,
+                        result: Some(serde_json::json!({
+                            "net_name": net_name
+                        })),
+                        error: None,
+                    };
+                }
+            }
+        }
+        
+        // No net found at this point
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "net_name": null
+            })),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!({
+                "net_name": null
+            })),
             error: None,
         }
     }

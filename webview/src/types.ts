@@ -94,6 +94,7 @@ export interface ObjectRange {
   vertex_ranges: [number, number][]; // (start, count)
   instance_index?: number;
   bounds: [number, number, number, number];
+  net_name?: string; // Net name from IPC-2581 for highlighting connected shapes
 }
 
 // Minimal per-layer render data

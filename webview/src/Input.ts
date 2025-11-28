@@ -1,6 +1,8 @@
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { UI } from "./UI";
+import { ContextMenu } from "./ContextMenu";
+import { Tooltip } from "./Tooltip";
 
 export class Input {
   private scene: Scene;
@@ -8,6 +10,8 @@ export class Input {
   private ui: UI;
   private canvas: HTMLCanvasElement;
   private onSelect: (x: number, y: number) => void;
+  private contextMenu: ContextMenu;
+  private tooltip: Tooltip;
 
   private haveMouse = false;
   private lastMouseX = 0;
@@ -25,6 +29,12 @@ export class Input {
   private onUndo: (() => void) | null = null;
   private onRedo: (() => void) | null = null;
   private onBoxSelect: ((minX: number, minY: number, maxX: number, maxY: number) => void) | null = null;
+  private onHighlightNets: (() => void) | null = null;
+  
+  // Hover tooltip tracking
+  private hoverTimer: number | null = null;
+  private hoverDelayMs = 1000; // 1 second delay
+  private onQueryNetAtPoint: ((worldX: number, worldY: number, clientX: number, clientY: number) => void) | null = null;
 
   constructor(scene: Scene, renderer: Renderer, ui: UI, onSelect: (x: number, y: number) => void) {
     this.scene = scene;
@@ -32,6 +42,9 @@ export class Input {
     this.ui = ui;
     this.canvas = renderer.canvas;
     this.onSelect = onSelect;
+    
+    this.contextMenu = new ContextMenu();
+    this.tooltip = new Tooltip();
     
     this.selectionBox = document.createElement('div');
     this.selectionBox.style.position = 'fixed';
@@ -61,8 +74,65 @@ export class Input {
     this.onBoxSelect = callback;
   }
 
+  public setOnHighlightNets(callback: () => void) {
+    this.onHighlightNets = callback;
+    this.contextMenu.setOnHighlightNets(callback);
+  }
+
+  public setHasSelection(hasSelection: boolean) {
+    this.contextMenu.setHasSelection(hasSelection);
+  }
+
+  public setOnQueryNetAtPoint(callback: (worldX: number, worldY: number, clientX: number, clientY: number) => void) {
+    this.onQueryNetAtPoint = callback;
+  }
+
+  public showNetTooltip(netName: string | null, clientX: number, clientY: number) {
+    if (netName) {
+      this.tooltip.show(clientX, clientY, `Net: ${netName}`);
+    }
+  }
+
+  public hideTooltip() {
+    this.tooltip.hide();
+  }
+
+  private startHoverTimer(clientX: number, clientY: number) {
+    this.cancelHoverTimer();
+    
+    this.hoverTimer = window.setTimeout(() => {
+      this.checkHoverObject(clientX, clientY);
+    }, this.hoverDelayMs);
+  }
+
+  private cancelHoverTimer() {
+    if (this.hoverTimer !== null) {
+      window.clearTimeout(this.hoverTimer);
+      this.hoverTimer = null;
+    }
+    this.tooltip.hide();
+  }
+
+  private checkHoverObject(clientX: number, clientY: number) {
+    const rect = this.canvas.getBoundingClientRect();
+    const cssX = clientX - rect.left;
+    const cssY = clientY - rect.top;
+    const world = this.renderer.screenToWorld(cssX, cssY);
+    
+    // Query LSP server for net at this point
+    if (this.onQueryNetAtPoint) {
+      this.onQueryNetAtPoint(world.x, world.y, clientX, clientY);
+    }
+  }
+
   private setupListeners() {
     this.canvas.style.touchAction = "none";
+
+    // Prevent default context menu on canvas
+    this.canvas.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.contextMenu.show(event.clientX, event.clientY);
+    });
 
     // Keyboard listeners for Delete, Undo, Redo
     window.addEventListener('keydown', (event) => {
@@ -114,6 +184,13 @@ export class Input {
       this.lastMouseX = event.clientX;
       this.lastMouseY = event.clientY;
       this.haveMouse = true;
+      
+      // Reset hover timer on mouse move (only when not dragging)
+      if (!this.scene.state.dragging) {
+        this.startHoverTimer(event.clientX, event.clientY);
+      } else {
+        this.cancelHoverTimer();
+      }
       
       if (this.scene.state.dragging) {
         const dx = event.clientX - this.scene.state.lastX;
@@ -171,6 +248,7 @@ export class Input {
 
     this.canvas.addEventListener("mouseleave", () => {
       this.haveMouse = false;
+      this.cancelHoverTimer();
       this.ui.updateCoordOverlay(this.lastMouseX, this.lastMouseY, this.haveMouse);
     });
 

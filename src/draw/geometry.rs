@@ -84,6 +84,7 @@ pub struct ObjectRange {
     pub vertex_ranges: Vec<(u32, u32)>, // (start, count) for each LOD
     pub instance_index: Option<u32>,    // For instanced types
     pub bounds: [f32; 4], // min_x, min_y, max_x, max_y
+    pub net_name: Option<String>,       // Net name for highlighting
 }
 
 /// Object wrapper for R-tree spatial indexing

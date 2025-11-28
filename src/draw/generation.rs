@@ -223,6 +223,7 @@ fn generate_polyline_geometry(
             vertex_ranges: vec![(0, 0); 5], // Will be filled per LOD
             instance_index: None,
             bounds: [min_x, min_y, max_x, max_y],
+            net_name: None, // TODO: Extract from Set node net attribute
         });
     }
 
@@ -412,6 +413,7 @@ fn generate_polygon_geometry(
             vertex_ranges: vec![(current_vert_start, vert_count as u32); 5], // Same for all LODs (simplified)
             instance_index: None,
             bounds: [min_x, min_y, max_x, max_y],
+            net_name: None, // TODO: Extract from Set node net attribute
         });
 
         // Offset indices by current vertex count
@@ -540,6 +542,7 @@ fn generate_pad_geometry(
                     vertex_ranges: Vec::new(), // Not used for instanced
                     instance_index: Some(local_idx as u32), // Index within this shape group
                     bounds: [min_x, min_y, max_x, max_y],
+                    net_name: None, // TODO: Extract from Set node net attribute
                 });
                 // Note: This pushes duplicate ObjectRanges if we iterate multiple times?
                 // No, we iterate shape groups once.
@@ -715,6 +718,7 @@ fn generate_via_geometry(
                     vertex_ranges: Vec::new(),
                     instance_index: Some(local_idx as u32),
                     bounds: [min_x, min_y, max_x, max_y],
+                    net_name: None, // TODO: Extract from Set node net attribute
                 });
             }
             let inst_count = instances.len();

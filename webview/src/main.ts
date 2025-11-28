@@ -204,6 +204,32 @@ async function init() {
     }
   });
   
+  // Set up highlight nets handler
+  input.setOnHighlightNets(() => {
+    if (selectedObjects.length === 0) {
+      console.log('[HighlightNets] No objects selected');
+      return;
+    }
+    
+    const objectIds = selectedObjects.map(obj => obj.id);
+    console.log(`[HighlightNets] Requesting nets for ${objectIds.length} selected object(s)`);
+    
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'HighlightSelectedNets', objectIds });
+    } else {
+      console.log(`[Dev] Highlight nets for objects: ${objectIds.join(', ')}`);
+    }
+  });
+  
+  // Set up net tooltip query handler
+  input.setOnQueryNetAtPoint((worldX: number, worldY: number, clientX: number, clientY: number) => {
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'QueryNetAtPoint', x: worldX, y: worldY, clientX, clientY });
+    } else {
+      console.log(`[Dev] Query net at point: (${worldX}, ${worldY})`);
+    }
+  });
+  
   // Undo/Redo stacks - store batches of deleted objects for undo/redo as single events
   const MAX_UNDO_HISTORY = 100;
   const undoStack: ObjectRange[][] = []; // Each entry is a batch of objects deleted together
@@ -492,9 +518,42 @@ async function init() {
           scene.highlightObject(visibleRanges[0]);
           console.log(`[Select] Selected topmost: ${visibleRanges[0].layer_id} (layer index ${scene.layerOrder.indexOf(visibleRanges[0].layer_id)})`);
         }
+        
+        // Update context menu state
+        input.setHasSelection(true);
       } else {
         selectedObjects = [];
         scene.clearHighlightObject();
+        input.setHasSelection(false);
+      }
+    } else if (data.command === "highlightNetsResult" && data.objects) {
+      const objects = data.objects as ObjectRange[];
+      const netNames = data.netNames as string[];
+      
+      console.log(`[HighlightNets] Received ${objects.length} objects with nets: ${netNames.join(', ')}`);
+      
+      // Filter out deleted objects and objects from invisible layers
+      const visibleObjects = objects.filter(obj => {
+        const isDeleted = deletedObjectIds.has(obj.id);
+        const isLayerVisible = scene.layerVisible.get(obj.layer_id) !== false;
+        return !isDeleted && isLayerVisible;
+      });
+      
+      if (visibleObjects.length > 0) {
+        selectedObjects = visibleObjects;
+        scene.highlightMultipleObjects(visibleObjects);
+        console.log(`[HighlightNets] Highlighted ${visibleObjects.length} objects for nets: ${netNames.join(', ')}`);
+        input.setHasSelection(true);
+      }
+    } else if (data.command === "netAtPointResult") {
+      // Show tooltip with net name at the cursor position
+      const netName = data.netName as string | null;
+      const clientX = data.x as number;
+      const clientY = data.y as number;
+      
+      // Show tooltip for any valid net name
+      if (netName && netName.trim() !== "") {
+        input.showNetTooltip(netName, clientX, clientY);
       }
     }
   });

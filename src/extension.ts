@@ -200,6 +200,37 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
+                    case 'HighlightSelectedNets':
+                        // Forward highlight selected nets command to LSP server
+                        const highlightNetsResponse = await sendToLspServer({ 
+                            method: 'HighlightSelectedNets', 
+                            params: { object_ids: message.objectIds } 
+                        }, panel);
+                        
+                        if (highlightNetsResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'highlightNetsResult',
+                                netNames: highlightNetsResponse.result.net_names,
+                                objects: highlightNetsResponse.result.objects
+                            });
+                        }
+                        break;
+                    case 'QueryNetAtPoint':
+                        // Forward query net at point command to LSP server
+                        const queryNetResponse = await sendToLspServer({ 
+                            method: 'QueryNetAtPoint', 
+                            params: { x: message.x, y: message.y } 
+                        }, panel);
+                        
+                        if (queryNetResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'netAtPointResult',
+                                netName: queryNetResponse.result.net_name,
+                                x: message.clientX,
+                                y: message.clientY
+                            });
+                        }
+                        break;
                 }
             },
             undefined,

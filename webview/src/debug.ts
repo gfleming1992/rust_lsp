@@ -1,4 +1,4 @@
-import type { LayerColor } from "./config";
+import type { LayerColor } from "./types";
 
 export interface StartupTimings {
   fetchStart: number;
