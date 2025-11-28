@@ -4,6 +4,7 @@ import { UI } from "./UI";
 import { Input } from "./Input";
 import { LayerJSON, ObjectRange } from "./types";
 import { BinaryParserPool } from "./BinaryParserPool";
+import { parseBinaryLayer } from "./binaryParser";
 
 // Detect if running in VS Code webview or dev mode
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
@@ -133,20 +134,28 @@ if (isVSCodeWebview && vscode) {
     const originalWarn = console.warn;
     const originalInfo = console.info;
 
+    // Helper to serialize args, converting Error objects to readable strings
+    const serializeArgs = (args: any[]) => args.map(arg => {
+        if (arg instanceof Error) {
+            return `${arg.name}: ${arg.message}\n${arg.stack || ''}`;
+        }
+        return arg;
+    });
+
     console.log = (...args) => {
-        vscode.postMessage({ command: 'console.log', args });
+        vscode.postMessage({ command: 'console.log', args: serializeArgs(args) });
         originalLog.apply(console, args);
     };
     console.error = (...args) => {
-        vscode.postMessage({ command: 'console.error', args });
+        vscode.postMessage({ command: 'console.error', args: serializeArgs(args) });
         originalError.apply(console, args);
     };
     console.warn = (...args) => {
-        vscode.postMessage({ command: 'console.warn', args });
+        vscode.postMessage({ command: 'console.warn', args: serializeArgs(args) });
         originalWarn.apply(console, args);
     };
     console.info = (...args) => {
-        vscode.postMessage({ command: 'console.info', args });
+        vscode.postMessage({ command: 'console.info', args: serializeArgs(args) });
         originalInfo.apply(console, args);
     };
 }
@@ -172,6 +181,7 @@ async function init() {
   
   // Setup Input handling
   const input = new Input(scene, renderer, ui, (x, y) => {
+    isBoxSelect = false; // Single point select
     if (isVSCodeWebview && vscode) {
       vscode.postMessage({ command: 'Select', x, y });
     } else {
@@ -179,53 +189,131 @@ async function init() {
     }
   });
 
-  // Handle deletion
+  // Handle deletion with undo/redo support
   let selectedObjects: ObjectRange[] = [];
   let deletedObjectIds = new Set<number>(); // Track deleted object IDs
-  
-  ui.setOnDelete(() => {
-    if (selectedObjects.length > 0) {
-      // Only delete the topmost (first) object to avoid accidental multi-layer deletion
-      const objToDelete = selectedObjects[0];
-      console.log(`[Delete] Deleting topmost object ${objToDelete.id}`);
-      
-      // Hide the object visually
-      scene.hideObject(objToDelete);
-      deletedObjectIds.add(objToDelete.id); // Mark as deleted
-      ui.clearHighlight();
-      
-      // Send delete command to backend
-      if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ command: 'Delete', object: objToDelete });
-      } else {
-        console.log('[Dev] Delete object:', objToDelete);
-      }
-      
-      selectedObjects = [];
+  let isBoxSelect = false; // Track if current selection is from box select
+
+  // Set up box select handler
+  input.setOnBoxSelect((minX, minY, maxX, maxY) => {
+    isBoxSelect = true; // Box select mode
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'BoxSelect', minX, minY, maxX, maxY });
+    } else {
+      console.log(`[Dev] Box select: (${minX}, ${minY}) to (${maxX}, ${maxY})`);
     }
   });
   
-  // Also hook up Input's delete handler (keyboard shortcut)
-  input.setOnDelete(() => {
-    if (selectedObjects.length > 0) {
-      // Only delete the topmost (first) object to avoid accidental multi-layer deletion
-      const objToDelete = selectedObjects[0];
-      console.log(`[Delete] Deleting topmost object ${objToDelete.id} (keyboard)`);
-      
-      // Hide the object visually
-      scene.hideObject(objToDelete);
-      deletedObjectIds.add(objToDelete.id); // Mark as deleted
-      ui.clearHighlight();
+  // Undo/Redo stacks - store batches of deleted objects for undo/redo as single events
+  const MAX_UNDO_HISTORY = 100;
+  const undoStack: ObjectRange[][] = []; // Each entry is a batch of objects deleted together
+  const redoStack: ObjectRange[][] = [];
+
+  function performDelete(objects: ObjectRange[], source: string) {
+    if (objects.length === 0) return;
+    
+    console.log(`[Delete] Deleting ${objects.length} object(s) (${source})`);
+    
+    // Clear all highlights first
+    scene.clearHighlightObject();
+    
+    // Hide all objects and track them
+    for (const obj of objects) {
+      scene.hideObject(obj);
+      deletedObjectIds.add(obj.id);
       
       // Send delete command to backend
       if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ command: 'Delete', object: objToDelete });
-      } else {
-        console.log('[Dev] Delete object:', objToDelete);
+        vscode.postMessage({ command: 'Delete', object: obj });
       }
-      
-      selectedObjects = [];
     }
+    
+    // Add entire batch to undo stack as single event
+    undoStack.push([...objects]);
+    if (undoStack.length > MAX_UNDO_HISTORY) {
+      undoStack.shift();
+    }
+    
+    // Clear redo stack when new action is performed
+    redoStack.length = 0;
+    
+    selectedObjects = [];
+    console.log(`[Delete] Deleted ${objects.length} object(s)`);
+  }
+
+  function performUndo() {
+    if (undoStack.length === 0) {
+      console.log('[Undo] Nothing to undo');
+      return;
+    }
+    
+    const batch = undoStack.pop()!;
+    console.log(`[Undo] Restoring ${batch.length} object(s)`);
+    
+    // Show all objects in the batch
+    for (const obj of batch) {
+      scene.showObject(obj);
+      deletedObjectIds.delete(obj.id);
+      
+      // Send undo command to backend
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ command: 'Undo', object: obj });
+      }
+    }
+    
+    // Add batch to redo stack
+    redoStack.push(batch);
+    if (redoStack.length > MAX_UNDO_HISTORY) {
+      redoStack.shift();
+    }
+  }
+
+  function performRedo() {
+    if (redoStack.length === 0) {
+      console.log('[Redo] Nothing to redo');
+      return;
+    }
+    
+    const batch = redoStack.pop()!;
+    console.log(`[Redo] Re-deleting ${batch.length} object(s)`);
+    
+    // Hide all objects in the batch again
+    for (const obj of batch) {
+      scene.hideObject(obj);
+      deletedObjectIds.add(obj.id);
+      
+      // Send redo command to backend
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ command: 'Redo', object: obj });
+      }
+    }
+    
+    // Add batch back to undo stack
+    undoStack.push(batch);
+    if (undoStack.length > MAX_UNDO_HISTORY) {
+      undoStack.shift();
+    }
+  }
+  
+  ui.setOnDelete(() => {
+    if (selectedObjects.length > 0) {
+      performDelete(selectedObjects, 'context menu');
+    }
+  });
+  
+  // Hook up Input handlers
+  input.setOnDelete(() => {
+    if (selectedObjects.length > 0) {
+      performDelete(selectedObjects, 'keyboard');
+    }
+  });
+
+  input.setOnUndo(() => {
+    performUndo();
+  });
+
+  input.setOnRedo(() => {
+    performRedo();
   });
 
   // Initial UI update
@@ -305,18 +393,47 @@ async function init() {
     
     // Handle binary tessellation data
     if (data.command === "binaryTessellationData" && data.binaryPayload) {
-      const arrayBuffer = data.binaryPayload as ArrayBuffer;
+      const payload = data.binaryPayload;
+      let arrayBuffer: ArrayBuffer;
       
-      console.log(`[MSG] Binary payload size: ${arrayBuffer.byteLength} bytes, delegating to worker...`);
+      // Check payload type and convert to ArrayBuffer
+      // Minimize copies where possible
+      if (payload instanceof ArrayBuffer) {
+        // Direct ArrayBuffer (dev server WebSocket) - no copy needed
+        arrayBuffer = payload;
+      } else if (payload instanceof Uint8Array) {
+        // Uint8Array - only slice if offset is non-zero
+        if (payload.byteOffset === 0 && payload.byteLength === payload.buffer.byteLength) {
+          arrayBuffer = payload.buffer as ArrayBuffer;
+        } else {
+          arrayBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength) as ArrayBuffer;
+        }
+      } else if (typeof payload === 'string') {
+        // Base64 string (legacy fallback)
+        const binaryString = atob(payload);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        arrayBuffer = bytes.buffer;
+      } else if (typeof payload === 'object' && payload !== null) {
+        // VS Code may serialize Uint8Array as plain object {0: byte, 1: byte, ...}
+        // Convert back to Uint8Array
+        const obj = payload as Record<number, number>;
+        const keys = Object.keys(obj);
+        const bytes = new Uint8Array(keys.length);
+        for (let i = 0; i < keys.length; i++) {
+          bytes[i] = obj[i];
+        }
+        arrayBuffer = bytes.buffer;
+      } else {
+        console.error(`[MSG] Unexpected binaryPayload type: ${typeof payload}`);
+        return;
+      }
       
-      // Parse in worker (non-blocking)
-      const parseStart = performance.now();
+      // Parse using worker pool for parallel parsing
       try {
         const layerJson = await workerPool.parse(arrayBuffer);
-        const parseEnd = performance.now();
-        
-        const msgEnd = performance.now();
-        console.log(`[MSG] Received binary ${layerJson.layerId} (worker parsed in ${(parseEnd - parseStart).toFixed(1)}ms, total: ${(msgEnd - msgStart).toFixed(1)}ms)`);
         
         pendingLayers.push(layerJson);
         
@@ -353,18 +470,31 @@ async function init() {
         const isLayerVisible = scene.layerVisible.get(range.layer_id) !== false;
         return !isDeleted && isLayerVisible;
       });
-      console.log(`[Select] After filtering deleted/hidden layers: ${visibleRanges.length} visible objects`);
+      console.log(`[Select] After filtering deleted/hidden layers: ${visibleRanges.length} visible objects (boxSelect: ${isBoxSelect})`);
       
       if (visibleRanges.length > 0) {
-        // For single point selection, only select the topmost (first) object
-        // For box selection, keep all objects
-        selectedObjects = visibleRanges;
+        // Sort by layer order (later in layerOrder = rendered on top = should be selected first)
+        // Use reverse order so topmost layer comes first
+        visibleRanges.sort((a, b) => {
+          const aIndex = scene.layerOrder.indexOf(a.layer_id);
+          const bIndex = scene.layerOrder.indexOf(b.layer_id);
+          return bIndex - aIndex; // Higher index = later in render order = on top
+        });
         
-        // Highlight only the first object's bounds
-        ui.highlightObject(visibleRanges[0].bounds);
+        if (isBoxSelect) {
+          // Box select: select and highlight ALL objects in the box
+          selectedObjects = visibleRanges;
+          scene.highlightMultipleObjects(visibleRanges);
+          console.log(`[Select] Box selected ${visibleRanges.length} objects across layers`);
+        } else {
+          // Point select: select and highlight only the topmost object
+          selectedObjects = [visibleRanges[0]];
+          scene.highlightObject(visibleRanges[0]);
+          console.log(`[Select] Selected topmost: ${visibleRanges[0].layer_id} (layer index ${scene.layerOrder.indexOf(visibleRanges[0].layer_id)})`);
+        }
       } else {
         selectedObjects = [];
-        ui.clearHighlight();
+        scene.clearHighlightObject();
       }
     }
   });
@@ -403,13 +533,18 @@ async function init() {
 }
 
 init().catch((error) => {
-  console.error(error);
+  const errorMsg = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const errorStack = error instanceof Error ? error.stack : '';
+  console.error(`[INIT FAILED] ${errorMsg}`);
+  if (errorStack) {
+    console.error(`[INIT FAILED] Stack: ${errorStack}`);
+  }
   const panel = document.getElementById("ui");
   if (panel) {
     const message = document.createElement("div");
     message.style.marginTop = "8px";
     message.style.color = "#ff6b6b";
-    message.textContent = error instanceof Error ? error.message : String(error);
+    message.textContent = errorMsg;
     panel.appendChild(message);
   }
 });

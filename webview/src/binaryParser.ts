@@ -11,12 +11,8 @@ export function parseBinaryLayer(buffer: ArrayBuffer): LayerJSON {
   const view = new DataView(buffer);
   let offset = 0;
 
-  console.log(`[BinaryParser] Buffer size: ${buffer.byteLength}, first 32 bytes:`, 
-    new Uint8Array(buffer, 0, Math.min(32, buffer.byteLength)));
-
   // Read and verify magic header (8 bytes)
   const magic = new TextDecoder().decode(new Uint8Array(buffer, offset, 8));
-  console.log(`[BinaryParser] Magic header: "${magic}"`);
   if (magic !== "IPC2581B") {
     throw new Error(`Invalid binary format: expected magic "IPC2581B", got "${magic}"`);
   }
@@ -75,13 +71,17 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
   const numBatchLods = view.getUint32(offset, true);
   offset += 4;
 
-  if (numBatchLods > 0) {
+  if (numBatchLods > 0 && numBatchLods < 100) {
     const batchLods: GeometryLOD[] = [];
     for (let i = 0; i < numBatchLods; i++) {
-      const vertexCount = view.getUint32(offset, true); // Number of vertices (not floats)
+      const vertexCount = view.getUint32(offset, true);
       offset += 4;
       const indexCount = view.getUint32(offset, true);
       offset += 4;
+      
+      if (vertexCount > 50000000) {
+        throw new Error(`[BinaryParser] Sanity check failed: batch vertexCount ${vertexCount} is too large at offset ${offset - 8}`);
+      }
       
       // Read visibility flag
       const hasVisibility = view.getUint8(offset) === 1;
@@ -90,7 +90,6 @@ function parseGeometryBinary(buffer: ArrayBuffer, startOffset: number): ShaderGe
       offset += 3;
 
       // Read vertex_data as Float32Array (zero-copy view)
-      // Each vertex is 2 floats (x, y), so multiply vertexCount by 2
       const numFloats = vertexCount * 2;
       const vertexData = new Float32Array(buffer, offset, numFloats);
       offset += numFloats * 4;

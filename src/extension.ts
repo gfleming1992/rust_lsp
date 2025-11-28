@@ -160,6 +160,46 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
+                    case 'Delete':
+                        // Forward delete command to LSP server
+                        await sendToLspServer({ 
+                            method: 'Delete', 
+                            params: { object: message.object } 
+                        }, panel);
+                        break;
+                    case 'Undo':
+                        // Forward undo command to LSP server
+                        await sendToLspServer({ 
+                            method: 'Undo', 
+                            params: { object: message.object } 
+                        }, panel);
+                        break;
+                    case 'Redo':
+                        // Forward redo command to LSP server
+                        await sendToLspServer({ 
+                            method: 'Redo', 
+                            params: { object: message.object } 
+                        }, panel);
+                        break;
+                    case 'BoxSelect':
+                        // Forward box select command to LSP server
+                        const boxSelectResponse = await sendToLspServer({ 
+                            method: 'BoxSelect', 
+                            params: { 
+                                min_x: message.minX, 
+                                min_y: message.minY, 
+                                max_x: message.maxX, 
+                                max_y: message.maxY 
+                            } 
+                        }, panel);
+                        
+                        if (boxSelectResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'selectionResult',
+                                ranges: boxSelectResponse.result
+                            });
+                        }
+                        break;
                 }
             },
             undefined,
@@ -223,6 +263,9 @@ function startLspServer(context: vscode.ExtensionContext) {
                     const base64Data = line.substring(firstColon + 1);
                     
                     const binaryData = Buffer.from(base64Data, 'base64');
+                    console.log(`[Extension] Binary response for ID ${id}`);
+                    console.log(`[Extension]   Base64 length: ${base64Data.length}, Binary size: ${binaryData.length} bytes`);
+                    console.log(`[Extension]   First 16 bytes:`, Array.from(binaryData.slice(0, 16)));
                     
                     const pending = pendingRequests.get(id);
                     if (pending) {
@@ -355,16 +398,13 @@ async function sendBinaryTessellation(layerId: string, panel: vscode.WebviewPane
         const response = await responsePromise;
         
         if (response.isBinary) {
-            // Send binary data as ArrayBuffer to webview
-            // Convert Node.js Buffer to ArrayBuffer (webview can't use Buffer directly)
-            const arrayBuffer = response.binaryData.buffer.slice(
-                response.binaryData.byteOffset,
-                response.binaryData.byteOffset + response.binaryData.byteLength
-            );
+            // Send binary data as Uint8Array - VS Code webview can handle this
+            // The webview will receive it and can create an ArrayBuffer from it
+            const uint8Array = new Uint8Array(response.binaryData);
             
             panel.webview.postMessage({
                 command: 'binaryTessellationData',
-                binaryPayload: arrayBuffer
+                binaryPayload: uint8Array
             });
         }
     } catch (error) {

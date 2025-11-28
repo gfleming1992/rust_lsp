@@ -29,11 +29,11 @@ export class UI {
     
     this.highlightBox = document.createElement('div');
     this.highlightBox.style.position = 'absolute';
-    this.highlightBox.style.border = '2px solid #ff00ff';
-    this.highlightBox.style.backgroundColor = 'rgba(255, 0, 255, 0.2)';
     this.highlightBox.style.pointerEvents = 'none';
     this.highlightBox.style.display = 'none';
     this.highlightBox.style.zIndex = '999';
+    // Note: Visual highlighting is now done in Scene via shader
+    // This box is kept for context menu bounds tracking only
     
     this.contextMenu = document.createElement('div');
     this.contextMenu.style.position = 'fixed';

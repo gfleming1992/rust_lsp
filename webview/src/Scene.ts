@@ -252,10 +252,12 @@ export class Scene {
       lodAlphaBuffers.push(alphaBuf);
 
       // Handle Visibility Data
+      // IMPORTANT: Copy to a new buffer to avoid keeping the entire parsed ArrayBuffer alive
       let visArr: Float32Array;
       if (lod.visibilityData) {
         if (typeof lod.visibilityData === 'object' && lod.visibilityData instanceof Float32Array) {
-          visArr = lod.visibilityData;
+          // Copy to new buffer to free the original shared ArrayBuffer
+          visArr = new Float32Array(lod.visibilityData);
         } else {
           const visBin = atob(lod.visibilityData as string);
           const visBytes = new Uint8Array(visBin.length);
@@ -376,7 +378,8 @@ export class Scene {
       if (lod.instanceData && lod.instanceCount) {
         let instanceArr: Float32Array;
         if (lod.instanceData instanceof Float32Array) {
-          instanceArr = lod.instanceData;
+          // Copy to new buffer to free the original shared ArrayBuffer
+          instanceArr = new Float32Array(lod.instanceData);
         } else {
           const instanceBin = atob(lod.instanceData as unknown as string);
           const instanceBytes = new Uint8Array(instanceBin.length);
@@ -463,23 +466,18 @@ export class Scene {
   }
 
   public hideObject(range: ObjectRange) {
-    console.log('[Scene] hideObject called with:', range);
     const shaderKey = this.getShaderKey(range.obj_type);
     if (!shaderKey) {
-      console.warn('[Scene] No shader key for obj_type:', range.obj_type);
+      console.warn('[Scene] hideObject: No shader key for obj_type:', range.obj_type);
       return;
     }
 
     const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
-    console.log(`[Scene] Looking for renderKey: ${renderKey}, shaderKey: ${shaderKey}`);
     const renderData = this.layerRenderData.get(renderKey);
     if (!renderData) {
-      console.warn('[Scene] No render data for key:', renderKey);
-      console.log('[Scene] Available render keys:', Array.from(this.layerRenderData.keys()));
+      console.warn('[Scene] hideObject: No render data for:', renderKey);
       return;
     }
-    
-    console.log(`[Scene] Found renderData, shaderType: ${renderData.shaderType}, LOD buffers: ${renderData.lodVisibilityBuffers.length}`);
 
     // Hide object in ALL LOD levels to ensure it disappears regardless of zoom
     if (range.instance_index !== undefined && range.instance_index !== null) {
@@ -535,8 +533,6 @@ export class Scene {
         }
     } else {
         // Batched - hide across all LODs
-        console.log('[Scene] Hiding batched geometry, vertex_ranges:', range.vertex_ranges);
-        
         for (let lodIndex = 0; lodIndex < range.vertex_ranges.length; lodIndex++) {
             const [start, count] = range.vertex_ranges[lodIndex];
             if (count === 0) continue; // Skip empty ranges
@@ -544,15 +540,12 @@ export class Scene {
             const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
             const gpuBuffer = renderData.lodVisibilityBuffers?.[lodIndex];
             if (!cpuBuffer || !gpuBuffer) {
-                console.warn(`[Scene] No CPU or GPU visibility buffer for LOD ${lodIndex}`);
-                continue;
+                continue; // Skip LODs without visibility buffers
             }
-
-            console.log(`[Scene] LOD${lodIndex}: Hiding vertices ${start} to ${start + count - 1} (${count} vertices)`);
             
             // Check bounds
             if (start + count > cpuBuffer.length) {
-                console.error(`[Scene] ERROR: Trying to hide vertices ${start}-${start + count - 1} but cpuBuffer.length is only ${cpuBuffer.length}!`);
+                console.error(`[Scene] ERROR: Out of bounds LOD${lodIndex}: ${start}-${start + count - 1}, bufLen=${cpuBuffer.length}`);
                 continue;
             }
             
@@ -560,8 +553,6 @@ export class Scene {
             for (let i = 0; i < count; i++) {
                 cpuBuffer[start + i] = 0.0;
             }
-            
-            console.log(`[Scene] Updated CPU buffer, first vertex now = ${cpuBuffer[start]}`);
             
             // Update GPU
             this.device?.queue.writeBuffer(
@@ -571,17 +562,294 @@ export class Scene {
                 cpuBuffer.byteOffset + start * 4,
                 count * 4
             );
-            console.log(`[Scene] GPU buffer updated for LOD${lodIndex}`);
         }
     }
     
     // Force immediate GPU queue submission
     if (this.device) {
         this.device.queue.submit([]);
-        console.log('[Scene] GPU queue flushed');
     }
     
     this.state.needsDraw = true;
+  }
+
+  public showObject(range: ObjectRange) {
+    const shaderKey = this.getShaderKey(range.obj_type);
+    if (!shaderKey) return;
+
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
+    const renderData = this.layerRenderData.get(renderKey);
+    if (!renderData) return;
+
+    // Show object in ALL LOD levels
+    if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced - show across all LODs
+        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+            const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+            const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            const idx = range.instance_index;
+            
+            if (shaderKey === 'instanced') {
+                const offset = idx * 3 + 2;
+                if (offset < cpuBuffer.length) {
+                    const view = new DataView(cpuBuffer.buffer);
+                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                    
+                    const currentPacked = view.getUint32(byteOffset, true);
+                    const newPacked = currentPacked | 1; // Set LSB (visible)
+                    view.setUint32(byteOffset, newPacked, true);
+                    
+                    this.device?.queue.writeBuffer(
+                        gpuBuffer,
+                        offset * 4,
+                        cpuBuffer.buffer,
+                        byteOffset,
+                        4
+                    );
+                }
+            } else if (shaderKey === 'instanced_rot') {
+                const offset = idx * 3 + 2;
+                if (offset < cpuBuffer.length) {
+                    const view = new DataView(cpuBuffer.buffer);
+                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                    
+                    const currentPacked = view.getUint32(byteOffset, true);
+                    const newPacked = currentPacked | 1; // Set LSB (visible)
+                    view.setUint32(byteOffset, newPacked, true);
+                    
+                    this.device?.queue.writeBuffer(
+                        gpuBuffer,
+                        offset * 4,
+                        cpuBuffer.buffer,
+                        byteOffset,
+                        4
+                    );
+                }
+            }
+        }
+    } else {
+        // Batched - show across all LODs
+        for (let lodIndex = 0; lodIndex < range.vertex_ranges.length; lodIndex++) {
+            const [start, count] = range.vertex_ranges[lodIndex];
+            if (count === 0) continue;
+            
+            const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+            const gpuBuffer = renderData.lodVisibilityBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            if (start + count > cpuBuffer.length) continue;
+            
+            // Set range to 1.0 (visible)
+            for (let i = 0; i < count; i++) {
+                cpuBuffer[start + i] = 1.0;
+            }
+            
+            // Update GPU
+            this.device?.queue.writeBuffer(
+                gpuBuffer,
+                start * 4,
+                cpuBuffer.buffer,
+                cpuBuffer.byteOffset + start * 4,
+                count * 4
+            );
+        }
+    }
+    
+    // Force immediate GPU queue submission
+    if (this.device) {
+        this.device.queue.submit([]);
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  // Track currently highlighted objects for clearing
+  private highlightedRanges: ObjectRange[] = [];
+
+  public highlightObject(range: ObjectRange) {
+    // Clear previous highlights first
+    if (this.highlightedRanges.length > 0) {
+      this.clearHighlightObject();
+    }
+    
+    this.highlightedRanges = [range];
+    this.applyHighlightToRange(range);
+    
+    if (this.device) {
+        this.device.queue.submit([]);
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  public highlightMultipleObjects(ranges: ObjectRange[]) {
+    // Clear previous highlights first
+    if (this.highlightedRanges.length > 0) {
+      this.clearHighlightObject();
+    }
+    
+    this.highlightedRanges = [...ranges];
+    
+    for (const range of ranges) {
+      this.applyHighlightToRange(range);
+    }
+    
+    if (this.device) {
+        this.device.queue.submit([]);
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  private applyHighlightToRange(range: ObjectRange) {
+    const shaderKey = this.getShaderKey(range.obj_type);
+    if (!shaderKey) {
+      return;
+    }
+
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
+    const renderData = this.layerRenderData.get(renderKey);
+    if (!renderData) {
+      return;
+    }
+
+    if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced - set highlight bit (bit 1)
+        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+            const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+            const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            const idx = range.instance_index;
+            const offset = idx * 3 + 2;
+            if (offset < cpuBuffer.length) {
+                const view = new DataView(cpuBuffer.buffer);
+                const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                
+                const currentPacked = view.getUint32(byteOffset, true);
+                const newPacked = currentPacked | 2; // Set bit 1 (highlight)
+                view.setUint32(byteOffset, newPacked, true);
+                
+                this.device?.queue.writeBuffer(
+                    gpuBuffer,
+                    offset * 4,
+                    cpuBuffer.buffer,
+                    byteOffset,
+                    4
+                );
+            }
+        }
+    } else {
+        // Batched - set visibility to 2.0 (highlighted)
+        const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVisibilityBuffers.length);
+        
+        for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+            const [start, count] = range.vertex_ranges[lodIndex];
+            if (count === 0) continue;
+            
+            const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+            const gpuBuffer = renderData.lodVisibilityBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            if (start + count > cpuBuffer.length) continue;
+            
+            // Set range to 2.0 (highlighted)
+            for (let i = 0; i < count; i++) {
+                cpuBuffer[start + i] = 2.0;
+            }
+            
+            // Update GPU
+            this.device?.queue.writeBuffer(
+                gpuBuffer,
+                start * 4,
+                cpuBuffer.buffer,
+                cpuBuffer.byteOffset + start * 4,
+                count * 4
+            );
+        }
+    }
+  }
+
+  public clearHighlightObject() {
+    if (this.highlightedRanges.length === 0) return;
+    
+    for (const range of this.highlightedRanges) {
+      this.clearHighlightFromRange(range);
+    }
+    this.highlightedRanges = [];
+    
+    if (this.device) {
+        this.device.queue.submit([]);
+    }
+    
+    this.state.needsDraw = true;
+  }
+
+  private clearHighlightFromRange(range: ObjectRange) {
+    const shaderKey = this.getShaderKey(range.obj_type);
+    if (!shaderKey) return;
+
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
+    const renderData = this.layerRenderData.get(renderKey);
+    if (!renderData) return;
+
+    if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced - clear highlight bit (bit 1)
+        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+            const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+            const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            const idx = range.instance_index;
+            const offset = idx * 3 + 2;
+            if (offset < cpuBuffer.length) {
+                const view = new DataView(cpuBuffer.buffer);
+                const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                
+                const currentPacked = view.getUint32(byteOffset, true);
+                const newPacked = currentPacked & ~2; // Clear bit 1 (highlight)
+                view.setUint32(byteOffset, newPacked, true);
+                
+                this.device?.queue.writeBuffer(
+                    gpuBuffer,
+                    offset * 4,
+                    cpuBuffer.buffer,
+                    byteOffset,
+                    4
+                );
+            }
+        }
+    } else {
+        // Batched - set visibility back to 1.0 (normal visible)
+        const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVisibilityBuffers.length);
+        
+        for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+            const [start, count] = range.vertex_ranges[lodIndex];
+            if (count === 0) continue;
+            
+            const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+            const gpuBuffer = renderData.lodVisibilityBuffers?.[lodIndex];
+            if (!cpuBuffer || !gpuBuffer) continue;
+
+            if (start + count > cpuBuffer.length) continue;
+            
+            // Set range back to 1.0 (normal visible)
+            for (let i = 0; i < count; i++) {
+                cpuBuffer[start + i] = 1.0;
+            }
+            
+            // Update GPU
+            this.device?.queue.writeBuffer(
+                gpuBuffer,
+                start * 4,
+                cpuBuffer.buffer,
+                cpuBuffer.byteOffset + start * 4,
+                count * 4
+            );
+        }
+    }
   }
 
   private getShaderKey(type: GeometryType): keyof ShaderGeometry | null {

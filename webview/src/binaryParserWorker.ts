@@ -31,7 +31,6 @@ self.onmessage = (event: MessageEvent<ParseRequest>) => {
   const { type, id, buffer } = event.data;
 
   if (type === "parse") {
-    // console.log(`[BinaryParserWorker] Starting task ${id}`);
     const startTime = performance.now();
     
     try {

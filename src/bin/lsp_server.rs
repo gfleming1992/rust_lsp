@@ -5,8 +5,11 @@ use rust_extension::serialize_xml::xml_node_to_file;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use rstar::RTree;
+
+/// Maximum number of undo/redo events to track
+const MAX_UNDO_HISTORY: usize = 100;
 
 /// JSON-RPC Request format
 #[derive(Debug, Deserialize)]
@@ -48,6 +51,10 @@ struct ServerState {
     layers: Vec<LayerJSON>,
     layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA
     spatial_index: Option<RTree<SelectableObject>>,
+    // Undo/Redo stacks for deleted objects
+    deleted_objects: HashMap<u64, ObjectRange>, // Currently deleted objects (id -> ObjectRange)
+    undo_stack: VecDeque<ObjectRange>,  // Stack of deleted objects (for undo)
+    redo_stack: VecDeque<ObjectRange>,  // Stack of undone deletions (for redo)
 }
 
 impl ServerState {
@@ -58,7 +65,63 @@ impl ServerState {
             layers: Vec::new(),
             layer_colors: HashMap::new(),
             spatial_index: None,
+            deleted_objects: HashMap::new(),
+            undo_stack: VecDeque::with_capacity(MAX_UNDO_HISTORY),
+            redo_stack: VecDeque::with_capacity(MAX_UNDO_HISTORY),
         }
+    }
+    
+    /// Delete an object and track it for undo
+    fn delete_object(&mut self, range: ObjectRange) {
+        self.deleted_objects.insert(range.id, range.clone());
+        
+        // Add to undo stack
+        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+            self.undo_stack.pop_front(); // Remove oldest
+        }
+        self.undo_stack.push_back(range);
+        
+        // Clear redo stack when new action is performed
+        self.redo_stack.clear();
+    }
+    
+    /// Undo the last deletion
+    fn undo_delete(&mut self) -> Option<ObjectRange> {
+        if let Some(range) = self.undo_stack.pop_back() {
+            self.deleted_objects.remove(&range.id);
+            
+            // Add to redo stack
+            if self.redo_stack.len() >= MAX_UNDO_HISTORY {
+                self.redo_stack.pop_front();
+            }
+            self.redo_stack.push_back(range.clone());
+            
+            Some(range)
+        } else {
+            None
+        }
+    }
+    
+    /// Redo the last undone deletion
+    fn redo_delete(&mut self) -> Option<ObjectRange> {
+        if let Some(range) = self.redo_stack.pop_back() {
+            self.deleted_objects.insert(range.id, range.clone());
+            
+            // Add back to undo stack
+            if self.undo_stack.len() >= MAX_UNDO_HISTORY {
+                self.undo_stack.pop_front();
+            }
+            self.undo_stack.push_back(range.clone());
+            
+            Some(range)
+        } else {
+            None
+        }
+    }
+    
+    /// Check if an object is deleted
+    fn is_deleted(&self, id: u64) -> bool {
+        self.deleted_objects.contains_key(&id)
     }
 }
 
@@ -99,6 +162,10 @@ fn main() {
             "UpdateLayerColor" => serde_json::to_string(&handle_update_layer_color(&mut state, request.id, request.params)).unwrap(),
             "Save" => serde_json::to_string(&handle_save(&mut state, request.id, request.params)).unwrap(),
             "Select" => serde_json::to_string(&handle_select(&state, request.id, request.params)).unwrap(),
+            "BoxSelect" => serde_json::to_string(&handle_box_select(&state, request.id, request.params)).unwrap(),
+            "Delete" => serde_json::to_string(&handle_delete(&mut state, request.id, request.params)).unwrap(),
+            "Undo" => serde_json::to_string(&handle_undo(&mut state, request.id, request.params)).unwrap(),
+            "Redo" => serde_json::to_string(&handle_redo(&mut state, request.id, request.params)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -539,22 +606,39 @@ fn handle_save(
     });
 
     eprintln!("[LSP Server] Saving file to: {}", output_path);
+    eprintln!("[LSP Server] Deleted objects count: {}", state.deleted_objects.len());
+    
+    // Log deleted objects for debugging
+    for (obj_id, range) in &state.deleted_objects {
+        eprintln!("[LSP Server]   Deleted: id={}, layer={}, type={}", obj_id, range.layer_id, range.obj_type);
+    }
 
     // Clone root for modification
     let mut root_clone = state.xml_root.as_ref().unwrap().clone();
     
     // Update DictionaryColor in the XML tree
     update_dictionary_colors(&mut root_clone, &state.layer_colors);
+    
+    // TODO: Remove deleted objects from XML
+    // This requires tracking XML element references during parsing
+    // For now, we just save with updated colors
 
     // Serialize to file
     match xml_node_to_file(&root_clone, &output_path) {
         Ok(_) => {
-            eprintln!("[LSP Server] File saved successfully");
+            let deleted_count = state.deleted_objects.len();
+            eprintln!("[LSP Server] File saved successfully (note: {} deleted objects not yet removed from XML)", deleted_count);
             Response {
                 id,
                 result: Some(serde_json::json!({
                     "status": "ok",
-                    "file_path": output_path
+                    "file_path": output_path,
+                    "deleted_objects_count": deleted_count,
+                    "note": if deleted_count > 0 { 
+                        "Deleted objects are hidden in viewer but not yet removed from XML file" 
+                    } else { 
+                        "" 
+                    }
                 })),
                 error: None,
             }
@@ -678,6 +762,155 @@ fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Opt
         Response {
             id,
             result: Some(serde_json::json!([])),
+            error: None,
+        }
+    }
+}
+
+/// Handle BoxSelect request - performs spatial selection for a rectangular region
+fn handle_box_select(state: &ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    #[derive(Deserialize)]
+    struct BoxSelectParams {
+        min_x: f32,
+        min_y: f32,
+        max_x: f32,
+        max_y: f32,
+    }
+
+    let params: BoxSelectParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {min_x, min_y, max_x, max_y}".to_string(),
+                }),
+            };
+        }
+    };
+
+    eprintln!("[LSP Server] BoxSelect: ({}, {}) to ({}, {})", 
+        params.min_x, params.min_y, params.max_x, params.max_y);
+
+    if let Some(tree) = &state.spatial_index {
+        use rstar::AABB;
+        
+        // Create envelope for the selection box
+        let envelope = AABB::from_corners(
+            [params.min_x, params.min_y],
+            [params.max_x, params.max_y]
+        );
+        
+        // Find all objects that intersect with the selection box
+        let results: Vec<ObjectRange> = tree.locate_in_envelope_intersecting(&envelope)
+            .map(|obj| obj.range.clone())
+            .collect();
+        
+        eprintln!("[LSP Server] BoxSelect found {} objects", results.len());
+            
+        Response {
+            id,
+            result: Some(serde_json::to_value(results).unwrap()),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!([])),
+            error: None,
+        }
+    }
+}
+
+/// Handle Delete request - marks an object as deleted
+fn handle_delete(state: &mut ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    let range: ObjectRange = match params.and_then(|p| {
+        // The webview sends { object: ObjectRange }
+        if let serde_json::Value::Object(map) = p {
+            map.get("object").cloned().and_then(|o| serde_json::from_value(o).ok())
+        } else {
+            serde_json::from_value(p).ok()
+        }
+    }) {
+        Some(r) => r,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {object: ObjectRange}".to_string(),
+                }),
+            };
+        }
+    };
+
+    eprintln!("[LSP Server] Delete object id={}", range.id);
+    state.delete_object(range);
+
+    Response {
+        id,
+        result: Some(serde_json::json!({ "status": "ok" })),
+        error: None,
+    }
+}
+
+/// Handle Undo request - restores the last deleted object
+fn handle_undo(state: &mut ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    // The webview sends { object: ObjectRange } but we use our own stack
+    let range: Option<ObjectRange> = params.and_then(|p| {
+        if let serde_json::Value::Object(map) = p {
+            map.get("object").cloned().and_then(|o| serde_json::from_value(o).ok())
+        } else {
+            serde_json::from_value(p).ok()
+        }
+    });
+
+    // If webview sent an object, restore it directly (keeps webview and LSP in sync)
+    if let Some(r) = range {
+        eprintln!("[LSP Server] Undo delete for object id={}", r.id);
+        state.deleted_objects.remove(&r.id);
+        
+        Response {
+            id,
+            result: Some(serde_json::json!({ "status": "ok", "restored_id": r.id })),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!({ "status": "ok", "message": "no object specified" })),
+            error: None,
+        }
+    }
+}
+
+/// Handle Redo request - re-deletes an undone object
+fn handle_redo(state: &mut ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    let range: Option<ObjectRange> = params.and_then(|p| {
+        if let serde_json::Value::Object(map) = p {
+            map.get("object").cloned().and_then(|o| serde_json::from_value(o).ok())
+        } else {
+            serde_json::from_value(p).ok()
+        }
+    });
+
+    // If webview sent an object, delete it again (keeps webview and LSP in sync)
+    if let Some(r) = range {
+        eprintln!("[LSP Server] Redo delete for object id={}", r.id);
+        state.deleted_objects.insert(r.id, r.clone());
+        
+        Response {
+            id,
+            result: Some(serde_json::json!({ "status": "ok", "deleted_id": r.id })),
+            error: None,
+        }
+    } else {
+        Response {
+            id,
+            result: Some(serde_json::json!({ "status": "ok", "message": "no object specified" })),
             error: None,
         }
     }

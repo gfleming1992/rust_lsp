@@ -22,6 +22,9 @@ export class Input {
 
   private selectionBox: HTMLDivElement;
   private onDelete: (() => void) | null = null;
+  private onUndo: (() => void) | null = null;
+  private onRedo: (() => void) | null = null;
+  private onBoxSelect: ((minX: number, minY: number, maxX: number, maxY: number) => void) | null = null;
 
   constructor(scene: Scene, renderer: Renderer, ui: UI, onSelect: (x: number, y: number) => void) {
     this.scene = scene;
@@ -46,16 +49,40 @@ export class Input {
     this.onDelete = callback;
   }
 
+  public setOnUndo(callback: () => void) {
+    this.onUndo = callback;
+  }
+
+  public setOnRedo(callback: () => void) {
+    this.onRedo = callback;
+  }
+
+  public setOnBoxSelect(callback: (minX: number, minY: number, maxX: number, maxY: number) => void) {
+    this.onBoxSelect = callback;
+  }
+
   private setupListeners() {
     this.canvas.style.touchAction = "none";
 
-    // Keyboard listeners for Delete
+    // Keyboard listeners for Delete, Undo, Redo
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Delete' || (event.ctrlKey && (event.key === 'd' || event.key === 'D'))) {
         event.preventDefault();
         console.log('[Input] Delete key pressed');
         if (this.onDelete) {
           this.onDelete();
+        }
+      } else if (event.ctrlKey && (event.key === 'z' || event.key === 'Z') && !event.shiftKey) {
+        event.preventDefault();
+        console.log('[Input] Undo (Ctrl+Z) pressed');
+        if (this.onUndo) {
+          this.onUndo();
+        }
+      } else if (event.ctrlKey && (event.key === 'y' || event.key === 'Y')) {
+        event.preventDefault();
+        console.log('[Input] Redo (Ctrl+Y) pressed');
+        if (this.onRedo) {
+          this.onRedo();
         }
       }
     });
@@ -200,15 +227,9 @@ export class Input {
     
     console.log(`[Input] Box select: (${minX.toFixed(2)}, ${minY.toFixed(2)}) to (${maxX.toFixed(2)}, ${maxY.toFixed(2)})`);
     
-    // Send box select command
-    const vscode = (window as any).vscode;
-    if (vscode) {
-      vscode.postMessage({ 
-        command: 'BoxSelect', 
-        minX, minY, maxX, maxY 
-      });
-    } else {
-      console.log(`[Dev] Box select: (${minX}, ${minY}) to (${maxX}, ${maxY})`);
+    // Use callback if set
+    if (this.onBoxSelect) {
+      this.onBoxSelect(minX, minY, maxX, maxY);
     }
   }
 

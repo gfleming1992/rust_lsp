@@ -20,9 +20,10 @@ struct Uniforms {
 fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut {
   var out : VSOut;
   
-  // Unpack visibility (rotation is ignored for this shader)
+  // Unpack visibility and highlight (rotation is ignored for this shader)
   let packed = bitcast<u32>(inst.z);
   let visible = (packed & 1u) != 0u;
+  let highlighted = (packed & 2u) != 0u;
   
   if (!visible) {
     out.Position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
@@ -33,7 +34,14 @@ fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut
   let p = vec3<f32>(pos + inst.xy, 1.0);
   let t = vec3<f32>( dot(U.m0.xyz, p), dot(U.m1.xyz, p), dot(U.m2.xyz, p) );
   out.Position = vec4<f32>(t.xy, 0.0, 1.0);
-  out.color = U.color;
+  
+  if (highlighted) {
+    // Highlighted: blend color towards white (70% white)
+    let highlightColor = mix(U.color.xyz, vec3<f32>(1.0, 1.0, 1.0), 0.7);
+    out.color = vec4<f32>(highlightColor, U.color.a);
+  } else {
+    out.color = U.color;
+  }
   return out;
 }
 
