@@ -859,13 +859,22 @@ fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]
     };
     
     // Use LOD0 for precise hit testing
-    let lod0 = &lods[0];
+    // For instanced geometry (pads/vias), we need to find the correct LOD entry using shape_index
+    // The LOD entries are organized as: all LOD0 entries, then all LOD1, then all LOD2
+    // So LOD0 entry for shape N is at index N
     
     // Handle instanced geometry (vias, pads)
     if range.obj_type == 2 || range.obj_type == 3 {
+        // Get the correct LOD entry for this shape
+        let shape_idx = range.shape_index.unwrap_or(0) as usize;
+        if shape_idx >= lods.len() {
+            return true; // Shape index out of bounds, fall back to AABB
+        }
+        let lod_entry = &lods[shape_idx];
+        
         // For instanced geometry, check if point is within the instance's bounds
         // The instance position is stored in instance_data
-        if let (Some(inst_data), Some(inst_idx)) = (&lod0.instance_data, range.instance_index) {
+        if let (Some(inst_data), Some(inst_idx)) = (&lod_entry.instance_data, range.instance_index) {
             let floats_per_instance = if range.obj_type == 3 { 3 } else { 3 }; // x, y, packed_rot_vis
             let base = (inst_idx as usize) * floats_per_instance;
             if base + 1 < inst_data.len() {
@@ -873,20 +882,20 @@ fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]
                 let inst_y = inst_data[base + 1];
                 
                 // Check triangles of the base shape, offset by instance position
-                if let Some(ref indices) = lod0.index_data {
+                if let Some(ref indices) = lod_entry.index_data {
                     for tri in indices.chunks(3) {
                         if tri.len() < 3 { continue; }
                         let i0 = tri[0] as usize * 2;
                         let i1 = tri[1] as usize * 2;
                         let i2 = tri[2] as usize * 2;
                         
-                        if i2 + 1 < lod0.vertex_data.len() {
-                            let x0 = lod0.vertex_data[i0] + inst_x;
-                            let y0 = lod0.vertex_data[i0 + 1] + inst_y;
-                            let x1 = lod0.vertex_data[i1] + inst_x;
-                            let y1 = lod0.vertex_data[i1 + 1] + inst_y;
-                            let x2 = lod0.vertex_data[i2] + inst_x;
-                            let y2 = lod0.vertex_data[i2 + 1] + inst_y;
+                        if i2 + 1 < lod_entry.vertex_data.len() {
+                            let x0 = lod_entry.vertex_data[i0] + inst_x;
+                            let y0 = lod_entry.vertex_data[i0 + 1] + inst_y;
+                            let x1 = lod_entry.vertex_data[i1] + inst_x;
+                            let y1 = lod_entry.vertex_data[i1 + 1] + inst_y;
+                            let x2 = lod_entry.vertex_data[i2] + inst_x;
+                            let y2 = lod_entry.vertex_data[i2 + 1] + inst_y;
                             
                             if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
                                 return true;
@@ -900,6 +909,7 @@ fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]
     }
     
     // For batched geometry (polylines, polygons), use vertex_ranges to find our triangles
+    let lod0 = &lods[0];
     if range.vertex_ranges.is_empty() {
         return true; // No vertex range info, fall back to AABB
     }
@@ -980,8 +990,6 @@ fn handle_select(state: &ServerState, id: Option<serde_json::Value>, params: Opt
             .filter(|obj| point_hits_object(params.x, params.y, &obj.range, &state.layers))
             .map(|obj| obj.range.clone())
             .collect();
-        
-        eprintln!("[LSP Server] Select: {} AABB candidates -> {} precise hits", candidates.len(), results.len());
             
         Response {
             id,

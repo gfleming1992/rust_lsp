@@ -474,68 +474,47 @@ export class Scene {
 
   public hideObject(range: ObjectRange) {
     const shaderKey = this.getShaderKey(range.obj_type);
-    if (!shaderKey) {
-      console.warn('[Scene] hideObject: No shader key for obj_type:', range.obj_type);
-      return;
-    }
+    if (!shaderKey) return;
 
     const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
     const renderData = this.layerRenderData.get(renderKey);
-    if (!renderData) {
-      console.warn('[Scene] hideObject: No render data for:', renderKey);
-      return;
-    }
+    if (!renderData) return;
 
     // Hide object in ALL LOD levels to ensure it disappears regardless of zoom
     if (range.instance_index !== undefined && range.instance_index !== null) {
-        // Instanced - hide across all LODs
-        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+        // Instanced - hide across all LOD levels for this specific shape
+        // Use shape_index to find the correct LOD entries
+        // LOD buffers are organized: [shape0_lod0, shape1_lod0, ..., shape0_lod1, shape1_lod1, ...]
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3); // 3 LOD levels
+        const shapeIdx = range.shape_index ?? 0;
+        
+        // Update all 3 LOD levels for this shape
+        for (let lod = 0; lod < 3; lod++) {
+            const lodIndex = lod * numShapes + shapeIdx;
+            if (lodIndex >= totalLODs) continue;
+            
             const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
             const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
             if (!cpuBuffer || !gpuBuffer) continue;
 
             const idx = range.instance_index;
-            
-            if (shaderKey === 'instanced') {
-                // 3 floats: x, y, packed_vis (u32 as float)
-                // Stride = 3
-                const offset = idx * 3 + 2;
-                if (offset < cpuBuffer.length) {
-                    const view = new DataView(cpuBuffer.buffer);
-                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
-                    
-                    const currentPacked = view.getUint32(byteOffset, true);
-                    const newPacked = currentPacked & ~1; // Clear LSB
-                    view.setUint32(byteOffset, newPacked, true);
-                    
-                    this.device?.queue.writeBuffer(
-                        gpuBuffer,
-                        offset * 4,
-                        cpuBuffer.buffer,
-                        byteOffset,
-                        4
-                    );
-                }
-            } else if (shaderKey === 'instanced_rot') {
-                // 3 floats: x, y, packed_rot_vis (f32)
-                // Stride = 3
-                const offset = idx * 3 + 2;
-                if (offset < cpuBuffer.length) {
-                    const view = new DataView(cpuBuffer.buffer);
-                    const byteOffset = cpuBuffer.byteOffset + offset * 4;
-                    
-                    const currentPacked = view.getUint32(byteOffset, true);
-                    const newPacked = currentPacked & ~1; // Clear LSB
-                    view.setUint32(byteOffset, newPacked, true);
-                    
-                    this.device?.queue.writeBuffer(
-                        gpuBuffer,
-                        offset * 4,
-                        cpuBuffer.buffer,
-                        byteOffset,
-                        4
-                    );
-                }
+            const offset = idx * 3 + 2; // 3 floats per instance, visibility in 3rd
+            if (offset < cpuBuffer.length) {
+                const view = new DataView(cpuBuffer.buffer);
+                const byteOffset = cpuBuffer.byteOffset + offset * 4;
+                
+                const currentPacked = view.getUint32(byteOffset, true);
+                const newPacked = currentPacked & ~1; // Clear LSB (visibility bit)
+                view.setUint32(byteOffset, newPacked, true);
+                
+                this.device?.queue.writeBuffer(
+                    gpuBuffer,
+                    offset * 4,
+                    cpuBuffer.buffer,
+                    byteOffset,
+                    4
+                );
             }
         }
     } else {
@@ -712,19 +691,25 @@ export class Scene {
 
   private applyHighlightToRange(range: ObjectRange) {
     const shaderKey = this.getShaderKey(range.obj_type);
-    if (!shaderKey) {
-      return;
-    }
+    if (!shaderKey) return;
 
     const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
     const renderData = this.layerRenderData.get(renderKey);
-    if (!renderData) {
-      return;
-    }
+    if (!renderData) return;
 
     if (range.instance_index !== undefined && range.instance_index !== null) {
         // Instanced - set highlight bit (bit 1)
-        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+        // Use shape_index to find the correct LOD entry for this instance
+        // LOD buffers are organized: [shape0_lod0, shape1_lod0, ..., shape0_lod1, shape1_lod1, ...]
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3); // 3 LOD levels
+        const shapeIdx = range.shape_index ?? 0;
+        
+        // Update all 3 LOD levels for this shape
+        for (let lod = 0; lod < 3; lod++) {
+            const lodIndex = lod * numShapes + shapeIdx;
+            if (lodIndex >= totalLODs) continue;
+            
             const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
             const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
             if (!cpuBuffer || !gpuBuffer) continue;
@@ -804,7 +789,16 @@ export class Scene {
 
     if (range.instance_index !== undefined && range.instance_index !== null) {
         // Instanced - clear highlight bit (bit 1)
-        for (let lodIndex = 0; lodIndex < renderData.cpuInstanceBuffers.length; lodIndex++) {
+        // Use shape_index to find the correct LOD entries
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3); // 3 LOD levels
+        const shapeIdx = range.shape_index ?? 0;
+        
+        // Update all 3 LOD levels for this shape
+        for (let lod = 0; lod < 3; lod++) {
+            const lodIndex = lod * numShapes + shapeIdx;
+            if (lodIndex >= totalLODs) continue;
+            
             const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
             const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
             if (!cpuBuffer || !gpuBuffer) continue;
@@ -859,17 +853,14 @@ export class Scene {
     }
   }
 
-  private getShaderKey(type: GeometryType): keyof ShaderGeometry | null {
-    switch (type) {
-      case GeometryType.Batch: return 'batch';
-      case GeometryType.BatchColored: return 'batch_colored';
-      case GeometryType.BatchInstanced: return 'batch_instanced';
-      case GeometryType.BatchInstancedRot: return 'batch_instanced_rot';
-      case GeometryType.InstancedRotColored: return 'instanced_rot_colored';
-      case GeometryType.InstancedRot: return 'instanced_rot';
-      case GeometryType.InstancedColored: return 'instanced_colored';
-      case GeometryType.Instanced: return 'instanced';
-      case GeometryType.Basic: return 'basic';
+  // Map obj_type from ObjectRange to shader key
+  // obj_type: 0=Polyline, 1=Polygon, 2=Via, 3=Pad
+  private getShaderKey(objType: number): keyof ShaderGeometry | null {
+    switch (objType) {
+      case 0: return 'batch';           // Polyline -> batch
+      case 1: return 'batch_colored';   // Polygon -> batch_colored
+      case 2: return 'instanced';       // Via -> instanced
+      case 3: return 'instanced_rot';   // Pad -> instanced_rot
       default: return null;
     }
   }

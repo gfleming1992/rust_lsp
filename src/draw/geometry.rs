@@ -83,6 +83,7 @@ pub struct ObjectRange {
     pub obj_type: u8, // 0=Polyline, 1=Polygon, 2=Via, 3=Pad
     pub vertex_ranges: Vec<(u32, u32)>, // (start, count) for each LOD
     pub instance_index: Option<u32>,    // For instanced types
+    pub shape_index: Option<u32>,       // For instanced types: which shape/LOD entry group
     pub bounds: [f32; 4], // min_x, min_y, max_x, max_y
     pub net_name: Option<String>,       // Net name for highlighting
 }

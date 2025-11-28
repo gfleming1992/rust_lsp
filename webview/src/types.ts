@@ -93,6 +93,7 @@ export interface ObjectRange {
   obj_type: number;
   vertex_ranges: [number, number][]; // (start, count)
   instance_index?: number;
+  shape_index?: number; // For instanced geometry: which shape/LOD entry group this instance belongs to
   bounds: [number, number, number, number];
   net_name?: string; // Net name from IPC-2581 for highlighting connected shapes
 }

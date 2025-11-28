@@ -222,6 +222,7 @@ fn generate_polyline_geometry(
             obj_type: 0, // Polyline
             vertex_ranges: vec![(0, 0); 5], // Will be filled per LOD
             instance_index: None,
+            shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polyline.net_name.clone(),
         });
@@ -412,6 +413,7 @@ fn generate_polygon_geometry(
             obj_type: 1, // Polygon
             vertex_ranges: vec![(current_vert_start, vert_count as u32); 5], // Same for all LODs (simplified)
             instance_index: None,
+            shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polygon.net_name.clone(),
         });
@@ -482,6 +484,7 @@ fn generate_pad_geometry(
     let mut lod0_entries = Vec::new();
     let mut lod1_entries = Vec::new();
     let mut lod2_entries = Vec::new();
+    let mut shape_index_counter: u32 = 0;
     
     for (shape_id, instances) in shape_groups {
         if let Some(primitive) = primitives.get(&shape_id) {
@@ -511,15 +514,9 @@ fn generate_pad_geometry(
 
             // Create instance data (x, y, rotation) for each pad
             let mut instance_data = Vec::new();
-            // This is per-LOD-entry index, but we need global tracking?
-            // Actually, instance_index in ObjectRange refers to the index within the specific draw call (LOD entry)
-            // But since we have multiple LOD entries per LOD level (one per shape), this is complex.
-            // Wait, the frontend renders each LOD entry separately.
-            // So instance_index should be relative to that LOD entry.
-            // But we need to know WHICH LOD entry an object belongs to.
-            // My ObjectRange struct assumes 1 draw call per LOD level for batched, but instanced has multiple.
-            // I need to update ObjectRange to handle this or simplify.
-            // For now, let's assume we can map back.
+            
+            // shape_index tells us which LOD entry this pad belongs to
+            let current_shape_index = shape_index_counter;
             
             for (local_idx, (original_idx, inst)) in instances.iter().enumerate() {
                 instance_data.push(inst.x);
@@ -541,15 +538,13 @@ fn generate_pad_geometry(
                     obj_type: 3, // Pad
                     vertex_ranges: Vec::new(), // Not used for instanced
                     instance_index: Some(local_idx as u32), // Index within this shape group
+                    shape_index: Some(current_shape_index), // Which shape/LOD entry group
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
                 });
-                // Note: This pushes duplicate ObjectRanges if we iterate multiple times?
-                // No, we iterate shape groups once.
-                // But wait, we generate 3 LODs.
-                // The instance index is the same for all 3 LODs because we push the same instance_data.
-                // So one ObjectRange is enough.
             }
+            
+            shape_index_counter += 1;
             
             let vert_count = shape_verts.len() / 2;
             let idx_count = shape_indices.len();
@@ -717,6 +712,7 @@ fn generate_via_geometry(
                     obj_type: 2, // Via
                     vertex_ranges: Vec::new(),
                     instance_index: Some(local_idx as u32),
+                    shape_index: None, // TODO: Add shape_index for vias if needed
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
                 });

@@ -1,10 +1,12 @@
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { LayerColor } from "./types";
+import { DebugOverlay } from "./DebugOverlay";
 
 export class UI {
   private scene: Scene;
   private renderer: Renderer;
+  private debugOverlay: DebugOverlay | null = null;
   
   private layersEl: HTMLDivElement | null = null;
   private coordOverlayEl: HTMLDivElement | null = null;
@@ -26,6 +28,9 @@ export class UI {
     this.coordOverlayEl = document.getElementById("coordOverlay") as HTMLDivElement | null;
     this.fpsEl = document.getElementById("fps") as HTMLSpanElement | null;
     this.debugLogEl = document.getElementById("debugLog") as HTMLDivElement | null;
+    
+    // Add debug coordinates checkbox
+    this.addDebugCoordsCheckbox();
     
     this.highlightBox = document.createElement('div');
     this.highlightBox.style.position = 'absolute';
@@ -461,5 +466,54 @@ export class UI {
       layerId: layerId,
       color: color
     });
+  }
+
+  public setDebugOverlay(overlay: DebugOverlay | null) {
+    this.debugOverlay = overlay;
+    // Sync checkbox state with overlay
+    if (overlay && this.debugCoordsCheckbox) {
+      this.debugCoordsCheckbox.checked = overlay.isEnabled();
+    }
+  }
+
+  private debugCoordsCheckbox: HTMLInputElement | null = null;
+
+  private addDebugCoordsCheckbox() {
+    const fpsEl = document.getElementById("fps");
+    if (!fpsEl) return;
+
+    const container = document.createElement('div');
+    container.style.marginTop = '8px';
+    container.style.borderTop = '1px solid #444';
+    container.style.paddingTop = '8px';
+
+    const label = document.createElement('label');
+    label.style.display = 'flex';
+    label.style.alignItems = 'center';
+    label.style.gap = '6px';
+    label.style.cursor = 'pointer';
+    label.style.fontSize = '11px';
+    label.style.color = '#aaa';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = false;
+    checkbox.style.margin = '0';
+    checkbox.style.cursor = 'pointer';
+
+    this.debugCoordsCheckbox = checkbox;
+
+    checkbox.addEventListener('change', () => {
+      if (this.debugOverlay) {
+        this.debugOverlay.setVisible(checkbox.checked);
+        this.scene.state.needsDraw = true;
+      }
+    });
+
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode('Show Pad Coordinates'));
+    container.appendChild(label);
+
+    fpsEl.parentElement?.insertBefore(container, fpsEl.nextSibling);
   }
 }

@@ -5,6 +5,7 @@ import { Input } from "./Input";
 import { LayerJSON, ObjectRange } from "./types";
 import { BinaryParserPool } from "./BinaryParserPool";
 import { parseBinaryLayer } from "./binaryParser";
+import { DebugOverlay, DEBUG_SHOW_COORDS } from "./DebugOverlay";
 
 // Detect if running in VS Code webview or dev mode
 const isVSCodeWebview = !!(window as any).acquireVsCodeApi;
@@ -174,10 +175,20 @@ async function init() {
   const renderer = new Renderer(canvasElement, scene);
   const ui = new UI(scene, renderer);
   
-  // Initialize WebGPU
+  // Initialize WebGPU first (so renderer has device)
   console.log('[INIT] Initializing WebGPU renderer...');
   await renderer.init();
   console.log('[INIT] WebGPU renderer initialized');
+  
+  // Create debug overlay for coordinate labels (after renderer init)
+  // Always create it so the checkbox can toggle it, but start hidden unless DEBUG_SHOW_COORDS is true
+  const debugOverlay = new DebugOverlay(canvasElement, scene, renderer);
+  if (!DEBUG_SHOW_COORDS) {
+    debugOverlay.setVisible(false);
+  }
+  
+  // Pass debug overlay to UI for checkbox control
+  ui.setDebugOverlay(debugOverlay);
   
   // Setup Input handling
   const input = new Input(scene, renderer, ui, (x, y) => {
@@ -377,6 +388,11 @@ async function init() {
     ui.refreshLayerLegend();
     renderer.finishLoading(); // Allow rendering to begin
     
+    // Extract debug points after layers are loaded
+    if (debugOverlay) {
+      debugOverlay.extractPointsFromLayers();
+    }
+    
     const batchEnd = performance.now();
     console.log(`[BATCH] Loaded ${pendingLayers.length} layers in ${(batchEnd - batchStart).toFixed(1)}ms`);
     
@@ -488,7 +504,6 @@ async function init() {
       console.error(`Extension error: ${data.message}`);
     } else if (data.command === "selectionResult" && data.ranges) {
       const ranges = data.ranges as ObjectRange[];
-      console.log(`[Select] Received ${ranges.length} selected objects`);
       
       // Filter out deleted objects and objects from invisible layers
       const visibleRanges = ranges.filter(range => {
@@ -496,7 +511,6 @@ async function init() {
         const isLayerVisible = scene.layerVisible.get(range.layer_id) !== false;
         return !isDeleted && isLayerVisible;
       });
-      console.log(`[Select] After filtering deleted/hidden layers: ${visibleRanges.length} visible objects (boxSelect: ${isBoxSelect})`);
       
       if (visibleRanges.length > 0) {
         // Sort by layer order (later in layerOrder = rendered on top = should be selected first)
@@ -511,12 +525,10 @@ async function init() {
           // Box select: select and highlight ALL objects in the box
           selectedObjects = visibleRanges;
           scene.highlightMultipleObjects(visibleRanges);
-          console.log(`[Select] Box selected ${visibleRanges.length} objects across layers`);
         } else {
           // Point select: select and highlight only the topmost object
           selectedObjects = [visibleRanges[0]];
           scene.highlightObject(visibleRanges[0]);
-          console.log(`[Select] Selected topmost: ${visibleRanges[0].layer_id} (layer index ${scene.layerOrder.indexOf(visibleRanges[0].layer_id)})`);
         }
         
         // Update context menu state
@@ -583,7 +595,14 @@ async function init() {
 
   // Render loop
   function loop() {
+    const wasNeedsDraw = scene.state.needsDraw;
     renderer.render();
+    
+    // Render debug overlay after GPU render (only when canvas updated)
+    if (debugOverlay && wasNeedsDraw) {
+      debugOverlay.render();
+    }
+    
     ui.updateStats();
     ui.updateHighlightPosition();
     requestAnimationFrame(loop);
