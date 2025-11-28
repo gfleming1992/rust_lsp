@@ -167,6 +167,13 @@ export function activate(context: vscode.ExtensionContext) {
                             params: { object: message.object } 
                         }, panel);
                         break;
+                    case 'SetLayerVisibility':
+                        // Forward layer visibility change to LSP server
+                        await sendToLspServer({ 
+                            method: 'SetLayerVisibility', 
+                            params: { layer_id: message.layerId, visible: message.visible } 
+                        }, panel);
+                        break;
                     case 'Undo':
                         // Forward undo command to LSP server
                         await sendToLspServer({ 

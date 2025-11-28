@@ -147,6 +147,7 @@ pub struct Polyline {
     pub width: f32,
     pub color: [f32; 4],
     pub line_end: LineEnd,
+    pub net_name: Option<String>,
 }
 
 /// Represents a filled polygon (with optional holes)
@@ -155,6 +156,7 @@ pub struct Polygon {
     pub outer_ring: Vec<Point>,
     pub holes: Vec<Vec<Point>>,
     pub fill_color: [f32; 4],  // Supports alpha for transparency
+    pub net_name: Option<String>,
 }
 
 /// Represents a pad stack hole with optional annular ring
@@ -183,6 +185,8 @@ pub struct PadInstance {
     pub x: f32,
     pub y: f32,
     pub rotation: f32,  // degrees
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_name: Option<String>,
 }
 
 /// Padstack definition (for vias and component pads)
@@ -201,6 +205,8 @@ pub struct ViaInstance {
     pub diameter: f32,  // For circles, or max dimension for other shapes
     pub hole_diameter: f32,
     pub shape: StandardPrimitive,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_name: Option<String>,
 }
 
 /// Represents all geometries organized by layer

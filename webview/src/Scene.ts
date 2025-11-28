@@ -119,6 +119,13 @@ export class Scene {
   public toggleLayerVisibility(layerId: string, visible: boolean) {
     this.layerVisible.set(layerId, visible);
     this.state.needsDraw = true;
+    
+    // Notify extension/LSP about layer visibility change
+    // @ts-ignore - vscode is injected by VS Code webview API
+    if (typeof vscode !== 'undefined') {
+      // @ts-ignore
+      vscode.postMessage({ command: 'SetLayerVisibility', layerId, visible });
+    }
   }
 
   public loadLayerData(layerJson: LayerJSON) {

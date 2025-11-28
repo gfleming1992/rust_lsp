@@ -53,6 +53,8 @@ struct ServerState {
     spatial_index: Option<RTree<SelectableObject>>,
     // Undo/Redo stacks for deleted objects
     deleted_objects: HashMap<u64, ObjectRange>, // Currently deleted objects (id -> ObjectRange)
+    // Hidden layers (layer visibility)
+    hidden_layers: std::collections::HashSet<String>, // layer_id -> hidden
 }
 
 impl ServerState {
@@ -64,6 +66,7 @@ impl ServerState {
             layer_colors: HashMap::new(),
             spatial_index: None,
             deleted_objects: HashMap::new(),
+            hidden_layers: std::collections::HashSet::new(),
         }
     }
 }
@@ -103,6 +106,7 @@ fn main() {
             "GetTessellation" => handle_get_tessellation_json(&mut state, request.id, request.params),
             "GetTessellationBinary" => handle_get_tessellation_binary(&mut state, request.id, request.params),
             "UpdateLayerColor" => serde_json::to_string(&handle_update_layer_color(&mut state, request.id, request.params)).unwrap(),
+            "SetLayerVisibility" => serde_json::to_string(&handle_set_layer_visibility(&mut state, request.id, request.params)).unwrap(),
             "Save" => serde_json::to_string(&handle_save(&mut state, request.id, request.params)).unwrap(),
             "Select" => serde_json::to_string(&handle_select(&state, request.id, request.params)).unwrap(),
             "BoxSelect" => serde_json::to_string(&handle_box_select(&state, request.id, request.params)).unwrap(),
@@ -509,6 +513,49 @@ fn handle_update_layer_color(
     }
 }
 
+/// Handle SetLayerVisibility request - updates layer visibility state
+fn handle_set_layer_visibility(
+    state: &mut ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+) -> Response {
+    #[derive(Deserialize)]
+    struct SetVisibilityParams {
+        layer_id: String,
+        visible: bool,
+    }
+
+    let params: SetVisibilityParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: -32602,
+                    message: "Invalid params: expected {layer_id: string, visible: bool}".to_string(),
+                }),
+            };
+        }
+    };
+
+    eprintln!("[LSP Server] Setting layer {} visibility to {}", params.layer_id, params.visible);
+
+    if params.visible {
+        state.hidden_layers.remove(&params.layer_id);
+    } else {
+        state.hidden_layers.insert(params.layer_id.clone());
+    }
+
+    Response {
+        id,
+        result: Some(serde_json::json!({
+            "status": "ok"
+        })),
+        error: None,
+    }
+}
+
 /// Handle Save request - serializes XML with updated colors to disk
 fn handle_save(
     state: &mut ServerState,
@@ -564,26 +611,23 @@ fn handle_save(
     // Update DictionaryColor in the XML tree
     update_dictionary_colors(&mut root_clone, &state.layer_colors);
     
-    // TODO: Remove deleted objects from XML
-    // This requires tracking XML element references during parsing
-    // For now, we just save with updated colors
+    // Remove deleted objects from XML
+    if !state.deleted_objects.is_empty() {
+        let removed_count = remove_deleted_objects_from_xml(&mut root_clone, &state.deleted_objects, &state.layers);
+        eprintln!("[LSP Server] Removed {} objects from XML", removed_count);
+    }
 
     // Serialize to file
     match xml_node_to_file(&root_clone, &output_path) {
         Ok(_) => {
             let deleted_count = state.deleted_objects.len();
-            eprintln!("[LSP Server] File saved successfully (note: {} deleted objects not yet removed from XML)", deleted_count);
+            eprintln!("[LSP Server] File saved successfully");
             Response {
                 id,
                 result: Some(serde_json::json!({
                     "status": "ok",
                     "file_path": output_path,
-                    "deleted_objects_count": deleted_count,
-                    "note": if deleted_count > 0 { 
-                        "Deleted objects are hidden in viewer but not yet removed from XML file" 
-                    } else { 
-                        "" 
-                    }
+                    "deleted_objects_count": deleted_count
                 })),
                 error: None,
             }
@@ -667,6 +711,118 @@ fn update_dictionary_colors(root: &mut XmlNode, layer_colors: &HashMap<String, [
         
         dict_color.children.push(entry);
     }
+}
+
+/// Remove deleted objects from XML tree
+/// Returns the number of objects removed
+fn remove_deleted_objects_from_xml(
+    root: &mut XmlNode,
+    deleted_objects: &HashMap<u64, ObjectRange>,
+    _layers: &[LayerJSON],
+) -> usize {
+    // Build a map of layer_id -> set of deleted object indices by type
+    // ID format: (layer_index << 40) | (obj_type << 36) | object_index
+    let mut deleted_by_layer: HashMap<String, HashMap<u8, std::collections::HashSet<usize>>> = HashMap::new();
+    
+    for (id, range) in deleted_objects {
+        let obj_index = (*id & 0xFFFFFFFFF) as usize; // Lower 36 bits
+        let obj_type = range.obj_type;
+        
+        deleted_by_layer
+            .entry(range.layer_id.clone())
+            .or_default()
+            .entry(obj_type)
+            .or_default()
+            .insert(obj_index);
+    }
+    
+    let mut total_removed = 0;
+    
+    // Now traverse the XML and remove matching elements
+    // We need to find LayerFeature nodes and track object indices
+    fn process_node(
+        node: &mut XmlNode,
+        deleted_by_layer: &HashMap<String, HashMap<u8, std::collections::HashSet<usize>>>,
+        current_layer: Option<&str>,
+        counters: &mut HashMap<String, HashMap<u8, usize>>, // layer -> type -> count
+        removed: &mut usize,
+    ) {
+        // Check if this is a LayerFeature - updates current layer context
+        let layer_ref = if node.name == "LayerFeature" {
+            node.attributes.get("layerRef").map(|s| s.as_str())
+        } else {
+            current_layer
+        };
+        
+        // Check if this node should be removed
+        let should_remove = |child: &XmlNode, layer: Option<&str>, counters: &mut HashMap<String, HashMap<u8, usize>>| -> bool {
+            let layer_id = match layer {
+                Some(l) => l,
+                None => return false,
+            };
+            
+            let deleted_for_layer = match deleted_by_layer.get(layer_id) {
+                Some(d) => d,
+                None => return false,
+            };
+            
+            // Determine object type and check if this index is deleted
+            let obj_type = match child.name.as_str() {
+                "Polyline" | "Line" => 0u8,
+                "Polygon" => 1u8,
+                "Pad" => {
+                    // Check if it's a via (padUsage="VIA") or regular pad
+                    if child.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA") {
+                        2u8 // Via
+                    } else {
+                        3u8 // Pad
+                    }
+                }
+                _ => return false,
+            };
+            
+            // Get current count for this type in this layer
+            let count = counters
+                .entry(layer_id.to_string())
+                .or_default()
+                .entry(obj_type)
+                .or_insert(0);
+            
+            let current_idx = *count;
+            *count += 1;
+            
+            // Check if this index is in the deleted set
+            if let Some(deleted_indices) = deleted_for_layer.get(&obj_type) {
+                if deleted_indices.contains(&current_idx) {
+                    return true;
+                }
+            }
+            
+            false
+        };
+        
+        // Process children - need to remove some and recurse into others
+        let mut i = 0;
+        while i < node.children.len() {
+            let child = &node.children[i];
+            
+            if should_remove(child, layer_ref, counters) {
+                node.children.remove(i);
+                *removed += 1;
+                // Don't increment i, the next element is now at position i
+            } else {
+                // Recurse into this child
+                let child_mut = &mut node.children[i];
+                process_node(child_mut, deleted_by_layer, layer_ref, counters, removed);
+                i += 1;
+            }
+        }
+    }
+    
+    let mut counters: HashMap<String, HashMap<u8, usize>> = HashMap::new();
+    process_node(root, &deleted_by_layer, None, &mut counters, &mut total_removed);
+    
+    total_removed
 }
 
 /// Check if a point is inside a triangle using barycentric coordinates
@@ -1107,8 +1263,23 @@ fn handle_query_net_at_point(
         // Query R-tree for objects at this point
         let point = [params.x as f32, params.y as f32];
         
-        // Find all objects at this point and return the first one with a net name
+        // Find all objects at this point, filter by precise geometry, return first with net name
         for obj in tree.locate_all_at_point(&point) {
+            // Skip deleted objects
+            if state.deleted_objects.contains_key(&obj.range.id) {
+                continue;
+            }
+            
+            // Skip objects on hidden layers
+            if state.hidden_layers.contains(&obj.range.layer_id) {
+                continue;
+            }
+            
+            // Skip if point doesn't actually hit the object's geometry
+            if !point_hits_object(params.x as f32, params.y as f32, &obj.range, &state.layers) {
+                continue;
+            }
+            
             if let Some(ref net_name) = obj.range.net_name {
                 if !net_name.is_empty() {
                     return Response {

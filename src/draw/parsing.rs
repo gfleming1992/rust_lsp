@@ -184,22 +184,44 @@ fn collect_geometries_from_node(
     line_descriptors: &IndexMap<String, LineDescriptor>,
     padstack_defs: &IndexMap<String, PadStackDef>,
 ) {
+    // Start with no net context
+    collect_geometries_with_net(node, geometries, line_descriptors, padstack_defs, None);
+}
+
+/// Recursively collect all geometry elements, tracking the current net context from Set nodes
+fn collect_geometries_with_net(
+    node: &XmlNode,
+    geometries: &mut LayerGeometries,
+    line_descriptors: &IndexMap<String, LineDescriptor>,
+    padstack_defs: &IndexMap<String, PadStackDef>,
+    current_net: Option<&str>,
+) {
+    // Check if this node is a Set with a net attribute - this provides net context for children
+    let net_context = if node.name == "Set" {
+        node.attributes.get("net").map(|s| s.as_str()).or(current_net)
+    } else {
+        current_net
+    };
+    
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
-        if let Ok(polyline) = parse_polyline_node(node, line_descriptors) {
+        if let Ok(mut polyline) = parse_polyline_node(node, line_descriptors) {
+            polyline.net_name = net_context.map(|s| s.to_string());
             geometries.polylines.push(polyline);
         }
     } else if node.name == "Line" {
-        if let Ok(line_polyline) = parse_line_node(node, line_descriptors) {
+        if let Ok(mut line_polyline) = parse_line_node(node, line_descriptors) {
+            line_polyline.net_name = net_context.map(|s| s.to_string());
             geometries.polylines.push(line_polyline);
         }
     } else if node.name == "Polygon" {
         // Parse filled polygon shapes
-        if let Ok(polygon) = parse_polygon_node(node) {
+        if let Ok(mut polygon) = parse_polygon_node(node) {
+            polygon.net_name = net_context.map(|s| s.to_string());
             geometries.polygons.push(polygon);
         }
     } else if node.name == "LayerFeature" {
-        // Collect pads and vias from this layer
+        // Collect pads and vias from this layer (they handle their own net context)
         let pads = collect_pads_from_layer(node, padstack_defs);
         geometries.pads.extend(pads);
         
@@ -210,9 +232,9 @@ fn collect_geometries_from_node(
         geometries.vias.extend(vias);
     }
 
-    // Recursively search all children
+    // Recursively search all children, passing down the net context
     for child in &node.children {
-        collect_geometries_from_node(child, geometries, line_descriptors, padstack_defs);
+        collect_geometries_with_net(child, geometries, line_descriptors, padstack_defs, net_context);
     }
 }
 
@@ -227,6 +249,9 @@ fn collect_padstacks_from_step(
         for child in &node.children {
             if child.name == "PadStack" {
                 // Parse inline PadStack definition
+                
+                // Get net name from PadStack's net attribute
+                let net_name = child.attributes.get("net").map(|s| s.to_string());
                 
                 // 1. Parse LayerHole (optional, but usually present for vias)
                 let mut hole_diameter = 0.0;
@@ -274,6 +299,7 @@ fn collect_padstacks_from_step(
                                             diameter: outer_diameter,
                                             hole_diameter,
                                             shape: primitive.clone(),
+                                            net_name: net_name.clone(),
                                         };
                                         
                                         // Add to layer
@@ -399,6 +425,7 @@ fn parse_polyline_node(
         width,
         color,
         line_end,
+        net_name: None, // Will be set by caller with net context
     })
 }
 
@@ -475,6 +502,7 @@ fn parse_line_node(
         width,
         color,
         line_end,
+        net_name: None, // Will be set by caller with net context
     })
 }
 
@@ -556,6 +584,7 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
         outer_ring,
         holes,
         fill_color,
+        net_name: None, // Will be set by caller with net context
     })
 }
 
@@ -868,8 +897,15 @@ fn parse_standard_primitives(root: &XmlNode) -> HashMap<String, StandardPrimitiv
 fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<PadInstance> {
     let mut pads = Vec::new();
     
-    // Helper to recursively visit all nodes
-    fn visit_nodes(node: &XmlNode, pads: &mut Vec<PadInstance>, padstack_defs: &IndexMap<String, PadStackDef>) {
+    // Helper to recursively visit all nodes, tracking net context from Set nodes
+    fn visit_nodes(node: &XmlNode, pads: &mut Vec<PadInstance>, padstack_defs: &IndexMap<String, PadStackDef>, current_net: Option<&str>) {
+        // Check if this is a Set with a net attribute
+        let net_context = if node.name == "Set" {
+            node.attributes.get("net").map(|s| s.as_str()).or(current_net)
+        } else {
+            current_net
+        };
+        
         if node.name == "Pad" {
             // Skip if this is a via (padUsage="VIA")
             if let Some(usage) = node.attributes.get("padUsage") {
@@ -923,17 +959,18 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                     x,
                     y,
                     rotation,
+                    net_name: net_context.map(|s| s.to_string()),
                 });
             }
         }
         
-        // Recursively visit children
+        // Recursively visit children with net context
         for child in &node.children {
-            visit_nodes(child, pads, padstack_defs);
+            visit_nodes(child, pads, padstack_defs, net_context);
         }
     }
     
-    visit_nodes(layer_node, &mut pads, padstack_defs);
+    visit_nodes(layer_node, &mut pads, padstack_defs, None);
     pads
 }
 
@@ -942,10 +979,17 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
 fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String, PadStackDef>) -> Vec<ViaInstance> {
     let mut vias = Vec::new();
     
-    // Helper to recursively visit all nodes
-    fn visit_nodes(node: &XmlNode, vias: &mut Vec<ViaInstance>, padstack_defs: &IndexMap<String, PadStackDef>, parent_is_via_set: bool) {
+    // Helper to recursively visit all nodes, tracking net context from Set nodes
+    fn visit_nodes(node: &XmlNode, vias: &mut Vec<ViaInstance>, padstack_defs: &IndexMap<String, PadStackDef>, parent_is_via_set: bool, current_net: Option<&str>) {
         // Check if this is a Set with padUsage="VIA"
         let is_via_set = node.name == "Set" && node.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+        
+        // Check if this Set has a net attribute
+        let net_context = if node.name == "Set" {
+            node.attributes.get("net").map(|s| s.as_str()).or(current_net)
+        } else {
+            current_net
+        };
         
         if node.name == "Pad" {
             // Collect if in a via Set
@@ -978,6 +1022,7 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                         diameter: def.outer_diameter,
                         hole_diameter: def.hole_diameter,
                         shape: def.shape.clone(),
+                        net_name: net_context.map(|s| s.to_string()),
                     });
                 }
             } else if node.attributes.contains_key("padstackDefRef") {
@@ -1006,6 +1051,7 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                                 diameter: def.outer_diameter,
                                 hole_diameter: def.hole_diameter,
                                 shape: def.shape.clone(),
+                                net_name: net_context.map(|s| s.to_string()),
                             });
                         }
                     }
@@ -1013,13 +1059,13 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
             }
         }
         
-        // Recursively visit children, passing down via_set status
+        // Recursively visit children, passing down via_set status and net context
         for child in &node.children {
-            visit_nodes(child, vias, padstack_defs, is_via_set || parent_is_via_set);
+            visit_nodes(child, vias, padstack_defs, is_via_set || parent_is_via_set, net_context);
         }
     }
     
-    visit_nodes(layer_node, &mut vias, padstack_defs, false);
+    visit_nodes(layer_node, &mut vias, padstack_defs, false, None);
     vias
 }
 
