@@ -17,6 +17,9 @@ rayon = "1.11.0"
 rstar = "0.12"
 byteorder = "1.5"
 
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["psapi", "processthreadsapi"] }
+
 [lib]
 name = "rust_extension"
 path = "src/lib.rs"

@@ -9,7 +9,7 @@ export class Input {
   private renderer: Renderer;
   private ui: UI;
   private canvas: HTMLCanvasElement;
-  private onSelect: (x: number, y: number) => void;
+  private onSelect: (x: number, y: number, ctrlKey: boolean) => void;
   private contextMenu: ContextMenu;
   private tooltip: Tooltip;
 
@@ -35,8 +35,9 @@ export class Input {
   private hoverTimer: number | null = null;
   private hoverDelayMs = 1000; // 1 second delay
   private onQueryNetAtPoint: ((worldX: number, worldY: number, clientX: number, clientY: number) => void) | null = null;
+  private lastClickCtrlKey = false; // Track if Ctrl was held during click
 
-  constructor(scene: Scene, renderer: Renderer, ui: UI, onSelect: (x: number, y: number) => void) {
+  constructor(scene: Scene, renderer: Renderer, ui: UI, onSelect: (x: number, y: number, ctrlKey: boolean) => void) {
     this.scene = scene;
     this.renderer = renderer;
     this.ui = ui;
@@ -182,6 +183,7 @@ export class Input {
       this.scene.state.lastY = event.clientY;
       this.dragStartX = event.clientX;
       this.dragStartY = event.clientY;
+      this.lastClickCtrlKey = event.ctrlKey; // Track Ctrl key state
       this.canvas.setPointerCapture(event.pointerId);
       
       if (event.button === 1) { // Middle mouse - Pan
@@ -305,7 +307,7 @@ export class Input {
     const cssY = clientY - rect.top;
     const world = this.renderer.screenToWorld(cssX, cssY);
     
-    this.onSelect(world.x, world.y);
+    this.onSelect(world.x, world.y, this.lastClickCtrlKey);
   }
 
   private handleBoxSelect(startX: number, startY: number, endX: number, endY: number) {

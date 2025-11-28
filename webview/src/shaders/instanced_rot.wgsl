@@ -52,8 +52,8 @@ fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut
   out.Position = vec4<f32>(t.xy, 0.0, 1.0);
   
   if (highlighted) {
-    // Highlighted: blend color towards white (70% white)
-    let highlightColor = mix(U.color.xyz, vec3<f32>(1.0, 1.0, 1.0), 0.7);
+    // Highlighted: blend color towards white (80% white for high visibility)
+    let highlightColor = mix(U.color.xyz, vec3<f32>(1.0, 1.0, 1.0), 0.8);
     out.color = vec4<f32>(highlightColor, U.color.a);
   } else {
     out.color = U.color;

@@ -14,6 +14,7 @@ export class UI {
   private debugLogEl: HTMLDivElement | null = null;
   
   private lastStatsUpdate = 0;
+  private rustMemoryBytes: number | null = null;
 
   private highlightBox: HTMLDivElement;
   private contextMenu: HTMLDivElement;
@@ -451,7 +452,17 @@ export class UI {
       lines.push(`JS Heap: ${usedMB} / ${totalMB} MB`);
     }
 
+    // Add Rust LSP memory stats if available
+    if (this.rustMemoryBytes !== null) {
+      const rustMB = (this.rustMemoryBytes / 1048576).toFixed(2);
+      lines.push(`Rust Heap: ${rustMB} MB`);
+    }
+
     this.fpsEl.innerHTML = lines.join("<br/>");
+  }
+
+  public setRustMemory(bytes: number | null) {
+    this.rustMemoryBytes = bytes;
   }
 
   private notifyColorChange(layerId: string, color: LayerColor) {

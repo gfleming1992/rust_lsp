@@ -11,6 +11,39 @@ use rstar::RTree;
 use indexmap::IndexMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(windows)]
+use std::mem::MaybeUninit;
+
+/// Get current process memory usage on Windows (returns bytes)
+#[cfg(windows)]
+fn get_process_memory_bytes() -> Option<u64> {
+    use winapi::um::psapi::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use winapi::um::processthreadsapi::GetCurrentProcess;
+    
+    unsafe {
+        let mut pmc: MaybeUninit<PROCESS_MEMORY_COUNTERS> = MaybeUninit::uninit();
+        let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        
+        if GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            pmc.as_mut_ptr(),
+            cb,
+        ) != 0 {
+            let pmc = pmc.assume_init();
+            // WorkingSetSize is the current memory in RAM
+            Some(pmc.WorkingSetSize as u64)
+        } else {
+            None
+        }
+    }
+}
+
+/// Fallback for non-Windows platforms
+#[cfg(not(windows))]
+fn get_process_memory_bytes() -> Option<u64> {
+    None
+}
+
 /// Track if we've already written to the log this session (to truncate on first write)
 static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -152,6 +185,7 @@ fn main() {
             "HighlightSelectedNets" => serde_json::to_string(&handle_highlight_selected_nets(&state, request.id, request.params)).unwrap(),
             "HighlightSelectedComponents" => serde_json::to_string(&handle_highlight_selected_components(&state, request.id, request.params)).unwrap(),
             "QueryNetAtPoint" => serde_json::to_string(&handle_query_net_at_point(&state, request.id, request.params)).unwrap(),
+            "GetMemory" => serde_json::to_string(&handle_get_memory(request.id)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -1696,5 +1730,18 @@ fn handle_query_net_at_point(
             })),
             error: None,
         }
+    }
+}
+
+/// Handle GetMemory request - returns current process memory usage
+fn handle_get_memory(id: Option<serde_json::Value>) -> Response {
+    let memory_bytes = get_process_memory_bytes();
+    
+    Response {
+        id,
+        result: Some(serde_json::json!({
+            "memory_bytes": memory_bytes
+        })),
+        error: None,
     }
 }

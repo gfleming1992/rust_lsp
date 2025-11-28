@@ -280,6 +280,20 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
+                    case 'GetMemory':
+                        // Forward get memory command to LSP server
+                        const memoryResponse = await sendToLspServer({ 
+                            method: 'GetMemory', 
+                            params: null 
+                        }, panel);
+                        
+                        if (memoryResponse?.result) {
+                            panel.webview.postMessage({
+                                command: 'memoryResult',
+                                memoryBytes: memoryResponse.result.memory_bytes
+                            });
+                        }
+                        break;
                 }
             },
             undefined,

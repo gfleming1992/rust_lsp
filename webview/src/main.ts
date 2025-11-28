@@ -190,23 +190,25 @@ async function init() {
   // Pass debug overlay to UI for checkbox control
   ui.setDebugOverlay(debugOverlay);
   
-  // Setup Input handling
-  const input = new Input(scene, renderer, ui, (x, y) => {
-    isBoxSelect = false; // Single point select
-    if (isVSCodeWebview && vscode) {
-      vscode.postMessage({ command: 'Select', x, y });
-    } else {
-      console.log(`[Dev] Select at ${x}, ${y}`);
-    }
-  });
-
   // Handle deletion with undo/redo support
   let selectedObjects: ObjectRange[] = [];
   let deletedObjectIds = new Set<number>(); // Track deleted object IDs
   let isBoxSelect = false; // Track if current selection is from box select
+  let isCtrlSelect = false; // Track if Ctrl was held during selection (append mode)
   
   // Store full net results (including hidden layers) for "Show only net layers" feature
   let lastNetHighlightAllObjects: ObjectRange[] = [];
+
+  // Setup Input handling
+  const input = new Input(scene, renderer, ui, (x, y, ctrlKey) => {
+    isBoxSelect = false; // Single point select
+    isCtrlSelect = ctrlKey; // Track if appending to selection
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'Select', x, y });
+    } else {
+      console.log(`[Dev] Select at ${x}, ${y}${ctrlKey ? ' (Ctrl+click, append mode)' : ''}`);
+    }
+  });
 
   // Set up box select handler
   input.setOnBoxSelect((minX, minY, maxX, maxY) => {
@@ -597,6 +599,27 @@ async function init() {
           // Box select: select and highlight ALL objects in the box
           selectedObjects = visibleRanges;
           scene.highlightMultipleObjects(visibleRanges);
+        } else if (isCtrlSelect) {
+          // Ctrl+click: append/toggle the topmost object to/from selection
+          const newObj = visibleRanges[0];
+          const existingIndex = selectedObjects.findIndex(obj => obj.id === newObj.id);
+          
+          if (existingIndex >= 0) {
+            // Already selected - remove it (toggle off)
+            selectedObjects.splice(existingIndex, 1);
+            console.log(`[Select] Ctrl+click: removed object ${newObj.id} from selection (${selectedObjects.length} remaining)`);
+          } else {
+            // Not selected - add it
+            selectedObjects.push(newObj);
+            console.log(`[Select] Ctrl+click: added object ${newObj.id} to selection (${selectedObjects.length} total)`);
+          }
+          
+          // Update highlight for all selected objects
+          if (selectedObjects.length > 0) {
+            scene.highlightMultipleObjects(selectedObjects);
+          } else {
+            scene.clearHighlightObject();
+          }
         } else {
           // Point select: select and highlight only the topmost object
           selectedObjects = [visibleRanges[0]];
@@ -607,14 +630,15 @@ async function init() {
         lastNetHighlightAllObjects = [];
         
         // Update context menu state
-        input.setHasSelection(true);
+        input.setHasSelection(selectedObjects.length > 0);
         // Check if any selected object has a component_ref
         const hasComponentRef = selectedObjects.some(obj => obj.component_ref);
         input.setHasComponentSelection(hasComponentRef);
         // Check if any selected object has a net_name (for "Show only net layers" option)
         const hasNetName = selectedObjects.some(obj => obj.net_name && obj.net_name !== 'No Net');
         input.setHasNetSelection(hasNetName);
-      } else {
+      } else if (!isCtrlSelect) {
+        // Only clear selection on empty click if not Ctrl+clicking
         selectedObjects = [];
         lastNetHighlightAllObjects = [];
         scene.clearHighlightObject();
@@ -697,6 +721,10 @@ async function init() {
       
       // Trigger a redraw to reflect visibility changes
       scene.state.needsDraw = true;
+    } else if (data.command === "memoryResult") {
+      // Handle Rust LSP memory result
+      const memoryBytes = data.memoryBytes as number | null;
+      ui.setRustMemory(memoryBytes);
     }
   });
   
@@ -738,6 +766,13 @@ async function init() {
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
+
+  // Periodic memory request to LSP server (every 2 seconds)
+  if (isVSCodeWebview && vscode) {
+    setInterval(() => {
+      vscode.postMessage({ command: 'GetMemory' });
+    }, 2000);
+  }
 }
 
 init().catch((error) => {
