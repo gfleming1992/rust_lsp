@@ -150,6 +150,7 @@ pub struct Polyline {
     pub color: [f32; 4],
     pub line_end: LineEnd,
     pub net_name: Option<String>,
+    pub component_ref: Option<String>,
 }
 
 /// Represents a filled polygon (with optional holes)
@@ -159,6 +160,7 @@ pub struct Polygon {
     pub holes: Vec<Vec<Point>>,
     pub fill_color: [f32; 4],  // Supports alpha for transparency
     pub net_name: Option<String>,
+    pub component_ref: Option<String>,
 }
 
 /// Represents a pad stack hole with optional annular ring

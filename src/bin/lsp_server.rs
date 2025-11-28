@@ -9,8 +9,12 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use rstar::RTree;
 use indexmap::IndexMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Helper to log to file for debugging
+/// Track if we've already written to the log this session (to truncate on first write)
+static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Helper to log to file for debugging (truncates on first write each session)
 fn log_to_file(msg: &str) {
     // Use absolute path since LSP server may run from different working directory
     let log_path = if cfg!(windows) {
@@ -19,11 +23,23 @@ fn log_to_file(msg: &str) {
         std::path::PathBuf::from("logs/lsp_debug.txt")
     };
     
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    // On first write, truncate the file; afterwards append
+    let is_first_write = !LOG_INITIALIZED.swap(true, Ordering::SeqCst);
+    
+    let file_result = if is_first_write {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+    };
+    
+    if let Ok(mut file) = file_result {
         let _ = writeln!(file, "{}", msg);
     }
 }

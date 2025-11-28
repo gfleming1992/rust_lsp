@@ -184,40 +184,50 @@ fn collect_geometries_from_node(
     line_descriptors: &IndexMap<String, LineDescriptor>,
     padstack_defs: &IndexMap<String, PadStackDef>,
 ) {
-    // Start with no net context
-    collect_geometries_with_net(node, geometries, line_descriptors, padstack_defs, None);
+    // Start with no net or component context
+    collect_geometries_with_context(node, geometries, line_descriptors, padstack_defs, None, None);
 }
 
-/// Recursively collect all geometry elements, tracking the current net context from Set nodes
-fn collect_geometries_with_net(
+/// Recursively collect all geometry elements, tracking the current net and component context from Set nodes
+fn collect_geometries_with_context(
     node: &XmlNode,
     geometries: &mut LayerGeometries,
     line_descriptors: &IndexMap<String, LineDescriptor>,
     padstack_defs: &IndexMap<String, PadStackDef>,
     current_net: Option<&str>,
+    current_component: Option<&str>,
 ) {
-    // Check if this node is a Set with a net attribute - this provides net context for children
+    // Check if this node is a Set with a net or componentRef attribute
     let net_context = if node.name == "Set" {
         node.attributes.get("net").map(|s| s.as_str()).or(current_net)
     } else {
         current_net
     };
     
+    let component_context = if node.name == "Set" {
+        node.attributes.get("componentRef").map(|s| s.as_str()).or(current_component)
+    } else {
+        current_component
+    };
+    
     // If this is a Polyline node, parse it
     if node.name == "Polyline" {
         if let Ok(mut polyline) = parse_polyline_node(node, line_descriptors) {
             polyline.net_name = net_context.map(|s| s.to_string());
+            polyline.component_ref = component_context.map(|s| s.to_string());
             geometries.polylines.push(polyline);
         }
     } else if node.name == "Line" {
         if let Ok(mut line_polyline) = parse_line_node(node, line_descriptors) {
             line_polyline.net_name = net_context.map(|s| s.to_string());
+            line_polyline.component_ref = component_context.map(|s| s.to_string());
             geometries.polylines.push(line_polyline);
         }
     } else if node.name == "Polygon" {
         // Parse filled polygon shapes
         if let Ok(mut polygon) = parse_polygon_node(node) {
             polygon.net_name = net_context.map(|s| s.to_string());
+            polygon.component_ref = component_context.map(|s| s.to_string());
             geometries.polygons.push(polygon);
         }
     } else if node.name == "LayerFeature" {
@@ -232,9 +242,9 @@ fn collect_geometries_with_net(
         geometries.vias.extend(vias);
     }
 
-    // Recursively search all children, passing down the net context
+    // Recursively search all children, passing down the net and component context
     for child in &node.children {
-        collect_geometries_with_net(child, geometries, line_descriptors, padstack_defs, net_context);
+        collect_geometries_with_context(child, geometries, line_descriptors, padstack_defs, net_context, component_context);
     }
 }
 
@@ -427,6 +437,7 @@ fn parse_polyline_node(
         color,
         line_end,
         net_name: None, // Will be set by caller with net context
+        component_ref: None, // Will be set by caller with component context
     })
 }
 
@@ -504,6 +515,7 @@ fn parse_line_node(
         color,
         line_end,
         net_name: None, // Will be set by caller with net context
+        component_ref: None, // Will be set by caller with component context
     })
 }
 
@@ -586,6 +598,7 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
         holes,
         fill_color,
         net_name: None, // Will be set by caller with net context
+        component_ref: None, // Will be set by caller with component context
     })
 }
 

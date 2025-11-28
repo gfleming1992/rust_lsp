@@ -225,7 +225,7 @@ fn generate_polyline_geometry(
             shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polyline.net_name.clone(),
-            component_ref: None, // Polylines don't have component refs
+            component_ref: polyline.component_ref.clone(),
         });
     }
 
@@ -417,7 +417,7 @@ fn generate_polygon_geometry(
             shape_index: None, // Not used for batched geometry
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polygon.net_name.clone(),
-            component_ref: None, // Polygons don't have component refs
+            component_ref: polygon.component_ref.clone(),
         });
 
         // Offset indices by current vertex count
