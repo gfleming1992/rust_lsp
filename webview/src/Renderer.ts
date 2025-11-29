@@ -524,21 +524,28 @@ export class Renderer {
       }
     }
     
-    /*
+    // Gold via/PTH overlay - render gold rings on top of visible vias
     const anyLayerVisible = Array.from(this.scene.layerVisible.values()).some(v => v);
     if (this.scene.viasVisible && anyLayerVisible) {
-      const viaColor: LayerColor = [1.0, 0.9, 0.25, 1.0];
+      const viaColor: LayerColor = [1.0, 0.84, 0.0, 1.0]; // Gold color
       
       for (const [renderKey, data] of this.scene.layerRenderData.entries()) {
-        if (!renderKey.endsWith('_instanced')) continue;
+        // Only process instanced geometry (vias use 'instanced' shader)
+        if (data.shaderType !== 'instanced') continue;
+        
+        // Skip if parent layer is not visible
+        if (this.scene.layerVisible.get(data.layerId) === false) continue;
         
         const totalLODs = data.lodBuffers.length;
-        const numSizes = totalLODs / 3;
+        const numShapes = totalLODs / 3;
         
-        if (currentLOD >= 3) continue;
+        // Clamp LOD to max available (2)
+        const effectiveLOD = Math.min(currentLOD, 2);
         
-        const lodStartIdx = currentLOD * numSizes;
-        const lodEndIdx = lodStartIdx + numSizes;
+        const lodStartIdx = effectiveLOD * numShapes;
+        const lodEndIdx = lodStartIdx + numShapes;
+        
+        pass.setPipeline(this.pipelineInstanced);
         
         for (let idx = lodStartIdx; idx < lodEndIdx && idx < totalLODs; idx++) {
           const vb = data.lodBuffers[idx];
@@ -551,7 +558,6 @@ export class Renderer {
           
           if (!instanceBuf || instanceCount === 0) continue;
           
-          pass.setPipeline(this.pipelineInstanced);
           pass.setVertexBuffer(0, vb);
           pass.setVertexBuffer(1, instanceBuf);
           
@@ -571,7 +577,6 @@ export class Renderer {
         }
       }
     }
-    */
     
     pass.end();
     this.device.queue.submit([encoder.finish()]);

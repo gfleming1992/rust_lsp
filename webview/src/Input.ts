@@ -33,9 +33,11 @@ export class Input {
   
   // Hover tooltip tracking
   private hoverTimer: number | null = null;
-  private hoverDelayMs = 1000; // 1 second delay
+  private hoverDelayMs = 500; // 0.5 second delay
   private onQueryNetAtPoint: ((worldX: number, worldY: number, clientX: number, clientY: number) => void) | null = null;
   private lastClickCtrlKey = false; // Track if Ctrl was held during click
+  private lastClickX = 0; // Track click position for selection tooltip
+  private lastClickY = 0;
 
   constructor(scene: Scene, renderer: Renderer, ui: UI, onSelect: (x: number, y: number, ctrlKey: boolean) => void) {
     this.scene = scene;
@@ -110,8 +112,34 @@ export class Input {
     }
   }
 
+  public showSelectionTooltip(info: { net?: string; component?: string; pin?: string }, clientX: number, clientY: number) {
+    const lines: string[] = [];
+    
+    if (info.net) {
+      lines.push(`<span style="color: #4fc3f7;">Net:</span> ${this.escapeHtml(info.net)}`);
+    }
+    if (info.component) {
+      lines.push(`<span style="color: #81c784;">Component:</span> ${this.escapeHtml(info.component)}`);
+    }
+    if (info.pin) {
+      lines.push(`<span style="color: #fff176;">Pin:</span> ${this.escapeHtml(info.pin)}`);
+    }
+    
+    if (lines.length > 0) {
+      this.tooltip.showHtml(clientX, clientY, lines.join('<br>'));
+    }
+  }
+
+  private escapeHtml(text: string): string {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   public hideTooltip() {
     this.tooltip.hide();
+  }
+
+  public getLastClickPosition(): { x: number; y: number } {
+    return { x: this.lastClickX, y: this.lastClickY };
   }
 
   private startHoverTimer(clientX: number, clientY: number) {
@@ -306,6 +334,10 @@ export class Input {
     const cssX = clientX - rect.left;
     const cssY = clientY - rect.top;
     const world = this.renderer.screenToWorld(cssX, cssY);
+    
+    // Store click position for selection tooltip
+    this.lastClickX = clientX;
+    this.lastClickY = clientY;
     
     this.onSelect(world.x, world.y, this.lastClickCtrlKey);
   }

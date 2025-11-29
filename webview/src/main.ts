@@ -599,6 +599,8 @@ async function init() {
           // Box select: select and highlight ALL objects in the box
           selectedObjects = visibleRanges;
           scene.highlightMultipleObjects(visibleRanges);
+          // Don't show tooltip for box select (multiple objects)
+          input.hideTooltip();
         } else if (isCtrlSelect) {
           // Ctrl+click: append/toggle the topmost object to/from selection
           const newObj = visibleRanges[0];
@@ -620,10 +622,13 @@ async function init() {
           } else {
             scene.clearHighlightObject();
           }
+          // Don't show tooltip for Ctrl+click (accumulating selection)
+          input.hideTooltip();
         } else {
           // Point select: select and highlight only the topmost object
-          selectedObjects = [visibleRanges[0]];
-          scene.highlightObject(visibleRanges[0]);
+          const selected = visibleRanges[0];
+          selectedObjects = [selected];
+          scene.highlightObject(selected);
         }
         
         // Clear stored net highlight results since this is a new selection
@@ -645,6 +650,7 @@ async function init() {
         input.setHasSelection(false);
         input.setHasComponentSelection(false);
         input.setHasNetSelection(false);
+        input.hideTooltip();
       }
     } else if (data.command === "highlightNetsResult" && data.objects) {
       const objects = data.objects as ObjectRange[];
@@ -699,14 +705,26 @@ async function init() {
         input.setHasNetSelection(hasNetName);
       }
     } else if (data.command === "netAtPointResult") {
-      // Show tooltip with net name at the cursor position
+      // Show tooltip with net name (and component/pin for pads) at the cursor position
       const netName = data.netName as string | null;
+      const componentRef = data.componentRef as string | null;
+      const pinRef = data.pinRef as string | null;
       const clientX = data.x as number;
       const clientY = data.y as number;
       
       // Show tooltip for any valid net name
       if (netName && netName.trim() !== "") {
-        input.showNetTooltip(netName, clientX, clientY);
+        // Build tooltip info
+        const tooltipInfo: { net?: string; component?: string; pin?: string } = {
+          net: netName
+        };
+        if (componentRef) {
+          tooltipInfo.component = componentRef.replace(/^CMP:/, '');
+        }
+        if (pinRef) {
+          tooltipInfo.pin = pinRef.replace(/^PIN:/, '');
+        }
+        input.showSelectionTooltip(tooltipInfo, clientX, clientY);
       }
     } else if (data.command === "deleteRelatedObjects" && data.objects) {
       // Handle multi-object deletion (e.g., vias across layers)

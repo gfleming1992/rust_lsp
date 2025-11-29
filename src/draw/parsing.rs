@@ -949,6 +949,7 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
             let mut rotation = 0.0;
             let mut shape_id = String::new();
             let mut component_ref = component_context.map(|s| s.to_string());
+            let mut pin_ref: Option<String> = None;
             
             for child in &node.children {
                 match child.name.as_str() {
@@ -971,9 +972,12 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                             .unwrap_or_default();
                     }
                     "PinRef" => {
-                        // Get componentRef from PinRef child element
+                        // Get componentRef and pin from PinRef child element
                         if let Some(comp_ref) = child.attributes.get("componentRef") {
                             component_ref = Some(comp_ref.clone());
+                        }
+                        if let Some(pin) = child.attributes.get("pin") {
+                            pin_ref = Some(pin.clone());
                         }
                     }
                     _ => {}
@@ -988,6 +992,7 @@ fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
                     rotation,
                     net_name: net_context.map(|s| s.to_string()),
                     component_ref,
+                    pin_ref,
                 });
             }
         }

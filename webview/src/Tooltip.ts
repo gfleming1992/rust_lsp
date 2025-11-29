@@ -15,20 +15,29 @@ export class Tooltip {
     this.element.style.pointerEvents = 'none';
     this.element.style.zIndex = '2000';
     this.element.style.display = 'none';
-    this.element.style.whiteSpace = 'nowrap';
+    this.element.style.whiteSpace = 'pre-line'; // Support multi-line text
     this.element.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.3)';
     document.body.appendChild(this.element);
   }
 
   public show(x: number, y: number, text: string) {
     this.element.textContent = text;
+    this.positionAndShow(x, y);
+  }
+
+  public showHtml(x: number, y: number, html: string) {
+    this.element.innerHTML = html;
+    this.positionAndShow(x, y);
+  }
+
+  private positionAndShow(x: number, y: number) {
     this.element.style.display = 'block';
     
     // Position with offset from cursor
     const offsetX = 15;
     const offsetY = 15;
     
-    // Adjust position to stay within viewport
+    // Need to get rect after setting display to block
     const rect = this.element.getBoundingClientRect();
     let posX = x + offsetX;
     let posY = y + offsetY;

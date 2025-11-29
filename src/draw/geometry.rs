@@ -87,6 +87,7 @@ pub struct ObjectRange {
     pub bounds: [f32; 4], // min_x, min_y, max_x, max_y
     pub net_name: Option<String>,       // Net name for highlighting
     pub component_ref: Option<String>,  // Component reference (e.g., "CMP:C1") for component highlighting
+    pub pin_ref: Option<String>,        // Pin reference (e.g., "PIN:1") for pad identification
 }
 
 /// Object wrapper for R-tree spatial indexing
@@ -193,6 +194,8 @@ pub struct PadInstance {
     pub net_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_ref: Option<String>,  // Component reference from PinRef
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pin_ref: Option<String>,        // Pin reference from PinRef (e.g., "PIN:1")
 }
 
 /// Padstack definition (for vias and component pads)

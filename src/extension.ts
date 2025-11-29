@@ -275,6 +275,8 @@ export function activate(context: vscode.ExtensionContext) {
                             panel.webview.postMessage({
                                 command: 'netAtPointResult',
                                 netName: queryNetResponse.result.net_name,
+                                componentRef: queryNetResponse.result.component_ref,
+                                pinRef: queryNetResponse.result.pin_ref,
                                 x: message.clientX,
                                 y: message.clientY
                             });

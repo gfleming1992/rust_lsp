@@ -226,6 +226,7 @@ fn generate_polyline_geometry(
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polyline.net_name.clone(),
             component_ref: polyline.component_ref.clone(),
+            pin_ref: None,
         });
     }
 
@@ -418,6 +419,7 @@ fn generate_polygon_geometry(
             bounds: [min_x, min_y, max_x, max_y],
             net_name: polygon.net_name.clone(),
             component_ref: polygon.component_ref.clone(),
+            pin_ref: None,
         });
 
         // Offset indices by current vertex count
@@ -544,6 +546,7 @@ fn generate_pad_geometry(
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
                     component_ref: inst.component_ref.clone(),
+                    pin_ref: inst.pin_ref.clone(),
                 });
             }
             
@@ -723,6 +726,7 @@ fn generate_via_geometry(
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
                     component_ref: inst.component_ref.clone(),
+                    pin_ref: None,
                 });
             }
             

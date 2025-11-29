@@ -1699,14 +1699,16 @@ fn handle_query_net_at_point(
             type_priority(a.range.obj_type).cmp(&type_priority(b.range.obj_type))
         });
         
-        // Return first object with a valid net name
+        // Return first object with a valid net name, including component_ref and pin_ref if available
         for obj in candidates {
             if let Some(ref net_name) = obj.range.net_name {
                 if !net_name.is_empty() {
                     return Response {
                         id,
                         result: Some(serde_json::json!({
-                            "net_name": net_name
+                            "net_name": net_name,
+                            "component_ref": obj.range.component_ref,
+                            "pin_ref": obj.range.pin_ref
                         })),
                         error: None,
                     };

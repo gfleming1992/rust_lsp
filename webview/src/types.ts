@@ -97,6 +97,7 @@ export interface ObjectRange {
   bounds: [number, number, number, number];
   net_name?: string; // Net name from IPC-2581 for highlighting connected shapes
   component_ref?: string; // Component reference (e.g., "CMP:C1") for highlighting component parts
+  pin_ref?: string; // Pin reference (e.g., "PIN:1") for pad identification
 }
 
 // Minimal per-layer render data
