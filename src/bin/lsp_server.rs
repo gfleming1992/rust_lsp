@@ -1545,7 +1545,7 @@ fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Va
         }
         
         // Now find all objects with matching net names OR that are in the original selection set
-        let matching_objects: Vec<ObjectRange> = tree.iter()
+        let mut matching_objects: Vec<ObjectRange> = tree.iter()
             .filter(|obj| {
                 // Include if it has a matching net name
                 if let Some(ref net_name) = obj.range.net_name {
@@ -1559,13 +1559,64 @@ fn handle_highlight_selected_nets(state: &ServerState, id: Option<serde_json::Va
             .map(|obj| obj.range.clone())
             .collect();
         
+        // For all pads in the result, also find overlapping mask/paste/silkscreen objects
+        // This ensures when highlighting a net, ALL layers of each pad are highlighted (not just copper)
+        let tolerance = 0.01;
+        let mut stacked_layer_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        
+        // Collect bounds of all pads in the result
+        let pad_bounds: Vec<[f32; 4]> = matching_objects.iter()
+            .filter(|obj| obj.obj_type == 3) // Pads only
+            .map(|obj| obj.bounds)
+            .collect();
+        
+        // For each pad, find other objects at the same location with matching bounds (stacked layers)
+        for bounds in &pad_bounds {
+            let center_x = (bounds[0] + bounds[2]) / 2.0;
+            let center_y = (bounds[1] + bounds[3]) / 2.0;
+            let point = [center_x, center_y];
+            let obj_width = bounds[2] - bounds[0];
+            let obj_height = bounds[3] - bounds[1];
+            
+            for obj in tree.locate_all_at_point(&point) {
+                // Skip if already in result
+                if matching_objects.iter().any(|o| o.id == obj.range.id) {
+                    continue;
+                }
+                
+                // Check if bounds match (same shape on different layer - paste/mask/silkscreen)
+                let other_bounds = obj.range.bounds;
+                let other_width = other_bounds[2] - other_bounds[0];
+                let other_height = other_bounds[3] - other_bounds[1];
+                
+                let width_match = (obj_width - other_width).abs() < tolerance;
+                let height_match = (obj_height - other_height).abs() < tolerance;
+                let x_match = (bounds[0] - other_bounds[0]).abs() < tolerance && (bounds[2] - other_bounds[2]).abs() < tolerance;
+                let y_match = (bounds[1] - other_bounds[1]).abs() < tolerance && (bounds[3] - other_bounds[3]).abs() < tolerance;
+                
+                if width_match && height_match && x_match && y_match {
+                    stacked_layer_ids.insert(obj.range.id);
+                }
+            }
+        }
+        
+        // Add all stacked layer objects to the result
+        if !stacked_layer_ids.is_empty() {
+            log_to_file(&format!("Found {} additional stacked layer objects (mask/paste/silkscreen)", stacked_layer_ids.len()));
+            for obj in tree.iter() {
+                if stacked_layer_ids.contains(&obj.range.id) {
+                    matching_objects.push(obj.range.clone());
+                }
+            }
+        }
+        
         // Debug: count by type
         let pads = matching_objects.iter().filter(|o| o.obj_type == 3).count();
         let vias = matching_objects.iter().filter(|o| o.obj_type == 2).count();
         let polygons = matching_objects.iter().filter(|o| o.obj_type == 1).count();
         let polylines = matching_objects.iter().filter(|o| o.obj_type == 0).count();
-        log_to_file(&format!("Found {} objects with matching nets (including {} original selections): {} pads, {} vias, {} polygons, {} polylines", 
-            matching_objects.len(), include_original_ids.len(), pads, vias, polygons, polylines));
+        log_to_file(&format!("Found {} objects with matching nets (including {} original + {} stacked layers): {} pads, {} vias, {} polygons, {} polylines", 
+            matching_objects.len(), include_original_ids.len(), stacked_layer_ids.len(), pads, vias, polygons, polylines));
         
         let net_names_vec: Vec<String> = net_names.into_iter().collect();
         

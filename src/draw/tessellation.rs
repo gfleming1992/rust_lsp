@@ -639,9 +639,7 @@ pub fn tessellate_rectangular_ring(width: f32, height: f32, hole_radius: f32) ->
     // We'll create a continuous outer perimeter (rectangle) and inner perimeter (circle)
     // then connect them with a triangle strip
     
-    // Number of segments for the circle
-    let circle_segments = 32u32;
-    // Number of segments per rectangle edge (matched to circle arc)
+    // Number of segments per rectangle edge (circle will match total = 4 * this)
     let rect_segments_per_edge = 8u32;
     
     // Build outer perimeter (rectangle) going counterclockwise from bottom-left
