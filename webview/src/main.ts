@@ -427,6 +427,17 @@ async function init() {
     performRedo();
   });
 
+  input.setOnClearSelection(() => {
+    if (selectedObjects.length > 0) {
+      console.log('[Input] Escape pressed - clearing selection');
+      selectedObjects = [];
+      scene.clearHighlightObject();
+      ui.clearHighlight();
+      input.setHasSelection(false);
+      input.setHasComponentSelection(false);
+    }
+  });
+
   // Initial UI update
   ui.refreshLayerLegend();
   ui.updateStats(true);

@@ -30,6 +30,7 @@ export class Input {
   private onRedo: (() => void) | null = null;
   private onBoxSelect: ((minX: number, minY: number, maxX: number, maxY: number) => void) | null = null;
   private onHighlightNets: (() => void) | null = null;
+  private onClearSelection: (() => void) | null = null;
   
   // Hover tooltip tracking
   private hoverTimer: number | null = null;
@@ -75,6 +76,10 @@ export class Input {
 
   public setOnBoxSelect(callback: (minX: number, minY: number, maxX: number, maxY: number) => void) {
     this.onBoxSelect = callback;
+  }
+
+  public setOnClearSelection(callback: () => void) {
+    this.onClearSelection = callback;
   }
 
   public setOnHighlightNets(callback: () => void) {
@@ -179,9 +184,14 @@ export class Input {
       this.contextMenu.show(event.clientX, event.clientY);
     });
 
-    // Keyboard listeners for Delete, Undo, Redo
+    // Keyboard listeners for Delete, Undo, Redo, Escape
     window.addEventListener('keydown', (event) => {
-      if (event.key === 'Delete' || (event.ctrlKey && (event.key === 'd' || event.key === 'D'))) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (this.onClearSelection) {
+          this.onClearSelection();
+        }
+      } else if (event.key === 'Delete' || (event.ctrlKey && (event.key === 'd' || event.key === 'D'))) {
         event.preventDefault();
         console.log('[Input] Delete key pressed');
         if (this.onDelete) {
