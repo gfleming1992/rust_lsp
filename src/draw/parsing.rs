@@ -230,6 +230,15 @@ fn collect_geometries_with_context(
             polygon.component_ref = component_context.map(|s| s.to_string());
             geometries.polygons.push(polygon);
         }
+    } else if node.name == "Contour" {
+        // Parse Contour elements (polygon with cutouts for copper pours)
+        // Note: We don't recurse into Contour children because we handle them here
+        if let Ok(mut polygon) = parse_contour_node(node) {
+            polygon.net_name = net_context.map(|s| s.to_string());
+            polygon.component_ref = component_context.map(|s| s.to_string());
+            geometries.polygons.push(polygon);
+        }
+        return; // Don't recurse - we've already processed Polygon and Cutout children
     } else if node.name == "LayerFeature" {
         // Collect pads and vias from this layer (they handle their own net context)
         let pads = collect_pads_from_layer(node, padstack_defs);
@@ -600,6 +609,66 @@ fn parse_polygon_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
         net_name: None, // Will be set by caller with net context
         component_ref: None, // Will be set by caller with component context
     })
+}
+
+/// Parse a Contour node (copper pour with cutouts)
+/// Expects <Contour> with <Polygon> (outer boundary) and <Cutout> children (holes)
+fn parse_contour_node(node: &XmlNode) -> Result<Polygon, anyhow::Error> {
+    let mut outer_ring: Vec<Point> = Vec::new();
+    let mut holes: Vec<Vec<Point>> = Vec::new();
+    
+    // Default fill color with alpha
+    let fill_color = [0.5, 0.5, 0.5, 0.5];
+    
+    // Parse the outer Polygon
+    if let Some(polygon_node) = node.children.iter().find(|c| c.name == "Polygon") {
+        outer_ring = parse_poly_points(polygon_node);
+    }
+    
+    // Parse all Cutout elements as holes
+    for child in &node.children {
+        if child.name == "Cutout" {
+            let hole_ring = parse_poly_points(child);
+            if hole_ring.len() >= 3 {
+                holes.push(hole_ring);
+            }
+        }
+    }
+    
+    if outer_ring.len() < 3 {
+        return Err(anyhow::anyhow!("Contour must have a Polygon with at least 3 points"));
+    }
+    
+    Ok(Polygon {
+        outer_ring,
+        holes,
+        fill_color,
+        net_name: None,
+        component_ref: None,
+    })
+}
+
+/// Helper to parse PolyBegin/PolyStepSegment points from a node
+fn parse_poly_points(node: &XmlNode) -> Vec<Point> {
+    let mut points = Vec::new();
+    
+    for child in &node.children {
+        match child.name.as_str() {
+            "PolyBegin" | "PolyStepSegment" | "PolyStepCurve" => {
+                if let (Some(x_str), Some(y_str)) = (
+                    child.attributes.get("x"),
+                    child.attributes.get("y"),
+                ) {
+                    if let (Ok(x), Ok(y)) = (x_str.parse::<f32>(), y_str.parse::<f32>()) {
+                        points.push(Point { x, y });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    points
 }
 
 /// Parse pad stack definitions and extract hole + outer diameter information

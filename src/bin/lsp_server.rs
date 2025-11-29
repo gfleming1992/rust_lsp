@@ -118,7 +118,8 @@ struct ServerState {
     xml_file_path: Option<String>,
     xml_root: Option<XmlNode>,
     layers: Vec<LayerJSON>,
-    layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA
+    layer_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA (original from file)
+    modified_colors: HashMap<String, [f32; 4]>, // layer_id -> RGBA (user-modified colors only)
     spatial_index: Option<RTree<SelectableObject>>,
     padstack_defs: IndexMap<String, PadStackDef>, // Padstack definitions for PTH detection
     // Undo/Redo stacks for deleted objects
@@ -134,6 +135,7 @@ impl ServerState {
             xml_root: None,
             layers: Vec::new(),
             layer_colors: HashMap::new(),
+            modified_colors: HashMap::new(),
             spatial_index: None,
             padstack_defs: IndexMap::new(),
             deleted_objects: HashMap::new(),
@@ -186,6 +188,7 @@ fn main() {
             "HighlightSelectedComponents" => serde_json::to_string(&handle_highlight_selected_components(&state, request.id, request.params)).unwrap(),
             "QueryNetAtPoint" => serde_json::to_string(&handle_query_net_at_point(&state, request.id, request.params)).unwrap(),
             "GetMemory" => serde_json::to_string(&handle_get_memory(request.id)).unwrap(),
+            "Close" => serde_json::to_string(&handle_close(&mut state, request.id)).unwrap(),
             _ => {
                 let response = Response {
                     id: request.id,
@@ -305,13 +308,16 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     }
 
     state.xml_file_path = Some(params.file_path.clone());
-    state.xml_root = Some(root);
+    // Don't store xml_root - we'll re-parse on save to reduce memory usage
+    // xml_root was ~125 MB for a 14 MB file, this saves significant memory
+    state.xml_root = None;
     state.layers = layers;
     state.layer_colors = layer_colors;
     state.spatial_index = Some(spatial_index);
     state.padstack_defs = padstack_defs;
 
-    eprintln!("[LSP Server] File loaded successfully");
+    // Log memory savings
+    eprintln!("[LSP Server] File loaded successfully (xml_root dropped to save memory)");
 
     Response {
         id,
@@ -560,7 +566,7 @@ fn handle_update_layer_color(
         }
     };
 
-    if state.xml_root.is_none() {
+    if state.xml_file_path.is_none() {
         return Response {
             id,
             result: None,
@@ -580,7 +586,10 @@ fn handle_update_layer_color(
         format!("LAYER_COLOR_{}", params.layer_id)
     };
 
-    // Update in-memory color map with prefixed key
+    // Store in modified_colors to track user changes (for save)
+    state.modified_colors.insert(color_key.clone(), params.color);
+    
+    // Also update layer_colors so the UI sees the change
     state.layer_colors.insert(color_key, params.color);
 
     // Update layer's default_color if it exists
@@ -657,7 +666,7 @@ fn handle_save(
         None => SaveParams { file_path: None },
     };
 
-    if state.xml_root.is_none() || state.xml_file_path.is_none() {
+    if state.xml_file_path.is_none() {
         return Response {
             id,
             result: None,
@@ -689,20 +698,37 @@ fn handle_save(
         eprintln!("[LSP Server]   Deleted: id={}, layer={}, type={}", obj_id, range.layer_id, range.obj_type);
     }
 
-    // Clone root for modification
-    let mut root_clone = state.xml_root.as_ref().unwrap().clone();
+    // Re-parse the original XML file (we don't keep xml_root in memory to save ~125 MB)
+    let start_parse = std::time::Instant::now();
+    let mut root = match parse_xml_file(original_path) {
+        Ok(r) => r,
+        Err(e) => {
+            return Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: 5,
+                    message: format!("Failed to re-parse XML for save: {}", e),
+                }),
+            };
+        }
+    };
+    eprintln!("[LSP Server] Re-parsed XML in {:.2?}", start_parse.elapsed());
     
-    // Update DictionaryColor in the XML tree
-    update_dictionary_colors(&mut root_clone, &state.layer_colors);
+    // Only update DictionaryColor if user actually changed colors
+    if !state.modified_colors.is_empty() {
+        update_dictionary_colors(&mut root, &state.modified_colors);
+        eprintln!("[LSP Server] Updated {} modified colors", state.modified_colors.len());
+    }
     
     // Remove deleted objects from XML
     if !state.deleted_objects.is_empty() {
-        let removed_count = remove_deleted_objects_from_xml(&mut root_clone, &state.deleted_objects, &state.layers, &state.padstack_defs);
+        let removed_count = remove_deleted_objects_from_xml(&mut root, &state.deleted_objects, &state.layers, &state.padstack_defs);
         eprintln!("[LSP Server] Removed {} objects from XML", removed_count);
     }
 
     // Serialize to file
-    match xml_node_to_file(&root_clone, &output_path) {
+    match xml_node_to_file(&root, &output_path) {
         Ok(_) => {
             let deleted_count = state.deleted_objects.len();
             eprintln!("[LSP Server] File saved successfully");
@@ -729,71 +755,86 @@ fn handle_save(
     }
 }
 
-/// Update DictionaryColor in XML tree with current layer colors
-fn update_dictionary_colors(root: &mut XmlNode, layer_colors: &HashMap<String, [f32; 4]>) {
-    // Find or create Content node
-    let content = if let Some(content) = root.children.iter_mut().find(|n| n.name == "Content") {
-        content
-    } else {
-        // Insert Content after LogisticHeader/HistoryRecord if they exist, or at beginning
-        let insert_pos = root.children.iter().position(|n| {
-            n.name != "LogisticHeader" && n.name != "HistoryRecord"
-        }).unwrap_or(0);
-        
-        root.children.insert(insert_pos, XmlNode {
-            name: "Content".to_string(),
-            attributes: indexmap::IndexMap::new(),
-            children: Vec::new(),
-            text_content: String::new(),
-        });
-        
-        root.children.get_mut(insert_pos).unwrap()
+/// Update DictionaryColor in XML tree with only the modified layer colors
+/// Preserves existing entries that weren't changed by the user
+fn update_dictionary_colors(root: &mut XmlNode, modified_colors: &HashMap<String, [f32; 4]>) {
+    // Find Content node
+    let content = match root.children.iter_mut().find(|n| n.name == "Content") {
+        Some(c) => c,
+        None => return, // No Content node, nothing to update
     };
     
-    // Find or create DictionaryColor
-    let dict_color = if let Some(dict) = content.children.iter_mut().find(|n| n.name == "DictionaryColor") {
-        // Clear existing entries
-        dict.children.clear();
-        dict
-    } else {
-        // Add DictionaryColor at start of Content
-        content.children.insert(0, XmlNode {
-            name: "DictionaryColor".to_string(),
-            attributes: indexmap::IndexMap::new(),
-            children: Vec::new(),
-            text_content: String::new(),
-        });
-        
-        content.children.get_mut(0).unwrap()
-    };
-    
-    // Add EntryColor for each layer color
-    for (layer_id, color) in layer_colors {
-        let mut entry_attrs = indexmap::IndexMap::new();
-        entry_attrs.insert("id".to_string(), layer_id.clone());
-        
-        let r = (color[0] * 255.0).round() as u8;
-        let g = (color[1] * 255.0).round() as u8;
-        let b = (color[2] * 255.0).round() as u8;
-        
-        let mut color_attrs = indexmap::IndexMap::new();
-        color_attrs.insert("r".to_string(), r.to_string());
-        color_attrs.insert("g".to_string(), g.to_string());
-        color_attrs.insert("b".to_string(), b.to_string());
-        
-        let entry = XmlNode {
-            name: "EntryColor".to_string(),
-            attributes: entry_attrs,
-            children: vec![XmlNode {
-                name: "Color".to_string(),
-                attributes: color_attrs,
+    // Find DictionaryColor
+    let dict_color = match content.children.iter_mut().find(|n| n.name == "DictionaryColor") {
+        Some(d) => d,
+        None => {
+            // No DictionaryColor exists, create one with only modified colors
+            let mut new_dict = XmlNode {
+                name: "DictionaryColor".to_string(),
+                attributes: indexmap::IndexMap::new(),
                 children: Vec::new(),
                 text_content: String::new(),
-            }],
-            text_content: String::new(),
-        };
+            };
+            
+            for (layer_id, color) in modified_colors {
+                new_dict.children.push(create_entry_color(layer_id, color));
+            }
+            
+            // Insert at start of Content
+            content.children.insert(0, new_dict);
+            return;
+        }
+    };
+    
+    // Update existing entries or add new ones
+    for (layer_id, color) in modified_colors {
+        // Try to find existing entry with this id
+        let existing = dict_color.children.iter_mut().find(|entry| {
+            entry.name == "EntryColor" && 
+            entry.attributes.get("id").map(|s| s.as_str()) == Some(layer_id.as_str())
+        });
         
-        dict_color.children.push(entry);
+        if let Some(entry) = existing {
+            // Update existing Color child
+            if let Some(color_node) = entry.children.iter_mut().find(|n| n.name == "Color") {
+                let r = (color[0] * 255.0).round() as u8;
+                let g = (color[1] * 255.0).round() as u8;
+                let b = (color[2] * 255.0).round() as u8;
+                color_node.attributes.insert("r".to_string(), r.to_string());
+                color_node.attributes.insert("g".to_string(), g.to_string());
+                color_node.attributes.insert("b".to_string(), b.to_string());
+            }
+        } else {
+            // Add new entry
+            dict_color.children.push(create_entry_color(layer_id, color));
+        }
+    }
+}
+
+/// Helper to create an EntryColor node
+fn create_entry_color(layer_id: &str, color: &[f32; 4]) -> XmlNode {
+    let mut entry_attrs = indexmap::IndexMap::new();
+    entry_attrs.insert("id".to_string(), layer_id.to_string());
+    
+    let r = (color[0] * 255.0).round() as u8;
+    let g = (color[1] * 255.0).round() as u8;
+    let b = (color[2] * 255.0).round() as u8;
+    
+    let mut color_attrs = indexmap::IndexMap::new();
+    color_attrs.insert("r".to_string(), r.to_string());
+    color_attrs.insert("g".to_string(), g.to_string());
+    color_attrs.insert("b".to_string(), b.to_string());
+    
+    XmlNode {
+        name: "EntryColor".to_string(),
+        attributes: entry_attrs,
+        children: vec![XmlNode {
+            name: "Color".to_string(),
+            attributes: color_attrs,
+            children: Vec::new(),
+            text_content: String::new(),
+        }],
+        text_content: String::new(),
     }
 }
 
@@ -1743,6 +1784,40 @@ fn handle_get_memory(id: Option<serde_json::Value>) -> Response {
         id,
         result: Some(serde_json::json!({
             "memory_bytes": memory_bytes
+        })),
+        error: None,
+    }
+}
+
+/// Handle Close request - clears all state to free memory when webview is closed
+fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> Response {
+    let old_memory = get_process_memory_bytes().unwrap_or(0);
+    
+    // Clear all state
+    state.xml_file_path = None;
+    state.xml_root = None;
+    state.layers.clear();
+    state.layer_colors.clear();
+    state.modified_colors.clear();
+    state.spatial_index = None;
+    state.padstack_defs.clear();
+    state.deleted_objects.clear();
+    state.hidden_layers.clear();
+    
+    // Force a garbage collection hint by shrinking capacity
+    state.layers.shrink_to_fit();
+    state.layer_colors.shrink_to_fit();
+    state.modified_colors.shrink_to_fit();
+    state.padstack_defs.shrink_to_fit();
+    state.deleted_objects.shrink_to_fit();
+    
+    let new_memory = get_process_memory_bytes().unwrap_or(0);
+    eprintln!("[LSP Server] Close: freed {} MB", (old_memory as i64 - new_memory as i64) / 1024 / 1024);
+    
+    Response {
+        id,
+        result: Some(serde_json::json!({
+            "freed_bytes": old_memory.saturating_sub(new_memory)
         })),
         error: None,
     }

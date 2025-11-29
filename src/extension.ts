@@ -302,14 +302,14 @@ export function activate(context: vscode.ExtensionContext) {
             context.subscriptions
         );
 
-        // Handle panel state changes (e.g., moved to new window)
-        panel.onDidChangeViewState(() => {
-            if (panel.visible) {
-                console.log('[Extension] Panel became visible, re-triggering load');
-                setTimeout(() => {
-                    sendToLspServer({ method: 'Load', params: { file_path: filePath } }, panel);
-                }, 100);
-            }
+        // Note: With retainContextWhenHidden: true, the webview state is preserved
+        // when switching tabs, so we don't need to reload the file.
+        // The LSP server keeps the state (including deleted_objects) intact.
+
+        // Clean up LSP server memory when webview is closed
+        panel.onDidDispose(() => {
+            console.log('[Extension] Webview disposed, cleaning up LSP server state');
+            sendCloseToLspServer();
         }, null, context.subscriptions);
     });
 
@@ -514,6 +514,27 @@ async function sendBinaryTessellation(layerId: string, panel: vscode.WebviewPane
         }
     } catch (error) {
         console.error('[Extension] Binary tessellation failed:', error);
+    }
+}
+
+// Send Close message to LSP server to free memory (fire-and-forget)
+function sendCloseToLspServer() {
+    if (!lspServer || !lspServer.stdin) {
+        return;
+    }
+
+    const id = String(requestId++);
+    const jsonRequest = JSON.stringify({ 
+        id, 
+        method: 'Close', 
+        params: null 
+    }) + '\n';
+
+    try {
+        lspServer.stdin.write(jsonRequest);
+        console.log('[Extension] Sent Close command to LSP server');
+    } catch (error) {
+        console.error('[Extension] Failed to send Close command:', error);
     }
 }
 
