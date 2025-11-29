@@ -212,6 +212,8 @@ export class Scene {
       if (!lod) continue;
       
       // Handle both base64 (from JSON) and typed arrays (from binary)
+      // NOTE: We don't need to copy vertex data here since it's only used for GPU upload
+      // and we don't store a reference to it. The GPU buffer is independent.
       let lodVertices: Float32Array;
       if (lod.vertexData instanceof Float32Array) {
         lodVertices = lod.vertexData;
@@ -259,12 +261,14 @@ export class Scene {
       lodAlphaBuffers.push(alphaBuf);
 
       // Handle Visibility Data
-      // IMPORTANT: Copy to a new buffer to avoid keeping the entire parsed ArrayBuffer alive
+      // CRITICAL: Must copy to a new buffer to avoid keeping the entire parsed ArrayBuffer alive
+      // TypedArray views keep the whole underlying ArrayBuffer in memory!
       let visArr: Float32Array;
       if (lod.visibilityData) {
         if (typeof lod.visibilityData === 'object' && lod.visibilityData instanceof Float32Array) {
-          // Copy to new buffer to free the original shared ArrayBuffer
-          visArr = new Float32Array(lod.visibilityData);
+          // MUST copy - this view keeps the entire binary layer buffer (~MB) alive
+          visArr = new Float32Array(lod.visibilityData.length);
+          visArr.set(lod.visibilityData);
         } else {
           const visBin = atob(lod.visibilityData as string);
           const visBytes = new Uint8Array(visBin.length);
@@ -385,8 +389,10 @@ export class Scene {
       if (lod.instanceData && lod.instanceCount) {
         let instanceArr: Float32Array;
         if (lod.instanceData instanceof Float32Array) {
-          // Copy to new buffer to free the original shared ArrayBuffer
-          instanceArr = new Float32Array(lod.instanceData);
+          // CRITICAL: Must copy - this view keeps the entire binary layer buffer (~MB) alive
+          // TypedArray views hold a reference to the underlying ArrayBuffer
+          instanceArr = new Float32Array(lod.instanceData.length);
+          instanceArr.set(lod.instanceData);
         } else {
           const instanceBin = atob(lod.instanceData as unknown as string);
           const instanceBytes = new Uint8Array(instanceBin.length);
