@@ -592,8 +592,10 @@ fn generate_pad_geometry(
                 instance_data: Some(instance_data),
                 instance_count: Some(inst_count),
             });
-        } 
-        // ...existing code...
+        } else {
+            // Primitive not found - this is a bug!
+            eprintln!("  WARNING: Pad shape '{}' not found in primitives! {} instances lost.", shape_id, instances.len());
+        }
     }
     
     // Organize as: all LOD0 entries, then all LOD1 entries, then all LOD2 entries
@@ -734,16 +736,24 @@ fn generate_via_geometry(
             let inst_count = instances.len();
             
             // Tessellate geometry based on shape
+            // Ensure minimum visible annular ring width (~0.05mm or 5% of radius, whichever is larger)
+            // This makes NPTH drill markers appear as thin rings rather than invisible or solid dots
             let (with_hole_verts, with_hole_indices, without_hole_verts, without_hole_indices, max_dimension) = match &first_via.shape {
                 StandardPrimitive::Circle { diameter } => {
                     let radius = diameter / 2.0;
-                    let ring = tessellate_annular_ring(radius, hole_radius);
                     let circle = tessellate_circle(radius);
+                    // Ensure minimum ring width: at least 0.05mm or 5% of radius
+                    let min_ring_width = (0.05_f32).max(radius * 0.05);
+                    let effective_hole_radius = hole_radius.min(radius - min_ring_width).max(0.0);
+                    let ring = tessellate_annular_ring(radius, effective_hole_radius);
                     (ring.0, ring.1, circle.0, circle.1, *diameter)
                 }
                 StandardPrimitive::Rectangle { width, height } => {
-                    let ring = tessellate_rectangular_ring(*width, *height, hole_radius);
                     let rect = tessellate_rectangle(*width, *height);
+                    let min_dim = width.min(*height);
+                    let min_ring_width = (0.05_f32).max(min_dim * 0.025);
+                    let effective_hole_radius = hole_radius.min(min_dim / 2.0 - min_ring_width).max(0.0);
+                    let ring = tessellate_rectangular_ring(*width, *height, effective_hole_radius);
                     (ring.0, ring.1, rect.0, rect.1, width.max(*height))
                 }
                 StandardPrimitive::Oval { width, height } => {
@@ -753,9 +763,12 @@ fn generate_via_geometry(
                     (oval.0.clone(), oval.1.clone(), oval.0, oval.1, width.max(*height))
                 }
                 StandardPrimitive::RoundRect { width, height, corner_radius } => {
-                    let roundrect_ring = tessellate_rectangular_ring(*width, *height, hole_radius);
                     let roundrect = tessellate_roundrect(*width, *height, *corner_radius);
-                    (roundrect_ring.0, roundrect_ring.1, roundrect.0, roundrect.1, width.max(*height))
+                    let min_dim = width.min(*height);
+                    let min_ring_width = (0.05_f32).max(min_dim * 0.025);
+                    let effective_hole_radius = hole_radius.min(min_dim / 2.0 - min_ring_width).max(0.0);
+                    let ring = tessellate_rectangular_ring(*width, *height, effective_hole_radius);
+                    (ring.0, ring.1, roundrect.0, roundrect.1, width.max(*height))
                 }
                 StandardPrimitive::CustomPolygon { points } => {
                     // Custom polygons: tessellate without hole (simplified)

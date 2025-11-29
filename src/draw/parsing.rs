@@ -114,8 +114,8 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
         eprintln!("TOTAL TESSELLATION TIME: {:.2}ms\n", total_start.elapsed().as_secs_f64() * 1000.0);
     }
 
-    // Print summary if we culled anything
-    if total_culling_stats.lod_culled.iter().any(|&c| c > 0) {
+    // Print culling summary only when PROFILE_TIMING is set
+    if std::env::var("PROFILE_TIMING").is_ok() && total_culling_stats.lod_culled.iter().any(|&c| c > 0) {
         eprintln!("\n=== Width-Based Culling Summary ===");
         eprintln!("Total polylines across all layers: {}", total_culling_stats.total_polylines);
         for (lod, count) in total_culling_stats.lod_culled.iter().enumerate() {
@@ -245,9 +245,6 @@ fn collect_geometries_with_context(
         geometries.pads.extend(pads);
         
         let vias = collect_vias_from_layer(node, padstack_defs);
-        if !vias.is_empty() && std::env::var("PROFILE_TIMING").is_ok() {
-            eprintln!("      Collected {} vias", vias.len());
-        }
         geometries.vias.extend(vias);
     }
 
@@ -257,7 +254,8 @@ fn collect_geometries_with_context(
     }
 }
 
-/// Recursively find Step nodes and collect PadStack instances (vias) defined at the Step level
+/// Recursively find Step nodes and collect PadStack instances defined at the Step level
+/// PadStacks with holes become vias, PadStacks without holes become pads
 fn collect_padstacks_from_step(
     node: &XmlNode,
     layer_contexts: &mut IndexMap<String, LayerGeometries>,
@@ -272,7 +270,7 @@ fn collect_padstacks_from_step(
                 // Get net name from PadStack's net attribute
                 let net_name = child.attributes.get("net").map(|s| s.to_string());
                 
-                // 1. Parse LayerHole (optional, but usually present for vias)
+                // 1. Parse LayerHole (optional - only present for vias/PTH)
                 let mut hole_diameter = 0.0;
                 
                 for subchild in &child.children {
@@ -285,6 +283,9 @@ fn collect_padstacks_from_step(
                     }
                 }
                 
+                // Determine if this is a via (has hole) or SMD pad (no hole)
+                let is_via = hole_diameter > 0.01;
+                
                 // 2. Parse LayerPad elements
                 for subchild in &child.children {
                     if subchild.name == "LayerPad" {
@@ -292,6 +293,7 @@ fn collect_padstacks_from_step(
                             // Parse location
                             let mut x = 0.0;
                             let mut y = 0.0;
+                            let mut rotation = 0.0;
                             
                             // Find Location node
                             if let Some(loc_node) = subchild.children.iter().find(|n| n.name == "Location") {
@@ -299,40 +301,64 @@ fn collect_padstacks_from_step(
                                 y = loc_node.attributes.get("y").and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
                             }
                             
+                            // Find Xform for rotation
+                            if let Some(xform_node) = subchild.children.iter().find(|n| n.name == "Xform") {
+                                rotation = xform_node.attributes.get("rotation").and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                            }
+                            
                             // Find StandardPrimitiveRef
                             if let Some(prim_ref) = subchild.children.iter().find(|n| n.name == "StandardPrimitiveRef") {
                                 if let Some(prim_id) = prim_ref.attributes.get("id") {
-                                    if let Some(primitive) = primitives.get(prim_id) {
-                                        // We need to extract diameter/width from primitive.
-                                        let outer_diameter = match primitive {
-                                            StandardPrimitive::Circle { diameter } => *diameter,
-                                            StandardPrimitive::Rectangle { width, height } => width.max(*height),
-                                            StandardPrimitive::Oval { width, height } => width.max(*height),
-                                            StandardPrimitive::RoundRect { width, height, .. } => width.max(*height),
-                                            StandardPrimitive::CustomPolygon { .. } => 0.0,
-                                        };
-                                        
-                                        let via = ViaInstance {
+                                    // Get component_ref and pin_ref from PinRef if present
+                                    let mut component_ref: Option<String> = None;
+                                    let mut pin_ref: Option<String> = None;
+                                    if let Some(pin_ref_node) = subchild.children.iter().find(|n| n.name == "PinRef") {
+                                        component_ref = pin_ref_node.attributes.get("componentRef").cloned();
+                                        pin_ref = pin_ref_node.attributes.get("pin").cloned();
+                                    }
+                                    
+                                    let layer_geom = layer_contexts.entry(layer_ref.clone())
+                                        .or_insert_with(|| LayerGeometries {
+                                            layer_ref: layer_ref.clone(),
+                                            polylines: Vec::new(),
+                                            polygons: Vec::new(),
+                                            padstack_holes: Vec::new(),
+                                            pads: Vec::new(),
+                                            vias: Vec::new(),
+                                        });
+                                    
+                                    if is_via {
+                                        // Has hole - treat as via
+                                        if let Some(primitive) = primitives.get(prim_id) {
+                                            let outer_diameter = match primitive {
+                                                StandardPrimitive::Circle { diameter } => *diameter,
+                                                StandardPrimitive::Rectangle { width, height } => width.max(*height),
+                                                StandardPrimitive::Oval { width, height } => width.max(*height),
+                                                StandardPrimitive::RoundRect { width, height, .. } => width.max(*height),
+                                                StandardPrimitive::CustomPolygon { .. } => 0.0,
+                                            };
+                                            
+                                            layer_geom.vias.push(ViaInstance {
+                                                x,
+                                                y,
+                                                diameter: outer_diameter,
+                                                hole_diameter,
+                                                shape: primitive.clone(),
+                                                net_name: net_name.clone(),
+                                                component_ref,
+                                            });
+                                        }
+                                    } else {
+                                        // No hole - treat as SMD pad
+                                        layer_geom.pads.push(PadInstance {
+                                            shape_id: prim_id.clone(),
                                             x,
                                             y,
-                                            diameter: outer_diameter,
-                                            hole_diameter,
-                                            shape: primitive.clone(),
+                                            rotation,
                                             net_name: net_name.clone(),
-                                            component_ref: None, // Vias from padstacks don't have component refs
-                                        };
-                                        
-                                        // Add to layer
-                                        layer_contexts.entry(layer_ref.clone())
-                                            .or_insert_with(|| LayerGeometries {
-                                                layer_ref: layer_ref.clone(),
-                                                polylines: Vec::new(),
-                                                polygons: Vec::new(),
-                                                padstack_holes: Vec::new(),
-                                                pads: Vec::new(),
-                                                vias: Vec::new(),
-                                            })
-                                            .vias.push(via);
+                                            component_ref,
+                                            pin_ref,
+                                        });
                                     }
                                 }
                             }

@@ -414,7 +414,10 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
     const id = String(requestId++);
     const jsonRequest = JSON.stringify({ id, ...request }) + '\n';
 
-    rateLimitedLog('[Extension] Sending to LSP server:', jsonRequest.trim());
+    // Suppress logging for frequent polling requests
+    if (request.method !== 'GetMemory') {
+        rateLimitedLog('[Extension] Sending to LSP server:', jsonRequest.trim());
+    }
 
     // Create promise for response with timeout
     const responsePromise = new Promise<any>((resolve, reject) => {

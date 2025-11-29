@@ -623,63 +623,89 @@ pub fn tessellate_rectangle(width: f32, height: f32) -> (Vec<f32>, Vec<u32>) {
 }
 
 /// Tessellate a rectangular annular ring (rectangle with circular hole)
+/// Uses proper triangulation by connecting rectangle perimeter to circle perimeter
 pub fn tessellate_rectangular_ring(width: f32, height: f32, hole_radius: f32) -> (Vec<f32>, Vec<u32>) {
     let hw = width / 2.0;
     let hh = height / 2.0;
-    let segments = 32;
+    
+    // If hole is too large, just return solid rectangle
+    if hole_radius >= hw.min(hh) {
+        return tessellate_rectangle(width, height);
+    }
     
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
-    // Outer rectangle vertices
-    vertices.extend_from_slice(&[
-        -hw, -hh,  // 0: Bottom-left
-         hw, -hh,  // 1: Bottom-right
-         hw,  hh,  // 2: Top-right
-        -hw,  hh,  // 3: Top-left
-    ]);
+    // We'll create a continuous outer perimeter (rectangle) and inner perimeter (circle)
+    // then connect them with a triangle strip
     
-    // Inner circle vertices (hole)
-    let hole_start_idx = 4;
-    for i in 0..=segments {
-        let angle = (i as f32 / segments as f32) * 2.0 * PI;
-        vertices.push(angle.cos() * hole_radius);
-        vertices.push(angle.sin() * hole_radius);
+    // Number of segments for the circle
+    let circle_segments = 32u32;
+    // Number of segments per rectangle edge (matched to circle arc)
+    let rect_segments_per_edge = 8u32;
+    
+    // Build outer perimeter (rectangle) going counterclockwise from bottom-left
+    // We need points distributed along each edge
+    let mut outer_points = Vec::new();
+    
+    // Bottom edge: left to right
+    for i in 0..rect_segments_per_edge {
+        let t = i as f32 / rect_segments_per_edge as f32;
+        outer_points.push((-hw + t * width, -hh));
+    }
+    // Right edge: bottom to top
+    for i in 0..rect_segments_per_edge {
+        let t = i as f32 / rect_segments_per_edge as f32;
+        outer_points.push((hw, -hh + t * height));
+    }
+    // Top edge: right to left
+    for i in 0..rect_segments_per_edge {
+        let t = i as f32 / rect_segments_per_edge as f32;
+        outer_points.push((hw - t * width, hh));
+    }
+    // Left edge: top to bottom
+    for i in 0..rect_segments_per_edge {
+        let t = i as f32 / rect_segments_per_edge as f32;
+        outer_points.push((-hw, hh - t * height));
     }
     
-    // Triangulate using ear clipping approach
-    // Connect outer rectangle to inner circle with triangles
+    let total_outer = outer_points.len();
     
-    // Bottom edge to circle
-    for i in 0..segments {
-        let circle_idx = hole_start_idx + i;
-        indices.push(1); // Bottom-right corner
-        indices.push(circle_idx);
-        indices.push(circle_idx + 1);
+    // Build inner perimeter (circle) going counterclockwise, starting from same angle
+    // Start angle should be ~225 degrees (bottom-left quadrant) to match rectangle start
+    let start_angle = 5.0 * PI / 4.0; // 225 degrees
+    let mut inner_points = Vec::new();
+    for i in 0..total_outer {
+        let angle = start_angle + (i as f32 / total_outer as f32) * 2.0 * PI;
+        inner_points.push((angle.cos() * hole_radius, angle.sin() * hole_radius));
     }
     
-    // Right edge to circle  
-    for i in 0..segments {
-        let circle_idx = hole_start_idx + i;
-        indices.push(2); // Top-right corner
-        indices.push(circle_idx);
-        indices.push(circle_idx + 1);
+    // Add all outer points to vertices
+    for (x, y) in &outer_points {
+        vertices.push(*x);
+        vertices.push(*y);
     }
     
-    // Top edge to circle
-    for i in 0..segments {
-        let circle_idx = hole_start_idx + i;
-        indices.push(3); // Top-left corner
-        indices.push(circle_idx);
-        indices.push(circle_idx + 1);
+    // Add all inner points to vertices
+    let inner_start = total_outer as u32;
+    for (x, y) in &inner_points {
+        vertices.push(*x);
+        vertices.push(*y);
     }
     
-    // Left edge to circle
-    for i in 0..segments {
-        let circle_idx = hole_start_idx + i;
-        indices.push(0); // Bottom-left corner
-        indices.push(circle_idx);
-        indices.push(circle_idx + 1);
+    // Create triangle strip connecting outer and inner perimeters
+    for i in 0..total_outer as u32 {
+        let next = (i + 1) % total_outer as u32;
+        
+        // Triangle 1: outer[i], inner[i], outer[next]
+        indices.push(i);
+        indices.push(inner_start + i);
+        indices.push(next);
+        
+        // Triangle 2: outer[next], inner[i], inner[next]
+        indices.push(next);
+        indices.push(inner_start + i);
+        indices.push(inner_start + next);
     }
     
     (vertices, indices)

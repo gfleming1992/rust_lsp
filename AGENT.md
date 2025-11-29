@@ -107,19 +107,39 @@ interface LayerRenderData {
 
 ## Build Commands
 
+> **IMPORTANT FOR AGENTS**: Always use `npm run` commands for building, never raw `cargo build`. The npm scripts handle copying binaries to the correct location.
+
 ```bash
-npm run build:all      # Full clean build (rust + extension + webview)
-npm run build:rust     # cargo build --release --bin lsp_server
+npm run build:all      # Full clean build (rust + extension + webview) - USE THIS
+npm run build:rust     # Build Rust AND copy lsp_server.exe to bin/
 npm run build:extension # tsc for extension.ts
 npm run build:webview  # esbuild bundle
 npm run dev            # Dev server with hot reload
 npm run clean          # Kill lsp_server processes
 ```
 
-After building Rust, copy to bin/:
-```powershell
-Copy-Item -Force target\release\lsp_server.exe bin\
-```
+### Why npm scripts matter
+
+The `npm run build:rust` script does TWO things:
+1. `cargo build --release --bin lsp_server`
+2. `Copy-Item -Force target\release\lsp_server.exe bin\`
+
+The extension loads `lsp_server.exe` from `bin/`, NOT from `target/release/`. If you run raw `cargo build` without copying, **your changes won't be used**.
+
+### Quick reference for common changes
+
+| Changed | Run |
+|---------|-----|
+| Any `.rs` file | `npm run build:rust` |
+| `extension.ts` | `npm run build:extension` |
+| `webview/src/*.ts` | `npm run build:webview` (or use `npm run dev` for hot reload) |
+| Multiple areas | `npm run build:all` |
+
+### VS Code Tasks
+
+You can also use the VS Code task runner (Ctrl+Shift+B):
+- `build:rust` - Build Rust with binary copy
+- `build:all` - Full rebuild
 
 ## Common Tasks
 
@@ -145,6 +165,22 @@ Copy-Item -Force target\release\lsp_server.exe bin\
 - **Extension logs**: `console.log('[Extension]')` in Debug Console
 - **WebView logs**: Forwarded to Extension console via message
 
+### Debug Environment Variables
+
+Set these before running to enable verbose output:
+
+| Variable | Effect |
+|----------|--------|
+| `PROFILE_TIMING=1` | Show timing for XML parsing, tessellation, layer generation |
+| `DEBUG_TESSELLATION_LAYER=<name>` | Detailed polyline debug for specific layer (or all if empty) |
+| `DEBUG_PADS=1` | Show pad shape grouping and tessellation details |
+
+Example:
+```powershell
+$env:PROFILE_TIMING = "1"
+cargo run --bin lsp_server
+```
+
 ## Memory Notes
 
 - XML root is **dropped after loading** to save ~125 MB
@@ -161,6 +197,65 @@ Key elements the parser handles:
 - `Polygon` → filled shapes
 - `Contour` → polygon with `Cutout` holes (copper pours)
 - `PadStack` / `LayerPad` → pads and vias
+
+## CLI Geometry Test Tool
+
+A standalone CLI tool for debugging geometry extraction without the VS Code extension.
+
+### Building
+
+```bash
+cargo build --release --bin test_geometry
+# Executable at: target/release/test_geometry.exe
+```
+
+### Usage
+
+```bash
+test_geometry <xml_file> [options]
+
+Options:
+  --layer <name>           Filter to specific layer (partial match)
+  --region <x1,y1,x2,y2>   Filter to bounding box region
+  --type <type>            Filter by geometry type: pad, via, polyline, polygon, all
+  --coord <x,y>            Find objects near coordinate (tolerance 1.0)
+  --summary                Show summary stats only
+  --verbose                Show detailed geometry info
+```
+
+### Examples
+
+```bash
+# Quick summary of all geometry
+test_geometry tests/NEX40400_PROBECARD_PCB.xml --summary
+
+# Find pads on Top Layer with geometry details
+test_geometry tests/NEX40400_PROBECARD_PCB.xml --layer "Top Layer" --type pad --verbose
+
+# Find objects near a specific coordinate
+test_geometry tests/NEX40400_PROBECARD_PCB.xml --coord 235.17,156.55
+
+# Filter to a region with vias only
+test_geometry tests/NEX40400_PROBECARD_PCB.xml --region 230,150,240,160 --type via
+```
+
+### Output
+
+Shows per-layer counts and LOD entry details:
+```
+=== Top Layer ===
+  Pads: 963 (16 shapes)
+    Shape 0: 4 verts, 6 indices, 120 instances
+    ...
+  Vias: 1234 (3 shapes)
+  Polylines: 5678
+```
+
+With `--coord`, shows object ranges matching the coordinate:
+```
+Objects near (235.17, 156.55):
+  pad @ (234.32,155.70)-(236.02,157.40) layer=Top Layer net=Some("VCC") comp=Some("K17_S4")
+```
 
 ## Testing Files
 
