@@ -4,6 +4,7 @@ pub mod xml_to_sqlite;
 pub mod serialize_xml;
 pub mod xml_draw;
 pub mod draw;
+pub mod lsp;
 
 // Re-export commonly used types and functions
 pub use parse_xml::{XmlNode, parse_xml_file};

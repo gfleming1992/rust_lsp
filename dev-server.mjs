@@ -172,12 +172,18 @@ function startLspServer() {
       // Standard JSON-RPC response
       const response = JSON.parse(line);
       
+      // Check if this is a notification (no id or id is null) - like drcComplete
+      if (response.method && (response.id === null || response.id === undefined)) {
+        handleLspNotification(response);
+        return;
+      }
+      
       // Check if this is a response to a pending request
       if (response.id && pendingRequests.has(response.id)) {
         const callback = pendingRequests.get(response.id);
         pendingRequests.delete(response.id);
         callback(response);
-      } else {
+      } else if (response.id) {
         console.warn('[DevServer] Received response for unknown ID:', response.id);
       }
     } catch (e) {
@@ -196,6 +202,27 @@ function startLspServer() {
   });
   
   console.log('[DevServer] LSP server started');
+}
+
+// Handle async notifications from LSP server (e.g., drcComplete)
+function handleLspNotification(notification) {
+  console.log('[DevServer] Received LSP notification:', notification.method);
+  
+  if (notification.method === 'drcComplete') {
+    const result = notification.result;
+    console.log(`[DevServer] Async DRC completed: ${result.region_count} regions in ${result.elapsed_ms?.toFixed(2)}ms`);
+    
+    // Broadcast to all connected WebSocket clients
+    wss.clients.forEach((client) => {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(JSON.stringify({
+          command: 'drcRegionsResult',
+          regions: result.regions || [],
+          elapsedMs: result.elapsed_ms || 0
+        }));
+      }
+    });
+  }
 }
 
 // Helper to send request to LSP
@@ -379,6 +406,24 @@ wss.on('connection', (ws) => {
             command: 'highlightComponentsResult',
             componentRefs: response.result.component_refs,
             objects: response.result.objects
+          }));
+        }
+      });
+      
+    } else if (data.command === 'RunDRCWithRegions') {
+      console.log(`[DevServer] RunDRCWithRegions (clearance: ${data.clearance_mm || 0.15}mm)`);
+      sendLspRequest('RunDRCWithRegions', { 
+        clearance_mm: data.clearance_mm || 0.15,
+        force_full: data.force_full || false
+      }, (response) => {
+        if (response.result?.status === 'started') {
+          console.log('[DevServer] DRC started in background');
+        } else if (response.error) {
+          console.error('[DevServer] DRC error:', response.error);
+          ws.send(JSON.stringify({
+            command: 'drcRegionsResult',
+            regions: [],
+            error: response.error.message
           }));
         }
       });
