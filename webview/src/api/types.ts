@@ -57,15 +57,18 @@ export interface SaveRequest {
 
 export interface DeleteRequest {
   command: 'Delete';
-  objectIds: number[];
+  object?: ObjectRange;  // Single object (current usage)
+  objectIds?: number[];  // Array of IDs (future usage)
 }
 
 export interface UndoRequest {
   command: 'Undo';
+  object?: ObjectRange;  // Object to restore
 }
 
 export interface RedoRequest {
   command: 'Redo';
+  object?: ObjectRange;  // Object to re-delete
 }
 
 export interface HighlightSelectedNetsRequest {

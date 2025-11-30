@@ -23,11 +23,16 @@ export class VsCodeAdapter implements IApiClient {
   private handlers: ResponseHandler[] = [];
   private messageListener: ((event: MessageEvent) => void) | null = null;
 
-  constructor() {
-    // Acquire VS Code API
-    if (window.acquireVsCodeApi) {
+  constructor(vscode?: VsCodeApi | null) {
+    // Use provided vscode API or acquire it
+    if (vscode) {
+      this.vscode = vscode;
+    } else if (window.acquireVsCodeApi) {
       this.vscode = window.acquireVsCodeApi();
-      // Make globally available for legacy code
+    }
+    
+    // Make globally available for legacy code
+    if (this.vscode) {
       window.vscode = this.vscode;
     }
 
