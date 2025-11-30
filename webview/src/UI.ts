@@ -237,34 +237,63 @@ export class UI {
     this.drcPanel.style.paddingTop = '5px';
     this.drcPanel.style.pointerEvents = 'auto';
     this.drcPanel.innerHTML = `
-      <div style="margin-bottom: 5px; font-weight: bold; color: #ff6b6b;">⚠️ DRC Violations</div>
-      <button id="runDrcBtn" style="width: 100%; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 3px;">Run DRC</button>
-      <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
-        <span>⏳ Checking clearances...</span>
+      <div id="drcHeader" style="display: flex; align-items: center; gap: 4px; margin-bottom: 5px; cursor: pointer; user-select: none; padding: 2px 0;">
+        <span id="drcCollapseIcon" style="color: #888; font-size: 10px; width: 12px; text-align: center;">▼</span>
+        <span style="font-weight: bold; color: #ff6b6b;">⚠️ DRC Violations</span>
       </div>
-      <div id="drcResultsContainer" style="display: none;">
-        <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 3px 3px 0 0; font-size: 11px;">
-          <span id="drcCount" style="color: #ff6b6b; font-weight: bold;">0 violations found</span>
-          <span style="color: #666; margin-left: 8px; font-size: 10px;">↑↓ to navigate</span>
+      <div id="drcContent">
+        <button id="runDrcBtn" style="width: 100%; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 3px;">Run DRC</button>
+        <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
+          <span>⏳ Checking clearances...</span>
         </div>
-        <div id="drcListContainer" style="max-height: 200px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-bottom: none;" tabindex="0">
-          <div id="drcList" style=""></div>
-        </div>
-        <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 3px 3px; padding: 8px; font-size: 10px; display: none;">
-          <div id="drcDetailIndex" style="color: #888; margin-bottom: 4px;"></div>
-          <div id="drcDetailLayer" style="color: #ccc; margin-bottom: 2px;"></div>
-          <div id="drcDetailDistance" style="margin-bottom: 2px;">
-            Distance: <span id="drcDistanceValue" style="color: #ff6b6b; font-weight: bold;"></span>
-            <span style="color: #666;">(req: <span id="drcRequiredValue"></span>)</span>
+        <div id="drcResultsContainer" style="display: none;">
+          <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 3px 3px 0 0; font-size: 11px;">
+            <span id="drcCount" style="color: #ff6b6b; font-weight: bold;">0 violations found</span>
+            <span style="color: #666; margin-left: 8px; font-size: 10px;">↑↓ to navigate</span>
           </div>
-          <div id="drcDetailNets" style="color: #888;"></div>
-          <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
+          <div id="drcListContainer" style="max-height: 200px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-bottom: none;" tabindex="0">
+            <div id="drcList" style=""></div>
+          </div>
+          <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 3px 3px; padding: 8px; font-size: 10px; display: none;">
+            <div id="drcDetailIndex" style="color: #888; margin-bottom: 4px;"></div>
+            <div id="drcDetailLayer" style="color: #ccc; margin-bottom: 2px;"></div>
+            <div id="drcDetailDistance" style="margin-bottom: 2px;">
+              Distance: <span id="drcDistanceValue" style="color: #ff6b6b; font-weight: bold;"></span>
+              <span style="color: #666;">(req: <span id="drcRequiredValue"></span>)</span>
+            </div>
+            <div id="drcDetailNets" style="color: #888;"></div>
+            <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
+          </div>
+          <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; margin-top: 5px; cursor: pointer; border-radius: 3px;">Clear DRC</button>
         </div>
-        <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; margin-top: 5px; cursor: pointer; border-radius: 3px;">Clear DRC</button>
       </div>
     `;
 
     resizeHandle.parentElement?.insertBefore(this.drcPanel, resizeHandle.nextSibling);
+
+    // Wire up collapse/expand header
+    const drcHeader = this.drcPanel.querySelector('#drcHeader') as HTMLDivElement;
+    const drcContent = this.drcPanel.querySelector('#drcContent') as HTMLDivElement;
+    const collapseIcon = this.drcPanel.querySelector('#drcCollapseIcon') as HTMLSpanElement;
+    
+    drcHeader.addEventListener('click', () => {
+      const isCollapsed = drcContent.style.display === 'none';
+      if (isCollapsed) {
+        drcContent.style.display = 'block';
+        collapseIcon.textContent = '▼';
+      } else {
+        drcContent.style.display = 'none';
+        collapseIcon.textContent = '▶';
+      }
+    });
+
+    // Hover effect on header
+    drcHeader.addEventListener('mouseenter', () => {
+      drcHeader.style.background = '#2a2a2a';
+    });
+    drcHeader.addEventListener('mouseleave', () => {
+      drcHeader.style.background = 'transparent';
+    });
 
     // Wire up buttons
     const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;

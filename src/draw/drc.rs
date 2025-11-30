@@ -645,15 +645,25 @@ fn quantize_triangle(tri: &[[f32; 2]; 3]) -> [u32; 6] {
 }
 
 /// Run full DRC and return fused regions for visualization
+/// deleted_ids: Set of object IDs that have been deleted and should be excluded from DRC
 pub fn run_full_drc_with_regions(
     layers: &[LayerJSON],
     spatial_index: &RTree<SelectableObject>,
     rules: &DesignRules,
+    deleted_ids: &HashSet<u64>,
 ) -> Vec<DrcRegion> {
     let start = std::time::Instant::now();
     let clearance = rules.conductor_clearance_mm;
 
-    let all_objects: Vec<&SelectableObject> = spatial_index.iter().collect();
+    // Filter out deleted objects
+    let all_objects: Vec<&SelectableObject> = spatial_index
+        .iter()
+        .filter(|o| !deleted_ids.contains(&o.range.id))
+        .collect();
+    
+    if !deleted_ids.is_empty() {
+        eprintln!("[DRC Regions] Excluding {} deleted objects", deleted_ids.len());
+    }
     
     let copper_layer_ids: HashSet<String> = layers
         .iter()
@@ -662,9 +672,10 @@ pub fn run_full_drc_with_regions(
         .collect();
 
     eprintln!(
-        "[DRC Regions] Found {} copper layers out of {} total",
+        "[DRC Regions] Found {} copper layers out of {} total, checking {} objects",
         copper_layer_ids.len(),
-        layers.len()
+        layers.len(),
+        all_objects.len()
     );
 
     let objects_by_layer: HashMap<&str, Vec<&SelectableObject>> = all_objects
@@ -1009,6 +1020,190 @@ fn point_segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, [f32; 
 /// Midpoint of two points
 fn midpoint(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+}
+
+/// Incrementally update DRC after an object is deleted/edited
+/// Returns updated regions list with:
+/// - Regions involving the edited object removed
+/// - New violations in the affected area rechecked
+pub fn update_drc_after_edit(
+    existing_regions: &[DrcRegion],
+    edited_object_ids: &HashSet<u64>,
+    edited_bounds: [f32; 4], // [min_x, min_y, max_x, max_y] of the edited area
+    layers: &[LayerJSON],
+    spatial_index: &RTree<SelectableObject>,
+    rules: &DesignRules,
+    deleted_ids: &HashSet<u64>,
+) -> Vec<DrcRegion> {
+    let start = std::time::Instant::now();
+    let clearance = rules.conductor_clearance_mm;
+    
+    // Expand bounds by clearance to catch any affected neighbors
+    let check_bounds = [
+        edited_bounds[0] - clearance * 2.0,
+        edited_bounds[1] - clearance * 2.0,
+        edited_bounds[2] + clearance * 2.0,
+        edited_bounds[3] + clearance * 2.0,
+    ];
+    
+    eprintln!(
+        "[DRC Incremental] Checking region [{:.3}, {:.3}] to [{:.3}, {:.3}] after {} edits",
+        check_bounds[0], check_bounds[1], check_bounds[2], check_bounds[3],
+        edited_object_ids.len()
+    );
+    
+    // 1. Remove regions that involve any edited object
+    let mut updated_regions: Vec<DrcRegion> = existing_regions
+        .iter()
+        .filter(|region| {
+            // Keep region if none of its objects were edited/deleted
+            !region.object_ids.iter().any(|id| edited_object_ids.contains(id) || deleted_ids.contains(id))
+        })
+        .cloned()
+        .collect();
+    
+    let removed_count = existing_regions.len() - updated_regions.len();
+    eprintln!("[DRC Incremental] Removed {} regions involving edited objects", removed_count);
+    
+    // 2. Find objects in the affected region (excluding deleted)
+    let aabb = AABB::from_corners(
+        [check_bounds[0], check_bounds[1]],
+        [check_bounds[2], check_bounds[3]],
+    );
+    
+    let affected_objects: Vec<&SelectableObject> = spatial_index
+        .locate_in_envelope(&aabb)
+        .filter(|o| !deleted_ids.contains(&o.range.id))
+        .collect();
+    
+    if affected_objects.is_empty() {
+        eprintln!("[DRC Incremental] No objects in affected region, done in {:?}", start.elapsed());
+        return updated_regions;
+    }
+    
+    // 3. Get copper layer IDs
+    let copper_layer_ids: HashSet<String> = layers
+        .iter()
+        .filter(|l| is_copper_layer(&l.layer_function))
+        .map(|l| l.layer_id.clone())
+        .collect();
+    
+    // 4. Group affected objects by layer
+    let objects_by_layer: HashMap<&str, Vec<&SelectableObject>> = affected_objects
+        .iter()
+        .filter(|o| copper_layer_ids.contains(&o.range.layer_id))
+        .fold(HashMap::new(), |mut map, obj| {
+            map.entry(obj.range.layer_id.as_str())
+                .or_default()
+                .push(*obj);
+            map
+        });
+    
+    let layer_lookup: HashMap<&str, &LayerJSON> = layers
+        .iter()
+        .map(|l| (l.layer_id.as_str(), l))
+        .collect();
+    
+    // 5. Check clearances only for objects in the affected region
+    let new_violations: Vec<TriangleViolation> = objects_by_layer
+        .par_iter()
+        .flat_map(|(layer_id, layer_objects)| {
+            if let Some(layer) = layer_lookup.get(layer_id) {
+                // Only check pairs where at least one object overlaps the edited bounds
+                check_layer_clearances_in_region(layer, layer_objects, spatial_index, clearance, &check_bounds, deleted_ids)
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+    
+    eprintln!(
+        "[DRC Incremental] Found {} new triangle violations in affected region",
+        new_violations.len()
+    );
+    
+    // 6. Fuse new violations into regions
+    if !new_violations.is_empty() {
+        let new_regions = fuse_violations_into_regions(new_violations);
+        
+        // Assign new IDs continuing from existing max
+        let max_id = updated_regions.iter().map(|r| r.id).max().unwrap_or(0);
+        for (i, mut region) in new_regions.into_iter().enumerate() {
+            region.id = max_id + 1 + i as u32;
+            updated_regions.push(region);
+        }
+    }
+    
+    eprintln!(
+        "[DRC Incremental] Complete: {} total regions in {:?}",
+        updated_regions.len(),
+        start.elapsed()
+    );
+    
+    updated_regions
+}
+
+/// Check clearances only for objects within a specific region
+fn check_layer_clearances_in_region(
+    layer: &LayerJSON,
+    layer_objects: &[&SelectableObject],
+    _spatial_index: &RTree<SelectableObject>,
+    clearance: f32,
+    region_bounds: &[f32; 4],
+    deleted_ids: &HashSet<u64>,
+) -> Vec<TriangleViolation> {
+    // Filter to objects that overlap the region and are not deleted
+    let region_objects: Vec<_> = layer_objects
+        .iter()
+        .filter(|o| {
+            if deleted_ids.contains(&o.range.id) { return false; }
+            let b = &o.range.bounds;
+            // Check if object bounds overlap region bounds
+            b[0] <= region_bounds[2] && b[2] >= region_bounds[0] &&
+            b[1] <= region_bounds[3] && b[3] >= region_bounds[1]
+        })
+        .collect();
+    
+    // Pre-compute boundary triangles for all objects in the region
+    let boundary_cache: HashMap<u64, Vec<Triangle>> = region_objects
+        .iter()
+        .map(|obj| {
+            (
+                obj.range.id,
+                get_boundary_triangles_for_object(&obj.range, layer),
+            )
+        })
+        .collect();
+    
+    let mut all_violations = Vec::new();
+    
+    // Check pairs within the region
+    for i in 0..region_objects.len() {
+        let obj_a = region_objects[i];
+        
+        for j in (i + 1)..region_objects.len() {
+            let obj_b = region_objects[j];
+            
+            // Use existing should_check_pair logic
+            if !should_check_pair(&obj_a.range, &obj_b.range) {
+                continue;
+            }
+            
+            let tris_a = match boundary_cache.get(&obj_a.range.id) {
+                Some(t) => t,
+                None => continue,
+            };
+            let tris_b = match boundary_cache.get(&obj_b.range.id) {
+                Some(t) => t,
+                None => continue,
+            };
+            
+            // Collect ALL violations (not just first)
+            all_violations.extend(check_triangle_clearance_all(&obj_a.range, &obj_b.range, tris_a, tris_b, clearance));
+        }
+    }
+    
+    all_violations
 }
 
 #[cfg(test)]
