@@ -8,7 +8,6 @@
 export * from './types';
 export { VsCodeAdapter, setupVsCodeConsoleForwarding } from './VsCodeAdapter';
 export { WebSocketAdapter, setupDevConsoleOverlay, type WebSocketAdapterOptions } from './WebSocketAdapter';
-export { MessageHandler, type MessageHandlerCallbacks } from './MessageHandler';
 
 import { IApiClient } from './types';
 import { VsCodeAdapter } from './VsCodeAdapter';
