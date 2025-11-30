@@ -113,6 +113,35 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
     false
 }
 
+/// Find all objects at a point with triangle intersection testing.
+/// Returns objects sorted by priority (net > no net, pad > via > polygon > polyline).
+pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32) -> Vec<ObjectRange> {
+    let Some(tree) = &state.spatial_index else {
+        return vec![];
+    };
+    
+    let point = [x, y];
+    let candidates: Vec<_> = tree.locate_all_at_point(&point).collect();
+    
+    let mut results: Vec<ObjectRange> = candidates.iter()
+        .filter(|obj| point_hits_object(x, y, &obj.range, &state.layers))
+        .map(|obj| obj.range.clone())
+        .collect();
+    
+    // Sort by priority: objects with nets first, then by type (pad > via > polygon > polyline)
+    results.sort_by(|a, b| {
+        let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
+        let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
+        if net_cmp != std::cmp::Ordering::Equal {
+            return net_cmp;
+        }
+        let type_priority = |t: u8| match t { 3 => 0, 2 => 1, 1 => 2, _ => 3 };
+        type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
+    });
+    
+    results
+}
+
 /// Handle Select request - performs spatial selection at a point
 pub fn handle_select(
     state: &ServerState, 
@@ -133,33 +162,8 @@ pub fn handle_select(
         }
     };
 
-    if let Some(tree) = &state.spatial_index {
-        let point = [params.x, params.y];
-        let candidates: Vec<_> = tree.locate_all_at_point(&point).collect();
-        
-        let mut results: Vec<ObjectRange> = candidates.iter()
-            .filter(|obj| point_hits_object(params.x, params.y, &obj.range, &state.layers))
-            .map(|obj| obj.range.clone())
-            .collect();
-        
-        // Sort by priority
-        results.sort_by(|a, b| {
-            let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
-            let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
-            if net_cmp != std::cmp::Ordering::Equal {
-                return net_cmp;
-            }
-            
-            let type_priority = |t: u8| match t {
-                3 => 0, 2 => 1, 1 => 2, _ => 3,
-            };
-            type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
-        });
-            
-        Response::success(id, serde_json::to_value(results).unwrap())
-    } else {
-        Response::success(id, serde_json::json!([]))
-    }
+    let results = find_objects_at_point(state, params.x, params.y);
+    Response::success(id, serde_json::to_value(results).unwrap())
 }
 
 /// Handle BoxSelect request - performs spatial selection for a rectangle

@@ -60,9 +60,8 @@ app.get('/', (req, res) => {
   let html = fs.readFileSync(htmlPath, 'utf-8');
 
   const script = `
-  <script type="module" src="/dist/main.js"></script>
   <script>
-    // Mock VS Code API for dev mode
+    // Mock VS Code API for dev mode - MUST be defined before main.js loads
     window.acquireVsCodeApi = () => ({
       postMessage: (msg) => {
         if (window.__devWs && window.__devWs.readyState === WebSocket.OPEN) {
@@ -113,7 +112,8 @@ app.get('/', (req, res) => {
     
     ws.onerror = (error) => console.error('[DevServer] WebSocket error:', error);
     ws.onclose = () => console.log('[DevServer] WebSocket closed');
-  </script>`;
+  </script>
+  <script type="module" src="/dist/main.js"></script>`;
 
   html = html
     .replace('<!--CSP-->', '')
@@ -410,6 +410,21 @@ wss.on('connection', (ws) => {
         }
       });
       
+    } else if (data.command === 'QueryNetAtPoint') {
+      // Query net/component/pin at hover point for tooltip
+      sendLspRequest('QueryNetAtPoint', { x: data.x, y: data.y }, (response) => {
+        if (response.result) {
+          ws.send(JSON.stringify({
+            command: 'netAtPointResult',
+            netName: response.result.net_name,
+            componentRef: response.result.component_ref,
+            pinRef: response.result.pin_ref,
+            x: data.clientX,
+            y: data.clientY
+          }));
+        }
+      });
+      
     } else if (data.command === 'RunDRCWithRegions') {
       console.log(`[DevServer] RunDRCWithRegions (clearance: ${data.clearance_mm || 0.15}mm)`);
       sendLspRequest('RunDRCWithRegions', { 
@@ -487,6 +502,20 @@ async function startEsbuild() {
   });
 }
 
+// Open browser (cross-platform)
+function openBrowser(url) {
+  const platform = process.platform;
+  let cmd;
+  if (platform === 'win32') {
+    cmd = `start ${url}`;
+  } else if (platform === 'darwin') {
+    cmd = `open ${url}`;
+  } else {
+    cmd = `xdg-open ${url}`;
+  }
+  spawn(cmd, [], { shell: true, stdio: 'ignore' });
+}
+
 // Start everything
 async function start() {
   startLspServer();
@@ -495,6 +524,9 @@ async function start() {
   httpServer.listen(PORT, () => {
     console.log(`\n[DevServer] Running at http://localhost:${PORT}`);
     console.log(`[DevServer] Loading XML: ${DEV_XML_PATH}\n`);
+    
+    // Auto-open browser after a short delay
+    setTimeout(() => openBrowser(`http://localhost:${PORT}`), 500);
   });
 }
 

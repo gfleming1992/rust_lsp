@@ -3,9 +3,10 @@
 use crate::lsp::protocol::{Response, error_codes};
 use crate::lsp::state::ServerState;
 use crate::lsp::util::get_process_memory_bytes;
+use crate::lsp::handlers::selection::find_objects_at_point;
 use serde::Deserialize;
 
-/// Handle QueryNetAtPoint request - finds net(s) at a given point
+/// Handle QueryNetAtPoint request - finds net/component/pin at a given point
 pub fn handle_query_net_at_point(
     state: &ServerState, 
     id: Option<serde_json::Value>, 
@@ -15,15 +16,13 @@ pub fn handle_query_net_at_point(
     struct QueryNetParams {
         x: f32,
         y: f32,
-        #[serde(default)]
-        radius: Option<f32>,
     }
 
     let params: QueryNetParams = match params {
         Some(p) => serde_json::from_value(p).unwrap_or_else(|_| QueryNetParams {
-            x: 0.0, y: 0.0, radius: None
+            x: 0.0, y: 0.0
         }),
-        None => QueryNetParams { x: 0.0, y: 0.0, radius: None }
+        None => QueryNetParams { x: 0.0, y: 0.0 }
     };
 
     if !state.is_file_loaded() {
@@ -31,32 +30,27 @@ pub fn handle_query_net_at_point(
             "No file loaded. Call Load first.".to_string());
     }
 
-    let radius = params.radius.unwrap_or(0.5);
+    // Use shared helper to find objects (already sorted by priority)
+    let objects = find_objects_at_point(state, params.x, params.y);
     
-    // Collect nets from objects near the point
-    let mut nets: Vec<String> = Vec::new();
+    // Extract first net/component/pin from the prioritized results
+    let mut net_name: Option<String> = None;
+    let mut component_ref: Option<String> = None;
+    let mut pin_ref: Option<String> = None;
     
-    if let Some(ref spatial_index) = state.spatial_index {
-        use rstar::AABB;
-        let query_rect = AABB::from_corners(
-            [params.x - radius, params.y - radius],
-            [params.x + radius, params.y + radius],
-        );
-        
-        for obj in spatial_index.locate_in_envelope(&query_rect) {
-            if let Some(ref net) = obj.range.net_name {
-                if !nets.contains(net) {
-                    nets.push(net.clone());
-                }
-            }
+    for obj in &objects {
+        if net_name.is_none() { net_name = obj.net_name.clone(); }
+        if component_ref.is_none() { component_ref = obj.component_ref.clone(); }
+        if pin_ref.is_none() { pin_ref = obj.pin_ref.clone(); }
+        if net_name.is_some() && component_ref.is_some() && pin_ref.is_some() {
+            break;
         }
     }
 
     Response::success(id, serde_json::json!({
-        "x": params.x,
-        "y": params.y,
-        "radius": radius,
-        "nets": nets
+        "net_name": net_name,
+        "component_ref": component_ref,
+        "pin_ref": pin_ref
     }))
 }
 
