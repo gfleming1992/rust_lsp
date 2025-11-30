@@ -1,5 +1,5 @@
 use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange, PadStackDef};
-use rust_extension::draw::drc::{DrcViolation, DrcRegion, DesignRules, run_full_drc, run_full_drc_with_regions};
+use rust_extension::draw::drc::{DrcViolation, DrcRegion, DesignRules, run_full_drc, run_full_drc_with_regions, run_incremental_drc_with_regions, ModifiedRegionInfo};
 use rust_extension::parse_xml::{parse_xml_file, XmlNode};
 use rust_extension::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
 use rust_extension::serialize_xml::xml_node_to_file;
@@ -140,6 +140,16 @@ struct ServerState {
     design_rules: DesignRules, // Design rules for DRC
     drc_violations: Vec<DrcViolation>, // Cached DRC violations
     drc_regions: Vec<DrcRegion>, // Cached DRC regions (fused violations with triangle data)
+    // Incremental DRC: track modified regions since last full DRC
+    modified_regions: Vec<ModifiedRegion>, // Regions that need re-checking
+}
+
+/// A region that has been modified and needs DRC re-checking
+#[derive(Clone, Debug)]
+struct ModifiedRegion {
+    bounds: [f32; 4],  // [min_x, min_y, max_x, max_y]
+    layer_id: String,
+    object_id: u64,
 }
 
 impl ServerState {
@@ -158,7 +168,22 @@ impl ServerState {
             design_rules: DesignRules::default(),
             drc_violations: Vec::new(),
             drc_regions: Vec::new(),
+            modified_regions: Vec::new(),
         }
+    }
+    
+    /// Record a modified region for incremental DRC
+    fn record_modified_region(&mut self, range: &ObjectRange) {
+        self.modified_regions.push(ModifiedRegion {
+            bounds: range.bounds,
+            layer_id: range.layer_id.clone(),
+            object_id: range.id,
+        });
+    }
+    
+    /// Clear modified regions after a full DRC
+    fn clear_modified_regions(&mut self) {
+        self.modified_regions.clear();
     }
 }
 
@@ -250,7 +275,7 @@ fn main() {
             "GetDRCViolations" => serde_json::to_string(&handle_get_drc_violations(&state, request.id)).unwrap(),
             "RunDRCWithRegions" => {
                 // Run DRC asynchronously
-                handle_run_drc_with_regions_async(&state, request.id, request.params, drc_sender.clone())
+                handle_run_drc_with_regions_async(&mut state, request.id, request.params, drc_sender.clone())
             },
             "GetDRCRegions" => serde_json::to_string(&handle_get_drc_regions(&state, request.id)).unwrap(),
             "GetMemory" => serde_json::to_string(&handle_get_memory(request.id)).unwrap(),
@@ -1401,6 +1426,12 @@ fn handle_delete(state: &mut ServerState, id: Option<serde_json::Value>, params:
         eprintln!("[LSP Server] Delete object id={}", range.id);
     }
     
+    // Record modified region for incremental DRC
+    state.record_modified_region(&range);
+    for related in &related_objects {
+        state.record_modified_region(related);
+    }
+    
     state.deleted_objects.insert(range.id, range);
 
     Response {
@@ -1427,6 +1458,10 @@ fn handle_undo(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     // If webview sent an object, restore it directly (keeps webview and LSP in sync)
     if let Some(r) = range {
         eprintln!("[LSP Server] Undo delete for object id={}", r.id);
+        
+        // Record modified region for incremental DRC
+        state.record_modified_region(&r);
+        
         state.deleted_objects.remove(&r.id);
         
         Response {
@@ -1456,6 +1491,10 @@ fn handle_redo(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     // If webview sent an object, delete it again (keeps webview and LSP in sync)
     if let Some(r) = range {
         eprintln!("[LSP Server] Redo delete for object id={}", r.id);
+        
+        // Record modified region for incremental DRC
+        state.record_modified_region(&r);
+        
         state.deleted_objects.insert(r.id, r.clone());
         
         Response {
@@ -2024,7 +2063,7 @@ fn handle_get_drc_violations(state: &ServerState, id: Option<serde_json::Value>)
 
 /// Handle RunDRCWithRegions request asynchronously - spawns DRC in background thread
 fn handle_run_drc_with_regions_async(
-    state: &ServerState, 
+    state: &mut ServerState, 
     id: Option<serde_json::Value>, 
     params: Option<serde_json::Value>,
     tx: Option<Sender<DrcAsyncResult>>
@@ -2033,11 +2072,13 @@ fn handle_run_drc_with_regions_async(
     struct RunDRCParams {
         #[serde(default)]
         clearance_mm: Option<f32>,
+        #[serde(default)]
+        force_full: bool,
     }
 
     let params: RunDRCParams = params
         .and_then(|p| serde_json::from_value(p).ok())
-        .unwrap_or(RunDRCParams { clearance_mm: None });
+        .unwrap_or(RunDRCParams { clearance_mm: None, force_full: false });
 
     if state.xml_file_path.is_none() {
         let response = Response {
@@ -2075,16 +2116,41 @@ fn handle_run_drc_with_regions_async(
     
     // Clone deleted object IDs to pass to DRC
     let deleted_ids: std::collections::HashSet<u64> = state.deleted_objects.keys().copied().collect();
+    
+    // Check if we can do incremental DRC
+    let modified_regions: Vec<ModifiedRegionInfo> = state.modified_regions
+        .iter()
+        .map(|r| ModifiedRegionInfo {
+            bounds: r.bounds,
+            layer_id: r.layer_id.clone(),
+            object_id: r.object_id,
+        })
+        .collect();
+    
+    let use_incremental = !params.force_full && !modified_regions.is_empty() && !state.drc_regions.is_empty();
+    let existing_regions = if use_incremental { state.drc_regions.clone() } else { vec![] };
+    
+    // Clear modified regions since we're about to process them
+    state.clear_modified_regions();
 
-    eprintln!("[LSP Server] Starting async DRC with clearance: {:.3}mm ({} deleted objects excluded)", 
-        clearance, deleted_ids.len());
+    if use_incremental {
+        eprintln!("[LSP Server] Starting INCREMENTAL DRC with clearance: {:.3}mm ({} modified regions, {} deleted objects)", 
+            clearance, modified_regions.len(), deleted_ids.len());
+    } else {
+        eprintln!("[LSP Server] Starting FULL DRC with clearance: {:.3}mm ({} deleted objects excluded)", 
+            clearance, deleted_ids.len());
+    }
     
     // Spawn DRC in background thread
     thread::spawn(move || {
         let start = Instant::now();
         
         let regions = if let Some(ref index) = spatial_index {
-            run_full_drc_with_regions(&layers, index, &design_rules, &deleted_ids)
+            if use_incremental {
+                run_incremental_drc_with_regions(&layers, index, &design_rules, &deleted_ids, &modified_regions, &existing_regions)
+            } else {
+                run_full_drc_with_regions(&layers, index, &design_rules, &deleted_ids)
+            }
         } else {
             vec![]
         };
@@ -2100,7 +2166,7 @@ fn handle_run_drc_with_regions_async(
         id,
         result: Some(serde_json::json!({
             "status": "started",
-            "message": "DRC running in background"
+            "message": if use_incremental { "Incremental DRC running in background" } else { "Full DRC running in background" }
         })),
         error: None,
     };

@@ -27,9 +27,9 @@ export class UI {
   private drcInfoLabel: HTMLDivElement | null = null;
   private drcListContainer: HTMLDivElement | null = null;
   private onRunDrc: (() => void) | null = null;
+  private onRunIncrementalDrc: (() => void) | null = null;
   private onDrcNavigate: ((direction: 'prev' | 'next') => void) | null = null;
   private onDrcSelect: ((index: number) => void) | null = null;
-  private onClearDrc: (() => void) | null = null;
 
   constructor(scene: Scene, renderer: Renderer) {
     this.scene = scene;
@@ -60,6 +60,7 @@ export class UI {
     this.contextMenu.style.display = 'none';
     this.contextMenu.style.zIndex = '10000';
     this.contextMenu.style.minWidth = '120px';
+    this.contextMenu.style.borderRadius = '4px';
     
     const deleteOption = document.createElement('div');
     deleteOption.textContent = 'Delete';
@@ -118,7 +119,9 @@ export class UI {
     this.interceptConsoleLog(this.debugLogEl);
     this.setupStatsToggle();
     this.createDrcPanel();  // Creates resize handle
-    this.setupLayerResize(); // Attach resize behavior
+    this.setupLayerResize(); // Attach layer list resize behavior
+    this.setupDrcResize(); // Attach DRC list resize behavior
+    this.setupPanelWidthResize(); // Attach horizontal resize behavior
   }
 
   private setupStatsToggle() {
@@ -186,6 +189,78 @@ export class UI {
     });
   }
 
+  private setupDrcResize() {
+    const resizeHandle = document.getElementById('drc-resize-handle');
+    const listContainer = document.getElementById('drcListContainer');
+    if (!resizeHandle || !listContainer) return;
+
+    let isDragging = false;
+    let startY = 0;
+    let startHeight = 200;
+
+    resizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDragging = true;
+      startY = e.clientY;
+      startHeight = listContainer.offsetHeight || 200;
+
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+
+      const deltaY = e.clientY - startY;
+      const newHeight = Math.max(100, Math.min(600, startHeight + deltaY));
+      listContainer.style.maxHeight = `${newHeight}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
+  }
+
+  private setupPanelWidthResize() {
+    const resizeHandle = document.getElementById('panel-width-handle');
+    const contentPanel = document.getElementById('ui-top-left-content');
+    if (!resizeHandle || !contentPanel) return;
+
+    let isDragging = false;
+    let startX = 0;
+    let startWidth = 220;
+
+    resizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDragging = true;
+      startX = e.clientX;
+      startWidth = contentPanel.offsetWidth;
+
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+
+      const deltaX = e.clientX - startX;
+      const newWidth = Math.max(180, Math.min(500, startWidth + deltaX));
+      contentPanel.style.width = `${newWidth}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
+  }
+
   public setOnDelete(callback: () => void) {
     this.onDelete = callback;
   }
@@ -233,46 +308,54 @@ export class UI {
 
     // Create DRC panel after resize handle
     this.drcPanel = document.createElement('div');
+    this.drcPanel.className = 'drc-panel';
     this.drcPanel.style.marginTop = '0';
     this.drcPanel.style.paddingTop = '5px';
     this.drcPanel.style.pointerEvents = 'auto';
     this.drcPanel.innerHTML = `
       <div id="drcHeader" style="display: flex; align-items: center; gap: 4px; margin-bottom: 5px; cursor: pointer; user-select: none; padding: 2px 0;">
         <span id="drcCollapseIcon" style="color: #888; font-size: 10px; width: 12px; text-align: center;">▼</span>
-        <span style="font-weight: bold; color: #ff6b6b;">⚠️ DRC Violations</span>
+        <span style="font-weight: bold; color: #cca700;">⚠ DRC Violations</span>
       </div>
       <div id="drcContent">
-        <button id="runDrcBtn" style="width: 100%; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 3px;">Run DRC</button>
+        <button id="runDrcBtn" style="width: 100%; background: #0e639c; color: #fff; border: none; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 2px;">Run DRC</button>
         <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
           <span>⏳ Checking clearances...</span>
         </div>
         <div id="drcResultsContainer" style="display: none;">
-          <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 3px 3px 0 0; font-size: 11px;">
-            <span id="drcCount" style="color: #ff6b6b; font-weight: bold;">0 violations found</span>
+          <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 2px 2px 0 0; font-size: 11px;">
+            <span id="drcCount" style="color: #cca700; font-weight: bold;">0 violations found</span>
             <span style="color: #666; margin-left: 8px; font-size: 10px;">↑↓ to navigate</span>
           </div>
           <div id="drcListContainer" style="max-height: 200px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-bottom: none;" tabindex="0">
             <div id="drcList" style=""></div>
           </div>
-          <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 3px 3px; padding: 8px; font-size: 10px; display: none;">
+          <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 2px 2px; padding: 8px; font-size: 10px; display: none;">
             <div id="drcDetailIndex" style="color: #888; margin-bottom: 4px;"></div>
             <div id="drcDetailLayer" style="color: #ccc; margin-bottom: 2px;"></div>
             <div id="drcDetailDistance" style="margin-bottom: 2px;">
-              Distance: <span id="drcDistanceValue" style="color: #ff6b6b; font-weight: bold;"></span>
+              Distance: <span id="drcDistanceValue" style="color: #cca700; font-weight: bold;"></span>
               <span style="color: #666;">(req: <span id="drcRequiredValue"></span>)</span>
             </div>
             <div id="drcDetailNets" style="color: #888;"></div>
             <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
           </div>
           <div style="display: flex; gap: 4px; margin-top: 5px;">
-            <button id="rerunDrcBtn" style="flex: 1; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 4px; cursor: pointer; border-radius: 3px; font-size: 11px;">🔄 Re-run DRC</button>
-            <button id="clearDrcBtn" style="flex: 1; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; cursor: pointer; border-radius: 3px; font-size: 11px;">Clear DRC</button>
+            <button id="rerunFullDrcBtn" style="flex: 1; background: #0e639c; color: #fff; border: none; padding: 5px 8px; cursor: pointer; border-radius: 2px; font-size: 11px;">Run Full DRC</button>
+            <button id="rerunIncrementalDrcBtn" style="flex: 1; background: #3c3c3c; color: #ccc; border: 1px solid #5a5a5a; padding: 5px 8px; cursor: pointer; border-radius: 2px; font-size: 11px;">Run Incremental</button>
           </div>
         </div>
       </div>
     `;
 
     resizeHandle.parentElement?.insertBefore(this.drcPanel, resizeHandle.nextSibling);
+
+    // Create bottom resize handle after DRC panel
+    const bottomResizeHandle = document.createElement('div');
+    bottomResizeHandle.id = 'drc-resize-handle';
+    bottomResizeHandle.title = 'Drag to resize DRC list';
+    bottomResizeHandle.style.cssText = 'height: 6px; background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px); cursor: ns-resize; margin: 8px 0;';
+    this.drcPanel.parentElement?.insertBefore(bottomResizeHandle, this.drcPanel.nextSibling);
 
     // Wire up collapse/expand header
     const drcHeader = this.drcPanel.querySelector('#drcHeader') as HTMLDivElement;
@@ -307,17 +390,20 @@ export class UI {
       }
     });
 
-    const rerunBtn = this.drcPanel.querySelector('#rerunDrcBtn') as HTMLButtonElement;
-    rerunBtn.addEventListener('click', () => {
+    const rerunFullBtn = this.drcPanel.querySelector('#rerunFullDrcBtn') as HTMLButtonElement;
+    rerunFullBtn.addEventListener('click', () => {
       if (this.onRunDrc) {
         this.showDrcProgress();
         this.onRunDrc();
       }
     });
 
-    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
-    clearBtn.addEventListener('click', () => {
-      if (this.onClearDrc) this.onClearDrc();
+    const rerunIncrementalBtn = this.drcPanel.querySelector('#rerunIncrementalDrcBtn') as HTMLButtonElement;
+    rerunIncrementalBtn.addEventListener('click', () => {
+      if (this.onRunIncrementalDrc) {
+        this.showDrcProgress();
+        this.onRunIncrementalDrc();
+      }
     });
 
     // Keyboard navigation on the list container
@@ -376,7 +462,7 @@ export class UI {
           <span style="color: #888; margin-right: 6px;">#${index + 1}</span>
           <span style="color: #aaa;">${region.layer_id.replace('LAYER:', '')}</span>
         </div>
-        <span style="color: #ff6b6b; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
+        <span style="color: #cca700; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
       `;
       
       item.addEventListener('click', () => {
@@ -407,8 +493,8 @@ export class UI {
     // Highlight selected item
     const selectedItem = listDiv.querySelector(`[data-index="${index}"]`) as HTMLDivElement;
     if (selectedItem) {
-      selectedItem.style.background = '#3a3a5a';
-      selectedItem.style.borderLeft = '3px solid #ff6b6b';
+      selectedItem.style.background = '#094771';
+      selectedItem.style.borderLeft = '3px solid #007acc';
       
       // Scroll into view if needed
       selectedItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -427,8 +513,8 @@ export class UI {
     this.onDrcSelect = callback;
   }
 
-  public setOnClearDrc(callback: () => void) {
-    this.onClearDrc = callback;
+  public setOnIncrementalDrc(callback: () => void) {
+    this.onRunIncrementalDrc = callback;
   }
 
   public updateDrcPanel(regionCount: number, currentIndex: number, currentRegion: DrcRegion | null, showNav = true) {
@@ -508,10 +594,10 @@ export class UI {
     const legendParts: string[] = [];
     legendParts.push(`
       <div style="margin-bottom:4px; display:flex; gap:4px; flex-wrap:wrap; font:11px sans-serif;">
-        <button type="button" data-layer-action="all" style="padding:2px 6px;">All</button>
-        <button type="button" data-layer-action="none" style="padding:2px 6px;">None</button>
-        <button type="button" data-layer-action="invert" style="padding:2px 6px;">Invert</button>
-        <button type="button" id="savePcbBtn" style="padding:2px 6px; background:#4a9eff; color:#fff; border:1px solid #3a8eef; border-radius:3px; font-weight:bold;">💾 Save</button>
+        <button type="button" data-layer-action="all" style="padding:2px 6px; background: #3c3c3c; color: #ccc; border: 1px solid #5a5a5a; border-radius: 2px; cursor: pointer;">All</button>
+        <button type="button" data-layer-action="none" style="padding:2px 6px; background: #3c3c3c; color: #ccc; border: 1px solid #5a5a5a; border-radius: 2px; cursor: pointer;">None</button>
+        <button type="button" data-layer-action="invert" style="padding:2px 6px; background: #3c3c3c; color: #ccc; border: 1px solid #5a5a5a; border-radius: 2px; cursor: pointer;">Invert</button>
+        <button type="button" id="savePcbBtn" style="padding:2px 6px; background: #0e639c; color: #fff; border: none; border-radius: 2px; cursor: pointer;">Save</button>
       </div>
     `);
 
@@ -606,9 +692,9 @@ export class UI {
     const checked = visible ? "checked" : "";
     return `
       <div class="layer-entry" data-layer="${layerId}" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-        <input type="checkbox" data-layer-toggle="${layerId}" ${checked} style="margin:0" />
-        <button type="button" data-layer-color="${layerId}" title="Change color" style="width:18px;height:18px;border:1px solid #444;border-radius:3px;background:${rgb};"></button>
-        <span style="flex:1 1 auto; font-size:11px;">${label}</span>
+        <input type="checkbox" data-layer-toggle="${layerId}" ${checked} style="margin:0; accent-color: #007acc;" />
+        <button type="button" data-layer-color="${layerId}" title="Change color" style="width:18px;height:18px;border:1px solid #444;border-radius:2px;background:${rgb};cursor:pointer;"></button>
+        <span style="flex:1 1 auto; font-size:11px; color: #ccc;">${label}</span>
       </div>
     `;
   }
@@ -622,11 +708,11 @@ export class UI {
     modal.style.cssText = "position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:10000;";
 
     const picker = document.createElement("div");
-    picker.style.cssText = "background:#2b2b2b; padding:20px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.5);";
+    picker.style.cssText = "background: #2b2b2b; padding:20px; border-radius:4px; box-shadow:0 4px 20px rgba(0,0,0,0.5); border: 1px solid #454545;";
 
     const rgbString = (r: number, g: number, b: number) => `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
 
-    let html = `<div style="color:#fff; font:14px sans-serif; margin-bottom:12px;">Pick color for <strong>${layerId}</strong></div>`;
+    let html = `<div style="color: #fff; font:14px sans-serif; margin-bottom:12px;">Pick color for <strong>${layerId}</strong></div>`;
     html += `<div style="display:grid; grid-template-columns:repeat(16, 24px); gap:2px; margin-bottom:12px;">`;
 
     for (let i = 0; i < 16; i += 1) {

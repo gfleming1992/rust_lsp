@@ -764,6 +764,18 @@ async function init() {
         deletedObjectIds.add(obj.id);
       }
       
+      // Add related objects to the last undo stack entry so they get restored together
+      if (undoStack.length > 0) {
+        const lastBatch = undoStack[undoStack.length - 1];
+        for (const obj of relatedObjects) {
+          // Only add if not already in the batch (avoid duplicates)
+          if (!lastBatch.some(existing => existing.id === obj.id)) {
+            lastBatch.push(obj);
+          }
+        }
+        console.log(`[Delete] Updated undo batch to ${lastBatch.length} total objects`);
+      }
+      
       // Trigger a redraw to reflect visibility changes
       scene.state.needsDraw = true;
     } else if (data.command === "memoryResult") {
@@ -788,9 +800,16 @@ async function init() {
 
   // Wire up DRC UI callbacks
   ui.setOnRunDrc(() => {
-    console.log('[DRC] Running DRC...');
+    console.log('[DRC] Running Full DRC...');
     if (isVSCodeWebview && vscode) {
-      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15 });
+      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: true });
+    }
+  });
+
+  ui.setOnIncrementalDrc(() => {
+    console.log('[DRC] Running Incremental DRC...');
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: false });
     }
   });
 
@@ -824,18 +843,6 @@ async function init() {
       
       ui.updateDrcPanel(scene.drcRegions.length, index, region, true);
     }
-  });
-
-  ui.setOnClearDrc(() => {
-    console.log('[DRC] Clearing DRC');
-    scene.clearDrc();
-    ui.resetDrcPanel();
-    
-    // Show all layers again
-    for (const [layerId, _visible] of scene.layerVisible) {
-      scene.toggleLayerVisibility(layerId, true);
-    }
-    ui.refreshLayerLegend();
   });
   
   const initEnd = performance.now();
