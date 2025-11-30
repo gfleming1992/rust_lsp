@@ -1,10 +1,23 @@
 //! Selection handlers: Select, BoxSelect, point_hits_object
 
-use crate::lsp::protocol::{Response, error_codes};
+use crate::lsp::protocol::Response;
 use crate::lsp::state::ServerState;
-use crate::lsp::util::point_in_triangle;
+use crate::lsp::util::{point_in_triangle, parse_params};
 use crate::draw::geometry::{LayerJSON, ObjectRange};
 use serde::Deserialize;
+
+/// Sort objects by priority: objects with nets first, then by type (pad > via > polygon > polyline)
+pub fn sort_by_priority(objects: &mut [ObjectRange]) {
+    objects.sort_by(|a, b| {
+        let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
+        let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
+        if net_cmp != std::cmp::Ordering::Equal {
+            return net_cmp;
+        }
+        let type_priority = |t: u8| match t { 3 => 0, 2 => 1, 1 => 2, _ => 3 };
+        type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
+    });
+}
 
 /// Check if a point hits an object's actual geometry (not just bounding box)
 pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]) -> bool {
@@ -128,17 +141,7 @@ pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32) -> Vec<ObjectR
         .map(|obj| obj.range.clone())
         .collect();
     
-    // Sort by priority: objects with nets first, then by type (pad > via > polygon > polyline)
-    results.sort_by(|a, b| {
-        let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
-        let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
-        if net_cmp != std::cmp::Ordering::Equal {
-            return net_cmp;
-        }
-        let type_priority = |t: u8| match t { 3 => 0, 2 => 1, 1 => 2, _ => 3 };
-        type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
-    });
-    
+    sort_by_priority(&mut results);
     results
 }
 
@@ -149,20 +152,14 @@ pub fn handle_select(
     params: Option<serde_json::Value>
 ) -> Response {
     #[derive(Deserialize)]
-    struct SelectParams {
-        x: f32,
-        y: f32,
-    }
+    struct Params { x: f32, y: f32 }
 
-    let params: SelectParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
-        Some(p) => p,
-        None => {
-            return Response::error(id, error_codes::INVALID_PARAMS, 
-                "Invalid params: expected {x: number, y: number}".to_string());
-        }
+    let p: Params = match parse_params(id.clone(), params, "{x, y}") {
+        Ok(p) => p,
+        Err(e) => return e,
     };
 
-    let results = find_objects_at_point(state, params.x, params.y);
+    let results = find_objects_at_point(state, p.x, p.y);
     Response::success(id, serde_json::to_value(results).unwrap())
 }
 
@@ -173,51 +170,23 @@ pub fn handle_box_select(
     params: Option<serde_json::Value>
 ) -> Response {
     #[derive(Deserialize)]
-    struct BoxSelectParams {
-        min_x: f32,
-        min_y: f32,
-        max_x: f32,
-        max_y: f32,
-    }
+    struct Params { min_x: f32, min_y: f32, max_x: f32, max_y: f32 }
 
-    let params: BoxSelectParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
-        Some(p) => p,
-        None => {
-            return Response::error(id, error_codes::INVALID_PARAMS, 
-                "Invalid params: expected {min_x, min_y, max_x, max_y}".to_string());
-        }
+    let p: Params = match parse_params(id.clone(), params, "{min_x, min_y, max_x, max_y}") {
+        Ok(p) => p,
+        Err(e) => return e,
     };
-
-    eprintln!("[LSP Server] BoxSelect: ({}, {}) to ({}, {})", 
-        params.min_x, params.min_y, params.max_x, params.max_y);
 
     if let Some(tree) = &state.spatial_index {
         use rstar::AABB;
         
-        let envelope = AABB::from_corners(
-            [params.min_x, params.min_y],
-            [params.max_x, params.max_y]
-        );
+        let envelope = AABB::from_corners([p.min_x, p.min_y], [p.max_x, p.max_y]);
         
         let mut results: Vec<ObjectRange> = tree.locate_in_envelope_intersecting(&envelope)
             .map(|obj| obj.range.clone())
             .collect();
         
-        // Sort by priority
-        results.sort_by(|a, b| {
-            let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
-            let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
-            if net_cmp != std::cmp::Ordering::Equal {
-                return net_cmp;
-            }
-            
-            let type_priority = |t: u8| match t {
-                3 => 0, 2 => 1, 1 => 2, _ => 3,
-            };
-            type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
-        });
-        
-        eprintln!("[LSP Server] BoxSelect found {} objects", results.len());
+        sort_by_priority(&mut results);
             
         Response::success(id, serde_json::to_value(results).unwrap())
     } else {

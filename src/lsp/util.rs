@@ -3,12 +3,72 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use serde::de::DeserializeOwned;
+use crate::lsp::protocol::{Response, error_codes};
+use crate::lsp::state::ServerState;
+use crate::draw::geometry::ObjectRange;
 
 #[cfg(windows)]
 use std::mem::MaybeUninit;
 
 /// Track if we've already written to the log this session (to truncate on first write)
 static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Parse JSON-RPC params into a typed struct, returning an error Response on failure
+pub fn parse_params<T: DeserializeOwned>(
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+    expected: &str,
+) -> Result<T, Response> {
+    params
+        .and_then(|p| serde_json::from_value(p).ok())
+        .ok_or_else(|| Response::error(id, error_codes::INVALID_PARAMS, 
+            format!("Invalid params: expected {}", expected)))
+}
+
+/// Check if a file is loaded, returning an error Response if not
+pub fn require_file_loaded(
+    state: &ServerState,
+    id: Option<serde_json::Value>,
+) -> Result<(), Response> {
+    if state.is_file_loaded() {
+        Ok(())
+    } else {
+        Err(Response::error(id, error_codes::NO_FILE_LOADED, 
+            "No file loaded. Call Load first.".to_string()))
+    }
+}
+
+/// Parse ObjectRange from params, handling both `{object: ...}` wrapper and direct format
+pub fn parse_object_param(params: Option<serde_json::Value>) -> Option<ObjectRange> {
+    params.and_then(|p| {
+        if let serde_json::Value::Object(map) = &p {
+            map.get("object").cloned().and_then(|o| serde_json::from_value(o).ok())
+        } else {
+            serde_json::from_value(p).ok()
+        }
+    })
+}
+
+/// Calculate center point of a bounding box
+pub fn bounds_center(bounds: &[f32; 4]) -> (f32, f32) {
+    ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
+}
+
+/// Check if two bounding boxes match within tolerance
+pub fn bounds_match(b1: &[f32; 4], b2: &[f32; 4], tolerance: f32) -> bool {
+    let w1 = b1[2] - b1[0];
+    let h1 = b1[3] - b1[1];
+    let w2 = b2[2] - b2[0];
+    let h2 = b2[3] - b2[1];
+    
+    let width_match = (w1 - w2).abs() < tolerance;
+    let height_match = (h1 - h2).abs() < tolerance;
+    let x_match = (b1[0] - b2[0]).abs() < tolerance && (b1[2] - b2[2]).abs() < tolerance;
+    let y_match = (b1[1] - b2[1]).abs() < tolerance && (b1[3] - b2[3]).abs() < tolerance;
+    
+    width_match && height_match && x_match && y_match
+}
 
 /// Get current process memory usage on Windows (returns bytes)
 #[cfg(windows)]

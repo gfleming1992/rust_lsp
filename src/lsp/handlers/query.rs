@@ -1,8 +1,8 @@
 //! Query handlers: QueryNetAtPoint, GetMemory
 
-use crate::lsp::protocol::{Response, error_codes};
+use crate::lsp::protocol::Response;
 use crate::lsp::state::ServerState;
-use crate::lsp::util::get_process_memory_bytes;
+use crate::lsp::util::{get_process_memory_bytes, parse_params, require_file_loaded};
 use crate::lsp::handlers::selection::find_objects_at_point;
 use serde::Deserialize;
 
@@ -13,25 +13,19 @@ pub fn handle_query_net_at_point(
     params: Option<serde_json::Value>
 ) -> Response {
     #[derive(Deserialize)]
-    struct QueryNetParams {
-        x: f32,
-        y: f32,
-    }
+    struct Params { x: f32, y: f32 }
 
-    let params: QueryNetParams = match params {
-        Some(p) => serde_json::from_value(p).unwrap_or_else(|_| QueryNetParams {
-            x: 0.0, y: 0.0
-        }),
-        None => QueryNetParams { x: 0.0, y: 0.0 }
+    let p: Params = match parse_params(id.clone(), params, "{x, y}") {
+        Ok(p) => p,
+        Err(e) => return e,
     };
-
-    if !state.is_file_loaded() {
-        return Response::error(id, error_codes::NO_FILE_LOADED, 
-            "No file loaded. Call Load first.".to_string());
+    
+    if let Err(e) = require_file_loaded(state, id.clone()) {
+        return e;
     }
 
     // Use shared helper to find objects (already sorted by priority)
-    let objects = find_objects_at_point(state, params.x, params.y);
+    let objects = find_objects_at_point(state, p.x, p.y);
     
     // Extract first net/component/pin from the prioritized results
     let mut net_name: Option<String> = None;
