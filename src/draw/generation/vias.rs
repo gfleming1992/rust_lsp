@@ -7,15 +7,6 @@ use std::collections::HashMap;
 use crate::draw::geometry::*;
 use crate::draw::tessellation::*;
 
-/// Pack rotation and visibility into a single float value
-fn pack_rotation_visibility(rotation: f32, visible: bool) -> f32 {
-    if visible {
-        rotation
-    } else {
-        -rotation - 100.0
-    }
-}
-
 /// Via shape key for grouping vias by shape type and dimensions
 #[derive(Debug, Hash, Eq, PartialEq)]
 enum ShapeKey {

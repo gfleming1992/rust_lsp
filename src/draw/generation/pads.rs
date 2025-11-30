@@ -7,17 +7,6 @@ use std::collections::HashMap;
 use crate::draw::geometry::*;
 use crate::draw::tessellation::*;
 
-/// Pack rotation and visibility into a single float value
-fn pack_rotation_visibility(rotation: f32, visible: bool) -> f32 {
-    // Pack rotation in radians and visibility flag
-    // Visibility is packed as sign: positive = visible, negative = hidden
-    if visible {
-        rotation
-    } else {
-        -rotation - 100.0 // Use large negative offset for hidden
-    }
-}
-
 /// Generate instanced_rot geometry for pads (shapes with rotation)
 /// Creates 3 LOD levels, each containing multiple geometries for different pad shapes
 pub fn generate_pad_geometry(
