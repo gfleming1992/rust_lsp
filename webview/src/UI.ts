@@ -264,7 +264,10 @@ export class UI {
             <div id="drcDetailNets" style="color: #888;"></div>
             <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
           </div>
-          <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; margin-top: 5px; cursor: pointer; border-radius: 3px;">Clear DRC</button>
+          <div style="display: flex; gap: 4px; margin-top: 5px;">
+            <button id="rerunDrcBtn" style="flex: 1; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 4px; cursor: pointer; border-radius: 3px; font-size: 11px;">🔄 Re-run DRC</button>
+            <button id="clearDrcBtn" style="flex: 1; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; cursor: pointer; border-radius: 3px; font-size: 11px;">Clear DRC</button>
+          </div>
         </div>
       </div>
     `;
@@ -298,6 +301,14 @@ export class UI {
     // Wire up buttons
     const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
     runBtn.addEventListener('click', () => {
+      if (this.onRunDrc) {
+        this.showDrcProgress();
+        this.onRunDrc();
+      }
+    });
+
+    const rerunBtn = this.drcPanel.querySelector('#rerunDrcBtn') as HTMLButtonElement;
+    rerunBtn.addEventListener('click', () => {
       if (this.onRunDrc) {
         this.showDrcProgress();
         this.onRunDrc();

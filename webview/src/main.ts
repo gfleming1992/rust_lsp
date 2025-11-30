@@ -328,23 +328,10 @@ async function init() {
     // Clear all highlights first
     scene.clearHighlightObject();
     
-    // Calculate combined bounds of all deleted objects for incremental DRC
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    const deletedIds: number[] = [];
-    
     // Hide all objects and track them
     for (const obj of objects) {
       scene.hideObject(obj);
       deletedObjectIds.add(obj.id);
-      deletedIds.push(obj.id);
-      
-      // Track bounds for incremental DRC
-      if (obj.bounds) {
-        minX = Math.min(minX, obj.bounds[0]);
-        minY = Math.min(minY, obj.bounds[1]);
-        maxX = Math.max(maxX, obj.bounds[2]);
-        maxY = Math.max(maxY, obj.bounds[3]);
-      }
       
       // Send delete command to backend
       if (isVSCodeWebview && vscode) {
@@ -363,20 +350,6 @@ async function init() {
     
     selectedObjects = [];
     console.log(`[Delete] Deleted ${objects.length} object(s)`);
-    
-    // Incremental DRC update if violations are currently displayed
-    if (scene.drcEnabled && scene.drcRegions.length > 0 && minX !== Infinity) {
-      console.log(`[DRC] Incremental update after delete in region [${minX.toFixed(3)}, ${minY.toFixed(3)}] to [${maxX.toFixed(3)}, ${maxY.toFixed(3)}]`);
-      ui.showDrcProgress();
-      if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ 
-          command: 'UpdateDRCAfterEdit', 
-          edited_object_ids: deletedIds,
-          bounds: [minX, minY, maxX, maxY],
-          clearance_mm: 0.15 
-        });
-      }
-    }
   }
 
   function performUndo() {
@@ -388,23 +361,10 @@ async function init() {
     const batch = undoStack.pop()!;
     console.log(`[Undo] Restoring ${batch.length} object(s)`);
     
-    // Calculate combined bounds of restored objects for incremental DRC
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    const restoredIds: number[] = [];
-    
     // Show all objects in the batch
     for (const obj of batch) {
       scene.showObject(obj);
       deletedObjectIds.delete(obj.id);
-      restoredIds.push(obj.id);
-      
-      // Track bounds for incremental DRC
-      if (obj.bounds) {
-        minX = Math.min(minX, obj.bounds[0]);
-        minY = Math.min(minY, obj.bounds[1]);
-        maxX = Math.max(maxX, obj.bounds[2]);
-        maxY = Math.max(maxY, obj.bounds[3]);
-      }
       
       // Send undo command to backend
       if (isVSCodeWebview && vscode) {
@@ -417,20 +377,6 @@ async function init() {
     if (redoStack.length > MAX_UNDO_HISTORY) {
       redoStack.shift();
     }
-    
-    // Incremental DRC update if violations are currently displayed
-    if (scene.drcEnabled && scene.drcRegions.length > 0 && minX !== Infinity) {
-      console.log(`[DRC] Incremental update after undo in region [${minX.toFixed(3)}, ${minY.toFixed(3)}] to [${maxX.toFixed(3)}, ${maxY.toFixed(3)}]`);
-      ui.showDrcProgress();
-      if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ 
-          command: 'UpdateDRCAfterEdit', 
-          edited_object_ids: restoredIds,
-          bounds: [minX, minY, maxX, maxY],
-          clearance_mm: 0.15 
-        });
-      }
-    }
   }
 
   function performRedo() {
@@ -442,23 +388,10 @@ async function init() {
     const batch = redoStack.pop()!;
     console.log(`[Redo] Re-deleting ${batch.length} object(s)`);
     
-    // Calculate combined bounds for incremental DRC
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    const redoIds: number[] = [];
-    
     // Hide all objects in the batch again
     for (const obj of batch) {
       scene.hideObject(obj);
       deletedObjectIds.add(obj.id);
-      redoIds.push(obj.id);
-      
-      // Track bounds for incremental DRC
-      if (obj.bounds) {
-        minX = Math.min(minX, obj.bounds[0]);
-        minY = Math.min(minY, obj.bounds[1]);
-        maxX = Math.max(maxX, obj.bounds[2]);
-        maxY = Math.max(maxY, obj.bounds[3]);
-      }
       
       // Send redo command to backend
       if (isVSCodeWebview && vscode) {
@@ -470,20 +403,6 @@ async function init() {
     undoStack.push(batch);
     if (undoStack.length > MAX_UNDO_HISTORY) {
       undoStack.shift();
-    }
-    
-    // Incremental DRC update if violations are currently displayed
-    if (scene.drcEnabled && scene.drcRegions.length > 0 && minX !== Infinity) {
-      console.log(`[DRC] Incremental update after redo in region [${minX.toFixed(3)}, ${minY.toFixed(3)}] to [${maxX.toFixed(3)}, ${maxY.toFixed(3)}]`);
-      ui.showDrcProgress();
-      if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ 
-          command: 'UpdateDRCAfterEdit', 
-          edited_object_ids: redoIds,
-          bounds: [minX, minY, maxX, maxY],
-          clearance_mm: 0.15 
-        });
-      }
     }
   }
   

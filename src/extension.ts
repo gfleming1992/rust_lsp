@@ -324,29 +324,6 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
-                    case 'UpdateDRCAfterEdit':
-                        // Incremental DRC after edit - results will come via notification
-                        console.log(`[Extension] Starting incremental DRC for ${message.edited_object_ids?.length || 0} edited objects...`);
-                        const updateDrcResponse = await sendToLspServer({ 
-                            method: 'UpdateDRCAfterEdit', 
-                            params: { 
-                                edited_object_ids: message.edited_object_ids || [],
-                                bounds: message.bounds || [0, 0, 0, 0],
-                                clearance_mm: message.clearance_mm || 0.15 
-                            } 
-                        }, panel);
-                        
-                        if (updateDrcResponse?.result?.status === 'started') {
-                            console.log('[Extension] Incremental DRC started in background');
-                        } else if (updateDrcResponse?.error) {
-                            console.error('[Extension] Incremental DRC error:', updateDrcResponse.error);
-                            panel.webview.postMessage({
-                                command: 'drcRegionsResult',
-                                regions: [],
-                                error: updateDrcResponse.error.message
-                            });
-                        }
-                        break;
                 }
             },
             undefined,

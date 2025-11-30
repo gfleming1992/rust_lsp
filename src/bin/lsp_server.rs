@@ -1,5 +1,5 @@
 use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange, PadStackDef};
-use rust_extension::draw::drc::{DrcViolation, DrcRegion, DesignRules, run_full_drc, run_full_drc_with_regions, update_drc_after_edit};
+use rust_extension::draw::drc::{DrcViolation, DrcRegion, DesignRules, run_full_drc, run_full_drc_with_regions};
 use rust_extension::parse_xml::{parse_xml_file, XmlNode};
 use rust_extension::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
 use rust_extension::serialize_xml::xml_node_to_file;
@@ -251,10 +251,6 @@ fn main() {
             "RunDRCWithRegions" => {
                 // Run DRC asynchronously
                 handle_run_drc_with_regions_async(&state, request.id, request.params, drc_sender.clone())
-            },
-            "UpdateDRCAfterEdit" => {
-                // Incremental DRC update after object edit
-                handle_update_drc_after_edit_async(&state, request.id, request.params, drc_sender.clone())
             },
             "GetDRCRegions" => serde_json::to_string(&handle_get_drc_regions(&state, request.id)).unwrap(),
             "GetMemory" => serde_json::to_string(&handle_get_memory(request.id)).unwrap(),
@@ -2076,10 +2072,12 @@ fn handle_run_drc_with_regions_async(
     let layers = state.layers.clone();
     let spatial_index = state.spatial_index.clone();
     let design_rules = DesignRules { conductor_clearance_mm: clearance };
-    // Get set of deleted object IDs to exclude from DRC
+    
+    // Clone deleted object IDs to pass to DRC
     let deleted_ids: std::collections::HashSet<u64> = state.deleted_objects.keys().copied().collect();
 
-    eprintln!("[LSP Server] Starting async DRC with clearance: {:.3}mm, {} deleted objects", clearance, deleted_ids.len());
+    eprintln!("[LSP Server] Starting async DRC with clearance: {:.3}mm ({} deleted objects excluded)", 
+        clearance, deleted_ids.len());
     
     // Spawn DRC in background thread
     thread::spawn(move || {
@@ -2103,105 +2101,6 @@ fn handle_run_drc_with_regions_async(
         result: Some(serde_json::json!({
             "status": "started",
             "message": "DRC running in background"
-        })),
-        error: None,
-    };
-    serde_json::to_string(&response).unwrap()
-}
-
-/// Handle incremental DRC update after object edit (delete/move)
-fn handle_update_drc_after_edit_async(
-    state: &ServerState,
-    id: Option<serde_json::Value>,
-    params: Option<serde_json::Value>,
-    tx: Option<Sender<DrcAsyncResult>>
-) -> String {
-    #[derive(Deserialize)]
-    struct UpdateDRCParams {
-        /// IDs of objects that were edited
-        edited_object_ids: Vec<u64>,
-        /// Bounds of the affected area [min_x, min_y, max_x, max_y]
-        bounds: [f32; 4],
-        #[serde(default)]
-        clearance_mm: Option<f32>,
-    }
-
-    let params: UpdateDRCParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
-        Some(p) => p,
-        None => {
-            let response = Response {
-                id,
-                result: None,
-                error: Some(ErrorResponse {
-                    code: -32602,
-                    message: "Invalid params for UpdateDRCAfterEdit".to_string(),
-                }),
-            };
-            return serde_json::to_string(&response).unwrap();
-        }
-    };
-
-    let tx = match tx {
-        Some(tx) => tx,
-        None => {
-            let response = Response {
-                id,
-                result: None,
-                error: Some(ErrorResponse {
-                    code: 3,
-                    message: "DRC channel not available".to_string(),
-                }),
-            };
-            return serde_json::to_string(&response).unwrap();
-        }
-    };
-
-    let clearance = params.clearance_mm.unwrap_or(state.design_rules.conductor_clearance_mm);
-    
-    // Clone data needed for background thread
-    let layers = state.layers.clone();
-    let spatial_index = state.spatial_index.clone();
-    let design_rules = DesignRules { conductor_clearance_mm: clearance };
-    let existing_regions = state.drc_regions.clone();
-    let deleted_ids: std::collections::HashSet<u64> = state.deleted_objects.keys().copied().collect();
-    let edited_ids: std::collections::HashSet<u64> = params.edited_object_ids.into_iter().collect();
-    let bounds = params.bounds;
-
-    eprintln!(
-        "[LSP Server] Starting incremental DRC for {} edited objects in region [{:.3}, {:.3}] to [{:.3}, {:.3}]",
-        edited_ids.len(), bounds[0], bounds[1], bounds[2], bounds[3]
-    );
-    
-    // Spawn incremental DRC in background thread
-    thread::spawn(move || {
-        let start = Instant::now();
-        
-        let regions = if let Some(ref index) = spatial_index {
-            update_drc_after_edit(
-                &existing_regions,
-                &edited_ids,
-                bounds,
-                &layers,
-                index,
-                &design_rules,
-                &deleted_ids,
-            )
-        } else {
-            existing_regions
-        };
-        
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        
-        // Send result back to main thread
-        let _ = tx.send(DrcAsyncResult { regions, elapsed_ms });
-    });
-
-    // Return immediately with "started" status
-    let response = Response {
-        id,
-        result: Some(serde_json::json!({
-            "status": "started",
-            "message": "Incremental DRC running in background"
         })),
         error: None,
     };
