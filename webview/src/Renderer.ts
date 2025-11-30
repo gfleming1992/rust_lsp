@@ -42,7 +42,6 @@ export class Renderer {
   public gpuBuffers: GPUBufferInfo[] = [];
   
   // Debug control
-  public debugRenderType: 'all' | 'batch' | 'instanced' | 'instanced_rot' = 'all';
   public debugLogNextFrame = false;
 
   // Loading state - keep canvas black until first layer batch is loaded
@@ -412,9 +411,6 @@ export class Renderer {
     this.configureSurface();
     this.updateUniforms();
 
-    if ((window as any).debugRenderType) {
-        this.debugRenderType = (window as any).debugRenderType;
-    }
     if ((window as any).debugLogNextFrame) {
         this.debugLogNextFrame = true;
         (window as any).debugLogNextFrame = false;
@@ -454,13 +450,6 @@ export class Renderer {
       
       for (const [renderKey, data] of this.scene.layerRenderData.entries()) {
         if (data.layerId !== layerId) continue;
-        
-        // Debug filtering
-        if (this.debugRenderType !== 'all') {
-            if (this.debugRenderType === 'batch' && data.shaderType !== 'batch' && data.shaderType !== 'batch_colored') continue;
-            if (this.debugRenderType === 'instanced' && data.shaderType !== 'instanced') continue;
-            if (this.debugRenderType === 'instanced_rot' && data.shaderType !== 'instanced_rot') continue;
-        }
 
         // Handle instanced rendering (both rot and non-rot)
         if (data.shaderType === 'instanced' || data.shaderType === 'instanced_rot') {

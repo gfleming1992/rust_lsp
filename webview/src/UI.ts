@@ -26,7 +26,6 @@ export class UI {
   private drcCountLabel: HTMLSpanElement | null = null;
   private drcInfoLabel: HTMLDivElement | null = null;
   private drcListContainer: HTMLDivElement | null = null;
-  private drcListVisible = false;
   private onRunDrc: (() => void) | null = null;
   private onDrcNavigate: ((direction: 'prev' | 'next') => void) | null = null;
   private onDrcSelect: ((index: number) => void) | null = null;
@@ -117,9 +116,9 @@ export class UI {
     });
 
     this.interceptConsoleLog(this.debugLogEl);
-    this.createDebugControls();
     this.setupStatsToggle();
-    this.setupLayerResize();
+    this.createDrcPanel();  // Creates resize handle
+    this.setupLayerResize(); // Attach resize behavior
   }
 
   private setupStatsToggle() {
@@ -222,49 +221,19 @@ export class UI {
   }
 
 
-  private createDebugControls() {
+  private createDrcPanel() {
     if (!this.layersEl) return;
 
-    const debugContainer = document.createElement('div');
-    debugContainer.style.marginTop = '10px';
-    debugContainer.style.borderTop = '1px solid #444';
-    debugContainer.style.paddingTop = '5px';
-    debugContainer.style.pointerEvents = 'auto';
-    debugContainer.innerHTML = `
-      <div style="margin-bottom: 5px; font-weight: bold;">Debug Render</div>
-      <select id="debugRenderType" style="width: 100%; background: #333; color: white; border: 1px solid #555; margin-bottom: 5px;">
-        <option value="all">All Geometry</option>
-        <option value="batch">Polylines Only (Batch)</option>
-        <option value="instanced">Vias Only (Instanced)</option>
-        <option value="instanced_rot">Pads Only (InstancedRot)</option>
-      </select>
-      <button id="debugLogFrame" style="width: 100%; background: #444; color: white; border: 1px solid #555; cursor: pointer;">Log Next Frame</button>
-    `;
+    // Create resize handle between layers and DRC
+    const resizeHandle = document.createElement('div');
+    resizeHandle.id = 'layer-resize-handle';
+    resizeHandle.title = 'Drag to resize';
+    resizeHandle.style.cssText = 'height: 6px; background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px); cursor: ns-resize; margin: 8px 0;';
+    this.layersEl.parentElement?.insertBefore(resizeHandle, this.layersEl.nextSibling);
 
-    this.layersEl.parentElement?.insertBefore(debugContainer, this.layersEl.nextSibling);
-
-    const select = debugContainer.querySelector('#debugRenderType') as HTMLSelectElement;
-    select.addEventListener('change', (e) => {
-      const val = (e.target as HTMLSelectElement).value as any;
-      this.renderer.debugRenderType = val;
-      this.scene.state.needsDraw = true;
-    });
-
-    const btn = debugContainer.querySelector('#debugLogFrame') as HTMLButtonElement;
-    btn.addEventListener('click', () => {
-      this.renderer.debugLogNextFrame = true;
-      this.scene.state.needsDraw = true;
-      console.log("Next frame will be logged to console...");
-    });
-
-    // Create DRC panel after debug controls
-    this.createDrcPanel(debugContainer);
-  }
-
-  private createDrcPanel(afterElement: HTMLElement) {
+    // Create DRC panel after resize handle
     this.drcPanel = document.createElement('div');
-    this.drcPanel.style.marginTop = '10px';
-    this.drcPanel.style.borderTop = '1px solid #444';
+    this.drcPanel.style.marginTop = '0';
     this.drcPanel.style.paddingTop = '5px';
     this.drcPanel.style.pointerEvents = 'auto';
     this.drcPanel.innerHTML = `
@@ -273,30 +242,29 @@ export class UI {
       <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
         <span>⏳ Checking clearances...</span>
       </div>
-      <div id="drcSummary" style="display: none; margin-bottom: 5px; cursor: pointer; padding: 6px; background: #2a2a2a; border-radius: 3px; border: 1px solid #444;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span id="drcCount" style="font-size: 12px; color: #ff6b6b; font-weight: bold;">0 violations found</span>
-          <span id="drcExpandIcon" style="color: #888;">▼</span>
+      <div id="drcResultsContainer" style="display: none;">
+        <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 3px 3px 0 0; font-size: 11px;">
+          <span id="drcCount" style="color: #ff6b6b; font-weight: bold;">0 violations found</span>
+          <span style="color: #666; margin-left: 8px; font-size: 10px;">↑↓ to navigate</span>
         </div>
-      </div>
-      <div id="drcListContainer" style="display: none; max-height: 250px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; margin-bottom: 5px;">
-        <div id="drcListHeader" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: #2a2a2a; border-bottom: 1px solid #444; position: sticky; top: 0;">
-          <span style="font-size: 11px; color: #aaa;">Select violation:</span>
-          <button id="drcCloseListBtn" style="background: none; border: none; color: #888; cursor: pointer; font-size: 14px; padding: 0 4px;">✕</button>
+        <div id="drcListContainer" style="max-height: 200px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-bottom: none;" tabindex="0">
+          <div id="drcList" style=""></div>
         </div>
-        <div id="drcList" style="padding: 4px;"></div>
-      </div>
-      <div id="drcNavContainer" style="display: none; margin-bottom: 5px;">
-        <div style="display: flex; gap: 4px;">
-          <button id="drcPrevBtn" style="flex: 1; background: #444; color: white; border: 1px solid #555; padding: 4px; cursor: pointer;">◀ Prev</button>
-          <button id="drcNextBtn" style="flex: 1; background: #444; color: white; border: 1px solid #555; padding: 4px; cursor: pointer;">Next ▶</button>
+        <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 3px 3px; padding: 8px; font-size: 10px; display: none;">
+          <div id="drcDetailIndex" style="color: #888; margin-bottom: 4px;"></div>
+          <div id="drcDetailLayer" style="color: #ccc; margin-bottom: 2px;"></div>
+          <div id="drcDetailDistance" style="margin-bottom: 2px;">
+            Distance: <span id="drcDistanceValue" style="color: #ff6b6b; font-weight: bold;"></span>
+            <span style="color: #666;">(req: <span id="drcRequiredValue"></span>)</span>
+          </div>
+          <div id="drcDetailNets" style="color: #888;"></div>
+          <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
         </div>
-        <div id="drcViolationInfo" style="margin-top: 5px; font-size: 10px; color: #ccc; background: #2a2a2a; padding: 5px; border-radius: 3px;"></div>
+        <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; margin-top: 5px; cursor: pointer; border-radius: 3px;">Clear DRC</button>
       </div>
-      <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; cursor: pointer; display: none;">Clear DRC</button>
     `;
 
-    afterElement.parentElement?.insertBefore(this.drcPanel, afterElement.nextSibling);
+    resizeHandle.parentElement?.insertBefore(this.drcPanel, resizeHandle.nextSibling);
 
     // Wire up buttons
     const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
@@ -307,36 +275,25 @@ export class UI {
       }
     });
 
-    // Summary click to toggle list
-    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
-    summaryDiv.addEventListener('click', () => {
-      this.toggleDrcList();
-    });
-
-    // Close list button
-    const closeListBtn = this.drcPanel.querySelector('#drcCloseListBtn') as HTMLButtonElement;
-    closeListBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.hideDrcList();
-    });
-
-    const prevBtn = this.drcPanel.querySelector('#drcPrevBtn') as HTMLButtonElement;
-    prevBtn.addEventListener('click', () => {
-      if (this.onDrcNavigate) this.onDrcNavigate('prev');
-    });
-
-    const nextBtn = this.drcPanel.querySelector('#drcNextBtn') as HTMLButtonElement;
-    nextBtn.addEventListener('click', () => {
-      if (this.onDrcNavigate) this.onDrcNavigate('next');
-    });
-
     const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
     clearBtn.addEventListener('click', () => {
       if (this.onClearDrc) this.onClearDrc();
     });
 
+    // Keyboard navigation on the list container
+    const listContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
+    listContainer.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (this.onDrcNavigate) this.onDrcNavigate('prev');
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (this.onDrcNavigate) this.onDrcNavigate('next');
+      }
+    });
+
     this.drcCountLabel = this.drcPanel.querySelector('#drcCount') as HTMLSpanElement;
-    this.drcInfoLabel = this.drcPanel.querySelector('#drcViolationInfo') as HTMLDivElement;
+    this.drcInfoLabel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
     this.drcListContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
   }
 
@@ -344,9 +301,11 @@ export class UI {
     if (!this.drcPanel) return;
     const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
     const progressDiv = this.drcPanel.querySelector('#drcProgress') as HTMLDivElement;
+    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
     
     runBtn.style.display = 'none';
     progressDiv.style.display = 'block';
+    resultsContainer.style.display = 'none';
   }
 
   public hideDrcProgress() {
@@ -356,30 +315,6 @@ export class UI {
     
     runBtn.style.display = 'block';
     progressDiv.style.display = 'none';
-  }
-
-  private toggleDrcList() {
-    if (this.drcListVisible) {
-      this.hideDrcList();
-    } else {
-      this.showDrcList();
-    }
-  }
-
-  private showDrcList() {
-    if (!this.drcPanel || !this.drcListContainer) return;
-    this.drcListVisible = true;
-    this.drcListContainer.style.display = 'block';
-    const expandIcon = this.drcPanel.querySelector('#drcExpandIcon') as HTMLSpanElement;
-    if (expandIcon) expandIcon.textContent = '▲';
-  }
-
-  private hideDrcList() {
-    if (!this.drcPanel || !this.drcListContainer) return;
-    this.drcListVisible = false;
-    this.drcListContainer.style.display = 'none';
-    const expandIcon = this.drcPanel.querySelector('#drcExpandIcon') as HTMLSpanElement;
-    if (expandIcon) expandIcon.textContent = '▼';
   }
 
   public populateDrcList(regions: DrcRegion[]) {
@@ -395,31 +330,49 @@ export class UI {
       const item = document.createElement('div');
       item.className = 'drc-list-item';
       item.dataset.index = String(index);
-      item.style.cssText = 'padding: 6px 8px; border-bottom: 1px solid #333; cursor: pointer; font-size: 10px;';
+      item.style.cssText = 'padding: 6px 8px; border-bottom: 1px solid #333; cursor: pointer; font-size: 10px; display: flex; justify-content: space-between; align-items: center;';
       item.innerHTML = `
-        <div style="display: flex; justify-content: space-between;">
-          <span style="color: #aaa;">#${index + 1}</span>
-          <span style="color: #ff6b6b; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
+        <div>
+          <span style="color: #888; margin-right: 6px;">#${index + 1}</span>
+          <span style="color: #aaa;">${region.layer_id.replace('LAYER:', '')}</span>
         </div>
-        <div style="color: #888; margin-top: 2px;">${region.layer_id.replace('LAYER:', '')}</div>
-        <div style="color: #666; margin-top: 1px; font-size: 9px;">${netA} ↔ ${netB}</div>
+        <span style="color: #ff6b6b; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
       `;
       
-      item.addEventListener('mouseenter', () => {
-        item.style.background = '#333';
-      });
-      item.addEventListener('mouseleave', () => {
-        item.style.background = 'transparent';
-      });
       item.addEventListener('click', () => {
         if (this.onDrcSelect) {
           this.onDrcSelect(index);
-          this.hideDrcList();
         }
       });
       
       listDiv.appendChild(item);
     });
+
+    // Focus the list container for keyboard navigation
+    const listContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
+    listContainer.focus();
+  }
+
+  private highlightDrcListItem(index: number) {
+    if (!this.drcPanel) return;
+    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
+    if (!listDiv) return;
+
+    // Remove previous selection
+    listDiv.querySelectorAll('.drc-list-item').forEach((item) => {
+      (item as HTMLDivElement).style.background = 'transparent';
+      (item as HTMLDivElement).style.borderLeft = 'none';
+    });
+
+    // Highlight selected item
+    const selectedItem = listDiv.querySelector(`[data-index="${index}"]`) as HTMLDivElement;
+    if (selectedItem) {
+      selectedItem.style.background = '#3a3a5a';
+      selectedItem.style.borderLeft = '3px solid #ff6b6b';
+      
+      // Scroll into view if needed
+      selectedItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
   }
 
   public setOnRunDrc(callback: () => void) {
@@ -443,40 +396,47 @@ export class UI {
 
     this.hideDrcProgress();
 
-    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
-    const navContainer = this.drcPanel.querySelector('#drcNavContainer') as HTMLDivElement;
-    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
+    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
+    const detailPanel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
+    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
 
     if (regionCount > 0) {
-      summaryDiv.style.display = 'block';
-      clearBtn.style.display = 'block';
+      runBtn.style.display = 'none';
+      resultsContainer.style.display = 'block';
 
       if (this.drcCountLabel) {
         this.drcCountLabel.textContent = `${regionCount} clearance violation${regionCount !== 1 ? 's' : ''} found`;
       }
 
-      // Show navigation only if explicitly navigating
-      if (showNav && currentRegion) {
-        navContainer.style.display = 'block';
+      // Always show detail panel when we have a selection
+      if (currentRegion) {
+        detailPanel.style.display = 'block';
         
-        if (this.drcInfoLabel) {
-          const netA = currentRegion.net_a || 'unnamed';
-          const netB = currentRegion.net_b || 'unnamed';
-          this.drcInfoLabel.innerHTML = `
-            <div style="margin-bottom: 3px; color: #888;">${currentIndex + 1} / ${regionCount}</div>
-            <div>Layer: <b>${currentRegion.layer_id}</b></div>
-            <div>Distance: <b style="color:#ff6b6b;">${currentRegion.min_distance_mm.toFixed(3)}mm</b> (req: ${currentRegion.clearance_mm.toFixed(3)}mm)</div>
-            <div>Nets: <b>${netA}</b> ↔ <b>${netB}</b></div>
-            <div>Triangles: ${currentRegion.triangle_count}</div>
-          `;
-        }
+        const netA = currentRegion.net_a || 'unnamed';
+        const netB = currentRegion.net_b || 'unnamed';
+        
+        const indexEl = this.drcPanel.querySelector('#drcDetailIndex') as HTMLDivElement;
+        const layerEl = this.drcPanel.querySelector('#drcDetailLayer') as HTMLDivElement;
+        const distanceEl = this.drcPanel.querySelector('#drcDistanceValue') as HTMLSpanElement;
+        const requiredEl = this.drcPanel.querySelector('#drcRequiredValue') as HTMLSpanElement;
+        const netsEl = this.drcPanel.querySelector('#drcDetailNets') as HTMLDivElement;
+        const trianglesEl = this.drcPanel.querySelector('#drcDetailTriangles') as HTMLDivElement;
+        
+        if (indexEl) indexEl.textContent = `Violation ${currentIndex + 1} of ${regionCount}`;
+        if (layerEl) layerEl.textContent = `Layer: ${currentRegion.layer_id}`;
+        if (distanceEl) distanceEl.textContent = `${currentRegion.min_distance_mm.toFixed(3)}mm`;
+        if (requiredEl) requiredEl.textContent = `${currentRegion.clearance_mm.toFixed(3)}mm`;
+        if (netsEl) netsEl.textContent = `Nets: ${netA} ↔ ${netB}`;
+        if (trianglesEl) trianglesEl.textContent = `Triangles: ${currentRegion.triangle_count}`;
+        
+        // Highlight the selected item in the list
+        this.highlightDrcListItem(currentIndex);
       } else {
-        navContainer.style.display = 'none';
+        detailPanel.style.display = 'none';
       }
     } else {
-      summaryDiv.style.display = 'none';
-      navContainer.style.display = 'none';
-      clearBtn.style.display = 'none';
+      resultsContainer.style.display = 'none';
+      runBtn.style.display = 'block';
     }
   }
 
@@ -484,16 +444,13 @@ export class UI {
     if (!this.drcPanel) return;
 
     this.hideDrcProgress();
-    this.hideDrcList();
 
-    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
-    const navContainer = this.drcPanel.querySelector('#drcNavContainer') as HTMLDivElement;
-    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
+    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
+    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
     const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
     
-    summaryDiv.style.display = 'none';
-    navContainer.style.display = 'none';
-    clearBtn.style.display = 'none';
+    resultsContainer.style.display = 'none';
+    runBtn.style.display = 'block';
     if (listDiv) listDiv.innerHTML = '';
   }
 

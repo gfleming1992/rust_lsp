@@ -43,16 +43,6 @@
         #stats-header .collapse-icon { font-size: 10px; }
         #stats-content { display: none; padding: 6px 0 0 0; }
         #stats-content.expanded { display: block; }
-        
-        /* Layer panel resize handle */
-        #layer-resize-handle {
-            height: 6px;
-            background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px);
-            cursor: ns-resize;
-            margin: 4px -10px -10px -10px;
-            border-radius: 0 0 5px 5px;
-        }
-        #layer-resize-handle:hover { background: linear-gradient(to bottom, transparent 0px, #5a5a5a 2px, #5a5a5a 4px, transparent 6px); }
     </style>
 </head>
 <body>
@@ -67,7 +57,6 @@
             <div id="fps"></div>
         </div>
         <div id="layers" style="margin-top: 10px;"></div>
-        <div id="layer-resize-handle" title="Drag to resize"></div>
     </div>
     
     <div id="ui-bottom-right" class="ui-panel">
