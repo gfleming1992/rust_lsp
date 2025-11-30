@@ -456,6 +456,8 @@ async function init() {
   // Batch layer loading state
   let pendingLayers: LayerJSON[] = [];
   let batchTimeout: number | null = null;
+  let initialLoadComplete = false;
+  let drcAutoTriggered = false;
   const BATCH_DELAY_MS = 0; // Process immediately - no artificial delay
 
   function processPendingLayers() {
@@ -483,6 +485,20 @@ async function init() {
     
     pendingLayers = [];
     batchTimeout = null;
+    
+    // Auto-trigger DRC after initial load completes
+    if (!initialLoadComplete) {
+      initialLoadComplete = true;
+      // Delay slightly to let rendering stabilize
+      setTimeout(() => {
+        if (!drcAutoTriggered && isVSCodeWebview && vscode) {
+          drcAutoTriggered = true;
+          console.log('[DRC] Auto-triggering DRC after initial load...');
+          ui.showDrcProgress();
+          vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15 });
+        }
+      }, 500);
+    }
   }
 
   // Listen for messages from extension or dev server
@@ -754,7 +770,72 @@ async function init() {
       // Handle Rust LSP memory result
       const memoryBytes = data.memoryBytes as number | null;
       ui.setRustMemory(memoryBytes);
+    } else if (data.command === "drcRegionsResult") {
+      // Handle DRC regions result - load regions into scene and update UI
+      const regions = data.regions as import("./types").DrcRegion[];
+      const elapsedMs = data.elapsedMs as number;
+      console.log(`[DRC] Received ${regions.length} DRC regions in ${elapsedMs.toFixed(2)}ms`);
+      
+      scene.loadDrcRegions(regions);
+      
+      // Populate the violation list
+      ui.populateDrcList(regions);
+      
+      // Update UI without navigating to first violation (showNav = false)
+      ui.updateDrcPanel(regions.length, 0, null, false);
     }
+  });
+
+  // Wire up DRC UI callbacks
+  ui.setOnRunDrc(() => {
+    console.log('[DRC] Running DRC...');
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15 });
+    }
+  });
+
+  ui.setOnDrcNavigate((direction: 'prev' | 'next') => {
+    const region = direction === 'next' ? scene.nextDrcRegion() : scene.prevDrcRegion();
+    if (region) {
+      // Fit camera to the violation region
+      renderer.fitToBounds(region.bounds, 0.3);
+      
+      // Show only the affected layer
+      for (const [layerId, _visible] of scene.layerVisible) {
+        scene.toggleLayerVisibility(layerId, layerId === region.layer_id);
+      }
+      ui.updateLayerVisibility(new Set([region.layer_id]));
+      
+      ui.updateDrcPanel(scene.drcRegions.length, scene.drcCurrentIndex, region, true);
+    }
+  });
+
+  ui.setOnDrcSelect((index: number) => {
+    const region = scene.navigateToDrcRegion(index);
+    if (region) {
+      // Fit camera to the violation region
+      renderer.fitToBounds(region.bounds, 0.3);
+      
+      // Show only the affected layer
+      for (const [layerId, _visible] of scene.layerVisible) {
+        scene.toggleLayerVisibility(layerId, layerId === region.layer_id);
+      }
+      ui.updateLayerVisibility(new Set([region.layer_id]));
+      
+      ui.updateDrcPanel(scene.drcRegions.length, index, region, true);
+    }
+  });
+
+  ui.setOnClearDrc(() => {
+    console.log('[DRC] Clearing DRC');
+    scene.clearDrc();
+    ui.resetDrcPanel();
+    
+    // Show all layers again
+    for (const [layerId, _visible] of scene.layerVisible) {
+      scene.toggleLayerVisibility(layerId, true);
+    }
+    ui.refreshLayerLegend();
   });
   
   const initEnd = performance.now();

@@ -2,6 +2,7 @@ import basicShaderCode from "./shaders/basic.wgsl?raw";
 import basicNoAlphaShaderCode from "./shaders/basic_noalpha.wgsl?raw";
 import instancedShaderCode from "./shaders/instanced.wgsl?raw";
 import instancedRotShaderCode from "./shaders/instanced_rot.wgsl?raw";
+import drcOverlayShaderCode from "./shaders/drc_overlay.wgsl?raw";
 import { Scene } from "./Scene";
 import { LayerColor, GPUBufferInfo } from "./types";
 
@@ -14,12 +15,19 @@ export class Renderer {
   private pipelineWithAlpha!: GPURenderPipeline;
   private pipelineInstanced!: GPURenderPipeline;
   private pipelineInstancedRot!: GPURenderPipeline;
+  private pipelineDrcOverlay!: GPURenderPipeline;
   
   private canvasFormat!: GPUTextureFormat;
   private configuredWidth = 0;
   private configuredHeight = 0;
   
   private uniformData = new Float32Array(16);
+  
+  // DRC overlay bind group and uniform buffer
+  // Uniforms: v0(vec4) + v1(vec4) + v2(vec4) + stripeColor(vec4) = 64 bytes
+  private drcUniformBuffer!: GPUBuffer;
+  private drcUniformData = new Float32Array(16); // 4 vec4s
+  private drcBindGroup!: GPUBindGroup;
   
   public lastVertexCount = 0;
   public lastIndexCount = 0;
@@ -217,6 +225,50 @@ export class Renderer {
         }]
       },
       primitive: { topology: "triangle-list" }
+    });
+
+    // DRC overlay pipeline with stripe pattern
+    const shaderModuleDrcOverlay = this.device.createShaderModule({ code: drcOverlayShaderCode });
+    
+    this.pipelineDrcOverlay = this.device.createRenderPipeline({
+      layout: "auto",
+      vertex: {
+        module: shaderModuleDrcOverlay,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+          }
+        ]
+      },
+      fragment: {
+        module: shaderModuleDrcOverlay,
+        entryPoint: "fs_main",
+        targets: [{
+          format: this.canvasFormat,
+          blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
+          }
+        }]
+      },
+      primitive: { topology: "triangle-list" }
+    });
+
+    // Create DRC uniform buffer and bind group
+    // 4 x vec4<f32> = 64 bytes (v0, v1, v2, stripeColor)
+    this.drcUniformBuffer = this.device.createBuffer({
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    
+    this.drcBindGroup = this.device.createBindGroup({
+      layout: this.pipelineDrcOverlay.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: { buffer: this.drcUniformBuffer }
+      }]
     });
   }
 
@@ -578,6 +630,45 @@ export class Renderer {
       }
     }
     
+    // DRC overlay - render stripe pattern over violation triangles
+    if (this.scene.drcEnabled && this.scene.drcVertexBuffer && this.scene.drcTriangleCount > 0) {
+      // Get current DRC region to determine layer color
+      const currentRegion = this.scene.getCurrentDrcRegion();
+      let stripeColor: [number, number, number, number] = [1.0, 0.15, 0.15, 0.85]; // Default: bright red
+      
+      if (currentRegion) {
+        // Get layer color and compute contrasting stripe color
+        const layerColor = this.scene.getLayerColor(currentRegion.layer_id);
+        stripeColor = this.getContrastingStripeColor(layerColor);
+        if (this.debugLogNextFrame) {
+          console.log(`[DRC] Layer ${currentRegion.layer_id} color: ${layerColor}, stripe: ${stripeColor}`);
+        }
+      }
+      
+      // Copy view matrix (indices 4-15 from uniformData = 12 floats = 3 vec4s)
+      this.drcUniformData.set(this.uniformData.subarray(4, 16), 0);
+      // Set stripe color (indices 12-15 = 4th vec4)
+      this.drcUniformData[12] = stripeColor[0];
+      this.drcUniformData[13] = stripeColor[1];
+      this.drcUniformData[14] = stripeColor[2];
+      this.drcUniformData[15] = stripeColor[3];
+      
+      this.device.queue.writeBuffer(this.drcUniformBuffer, 0, this.drcUniformData);
+      
+      pass.setPipeline(this.pipelineDrcOverlay);
+      pass.setBindGroup(0, this.drcBindGroup);
+      pass.setVertexBuffer(0, this.scene.drcVertexBuffer);
+      pass.draw(this.scene.drcTriangleCount * 3);
+      
+      if (this.debugLogNextFrame) {
+        console.log(`[Render] DRC overlay: ${this.scene.drcTriangleCount} triangles, vertexBuffer size: ${this.scene.drcVertexBuffer.size}`);
+        console.log(`[Render] DRC uniforms: v0=[${this.drcUniformData[0].toFixed(4)}, ${this.drcUniformData[1].toFixed(4)}, ${this.drcUniformData[2].toFixed(4)}, ${this.drcUniformData[3].toFixed(4)}]`);
+        console.log(`[Render] DRC uniforms: stripeColor=[${this.drcUniformData[12].toFixed(2)}, ${this.drcUniformData[13].toFixed(2)}, ${this.drcUniformData[14].toFixed(2)}, ${this.drcUniformData[15].toFixed(2)}]`);
+      }
+    } else if (this.debugLogNextFrame) {
+      console.log(`[Render] DRC overlay skipped: enabled=${this.scene.drcEnabled}, buffer=${!!this.scene.drcVertexBuffer}, triangles=${this.scene.drcTriangleCount}`);
+    }
+    
     pass.end();
     this.device.queue.submit([encoder.finish()]);
 
@@ -604,5 +695,103 @@ export class Renderer {
   public finishLoading() {
     this.isLoading = false;
     this.scene.state.needsDraw = true;
+  }
+
+  /**
+   * Fit the camera to show a bounding box with some padding
+   * bounds: [minX, minY, maxX, maxY] in world coordinates
+   */
+  public fitToBounds(bounds: [number, number, number, number], padding = 0.2) {
+    const [minX, minY, maxX, maxY] = bounds;
+    const regionWidth = maxX - minX;
+    const regionHeight = maxY - minY;
+    
+    if (regionWidth <= 0 || regionHeight <= 0) {
+      console.log('[fitToBounds] Invalid bounds:', bounds);
+      return;
+    }
+    
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    // Use physical canvas dimensions (with DPR scaling)
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    
+    // Calculate zoom to fit the region with padding
+    // From screenToWorld: worldX = ((xNdc / fx + 1) / scaleX) - width/2 - panX
+    // where scaleX = (2 * zoom) / width
+    // So: worldX = ((xNdc + 1) * width / (2 * zoom)) - width/2 - panX
+    // When xNdc goes from -1 to 1, we cover regionWidth in world space
+    // range(xNdc) = 2, so 2 * width / (2 * zoom) = width / zoom should equal regionWidth
+    // zoom = width / regionWidth
+    const paddingFactor = 1 - padding;
+    const zoomX = (width * paddingFactor) / regionWidth;
+    const zoomY = (height * paddingFactor) / regionHeight;
+    const zoom = Math.min(zoomX, zoomY);
+    
+    // Calculate pan to center the region
+    // From screenToWorld: worldX = ((xNdc / fx + 1) / scaleX) - width/2 - panX
+    // At screen center (xNdc=0): worldX = (1 / scaleX) - width/2 - panX = width/(2*zoom) - width/2 - panX
+    // We want worldX = centerX at screen center
+    // centerX = width/(2*zoom) - width/2 - panX
+    // panX = width/(2*zoom) - width/2 - centerX
+    const panX = width / (2 * zoom) - width / 2 - centerX;
+    const panY = height / (2 * zoom) - height / 2 - centerY;
+    
+    console.log(`[fitToBounds] Region: ${regionWidth.toFixed(2)} x ${regionHeight.toFixed(2)} mm at (${centerX.toFixed(2)}, ${centerY.toFixed(2)})`);
+    console.log(`[fitToBounds] Canvas: ${width} x ${height} px, zoom: ${zoom.toFixed(2)}, pan: (${panX.toFixed(2)}, ${panY.toFixed(2)})`);
+    
+    const state = this.scene.state;
+    state.zoom = zoom;
+    state.panX = panX;
+    state.panY = panY;
+    state.needsDraw = true;
+  }
+
+  /**
+   * Get a contrasting stripe color based on the layer color
+   * Avoids colors too similar to: the layer color, and the fixed gold via color (1.0, 0.84, 0.0)
+   */
+  private getContrastingStripeColor(layerColor: LayerColor): [number, number, number, number] {
+    const [r, g, b, _a] = layerColor;
+    
+    // Calculate perceived luminance
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    
+    // Check if the layer is predominantly red
+    const isReddish = r > 0.5 && g < 0.4 && b < 0.4;
+    
+    // Check if the layer is predominantly blue (like copper layers)
+    const isBluish = b > 0.5 && r < 0.5 && g < 0.6;
+    
+    // Check if the layer is very dark
+    const isDark = luminance < 0.3;
+    
+    // Check if the layer is very bright
+    const isBright = luminance > 0.7;
+    
+    // Check if the layer is yellowish/gold (avoid conflict with via gold)
+    const isYellowish = r > 0.7 && g > 0.6 && b < 0.4;
+    
+    if (isReddish) {
+      // Use cyan (opposite of red) for red layers
+      return [0.0, 1.0, 1.0, 0.9];
+    } else if (isBluish) {
+      // For blue layers (common copper), use bright magenta/pink - avoids gold conflict
+      return [1.0, 0.2, 0.6, 0.9];
+    } else if (isYellowish) {
+      // For yellow/gold layers, use bright magenta
+      return [1.0, 0.0, 0.8, 0.9];
+    } else if (isDark) {
+      // Use bright magenta for dark layers - avoids gold conflict
+      return [1.0, 0.3, 0.7, 0.9];
+    } else if (isBright) {
+      // Use dark magenta for bright layers
+      return [0.8, 0.0, 0.4, 0.9];
+    } else {
+      // Default: bright red
+      return [1.0, 0.15, 0.15, 0.85];
+    }
   }
 }

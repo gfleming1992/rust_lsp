@@ -9,6 +9,9 @@ let requestId = 1;
 let rl: readline.Interface | null = null;
 const pendingRequests = new Map<string, { resolve: (response: any) => void, reject: (error: any) => void }>();
 
+// Track active webview panel for async notifications
+let activePanel: vscode.WebviewPanel | null = null;
+
 // Rate-limited logging to prevent console spam during bulk operations
 let logCount = 0;
 let logWindowStart = Date.now();
@@ -78,6 +81,9 @@ export function activate(context: vscode.ExtensionContext) {
                 ]
             }
         );
+        
+        // Track active panel for async notifications
+        activePanel = panel;
 
         // Check if we are in development mode
         // const isDev = context.extensionMode === vscode.ExtensionMode.Development;
@@ -102,7 +108,10 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                rateLimitedLog('[Extension] Received message from webview:', message);
+                // Filter out high-frequency polling messages from debug console
+                if (message.command !== 'GetMemory') {
+                    rateLimitedLog('[Extension] Received message from webview:', message);
+                }
 
                 switch (message.command) {
                     case 'ready':
@@ -296,6 +305,25 @@ export function activate(context: vscode.ExtensionContext) {
                             });
                         }
                         break;
+                    case 'RunDRCWithRegions':
+                        // Run DRC asynchronously - results will come via notification
+                        console.log('[Extension] Starting async DRC...');
+                        const drcResponse = await sendToLspServer({ 
+                            method: 'RunDRCWithRegions', 
+                            params: { clearance_mm: message.clearance_mm || 0.15 } 
+                        }, panel);
+                        
+                        if (drcResponse?.result?.status === 'started') {
+                            console.log('[Extension] DRC started in background');
+                        } else if (drcResponse?.error) {
+                            console.error('[Extension] DRC error:', drcResponse.error);
+                            panel.webview.postMessage({
+                                command: 'drcRegionsResult',
+                                regions: [],
+                                error: drcResponse.error.message
+                            });
+                        }
+                        break;
                 }
             },
             undefined,
@@ -309,6 +337,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Clean up LSP server memory when webview is closed
         panel.onDidDispose(() => {
             console.log('[Extension] Webview disposed, cleaning up LSP server state');
+            activePanel = null;
             sendCloseToLspServer();
         }, null, context.subscriptions);
     });
@@ -381,6 +410,13 @@ function startLspServer(context: vscode.ExtensionContext) {
 
             // Standard JSON-RPC response
             const response = JSON.parse(line);
+            
+            // Check if this is an async notification (id is null, has method field)
+            if (response.id === null && response.method) {
+                handleLspNotification(response);
+                return;
+            }
+            
             const pending = pendingRequests.get(String(response.id));
             if (pending) {
                 pendingRequests.delete(String(response.id));
@@ -403,6 +439,22 @@ function startLspServer(context: vscode.ExtensionContext) {
     });
 
     console.log('[Extension] LSP server started');
+}
+
+// Handle async notifications from LSP server
+function handleLspNotification(notification: any) {
+    console.log('[Extension] Received LSP notification:', notification.method);
+    
+    if (notification.method === 'drcComplete' && activePanel) {
+        const result = notification.result;
+        console.log(`[Extension] Async DRC completed: ${result.region_count} regions in ${result.elapsed_ms?.toFixed(2)}ms`);
+        
+        activePanel.webview.postMessage({
+            command: 'drcRegionsResult',
+            regions: result.regions || [],
+            elapsedMs: result.elapsed_ms || 0
+        });
+    }
 }
 
 async function sendToLspServer(request: { method: string; params: any }, panel: vscode.WebviewPanel): Promise<any> {

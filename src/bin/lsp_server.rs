@@ -1,4 +1,5 @@
 use rust_extension::draw::geometry::{LayerJSON, LayerBinary, SelectableObject, ObjectRange, PadStackDef};
+use rust_extension::draw::drc::{DrcViolation, DrcRegion, DesignRules, run_full_drc, run_full_drc_with_regions};
 use rust_extension::parse_xml::{parse_xml_file, XmlNode};
 use rust_extension::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
 use rust_extension::serialize_xml::xml_node_to_file;
@@ -10,6 +11,8 @@ use std::fs::OpenOptions;
 use rstar::RTree;
 use indexmap::IndexMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 
 #[cfg(windows)]
 use std::mem::MaybeUninit;
@@ -46,6 +49,12 @@ fn get_process_memory_bytes() -> Option<u64> {
 
 /// Track if we've already written to the log this session (to truncate on first write)
 static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Result from async DRC computation
+struct DrcAsyncResult {
+    regions: Vec<DrcRegion>,
+    elapsed_ms: f64,
+}
 
 /// Helper to log to file for debugging (truncates on first write each session)
 fn log_to_file(msg: &str) {
@@ -126,6 +135,11 @@ struct ServerState {
     deleted_objects: HashMap<u64, ObjectRange>, // Currently deleted objects (id -> ObjectRange)
     // Hidden layers (layer visibility)
     hidden_layers: std::collections::HashSet<String>, // layer_id -> hidden
+    // DRC state
+    all_object_ranges: Vec<ObjectRange>, // All object ranges for DRC
+    design_rules: DesignRules, // Design rules for DRC
+    drc_violations: Vec<DrcViolation>, // Cached DRC violations
+    drc_regions: Vec<DrcRegion>, // Cached DRC regions (fused violations with triangle data)
 }
 
 impl ServerState {
@@ -140,6 +154,10 @@ impl ServerState {
             padstack_defs: IndexMap::new(),
             deleted_objects: HashMap::new(),
             hidden_layers: std::collections::HashSet::new(),
+            all_object_ranges: Vec::new(),
+            design_rules: DesignRules::default(),
+            drc_violations: Vec::new(),
+            drc_regions: Vec::new(),
         }
     }
 }
@@ -149,8 +167,49 @@ fn main() {
     let mut state = ServerState::new();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    
+    // Channel for async DRC results
+    let (drc_tx, drc_rx): (Sender<DrcAsyncResult>, Receiver<DrcAsyncResult>) = mpsc::channel();
+    let mut drc_sender: Option<Sender<DrcAsyncResult>> = Some(drc_tx);
 
     for line in stdin.lock().lines() {
+        // Check for completed DRC results (non-blocking)
+        match drc_rx.try_recv() {
+            Ok(result) => {
+                let region_count = result.regions.len();
+                let total_triangles: usize = result.regions.iter().map(|r| r.triangle_count).sum();
+                
+                eprintln!("[LSP Server] Async DRC completed: {} regions, {} triangles in {:.2}ms", 
+                    region_count, total_triangles, result.elapsed_ms);
+                
+                // Store regions in state
+                state.drc_regions = result.regions;
+                
+                // Send notification to client
+                let notification = serde_json::json!({
+                    "id": null,
+                    "method": "drcComplete",
+                    "result": {
+                        "status": "ok",
+                        "region_count": region_count,
+                        "total_triangles": total_triangles,
+                        "elapsed_ms": result.elapsed_ms,
+                        "regions": &state.drc_regions
+                    }
+                });
+                writeln!(stdout, "{}", notification.to_string()).unwrap();
+                stdout.flush().unwrap();
+            }
+            Err(TryRecvError::Empty) => {} // No result yet, continue
+            Err(TryRecvError::Disconnected) => {
+                // Channel closed, recreate it
+                let (tx, _rx) = mpsc::channel();
+                drc_sender = Some(tx);
+                // Note: rx would need to be reassigned but we can't in this loop
+                // This case shouldn't happen in normal operation
+            }
+        }
+        
         let line = match line {
             Ok(l) => l,
             Err(e) => {
@@ -187,6 +246,13 @@ fn main() {
             "HighlightSelectedNets" => serde_json::to_string(&handle_highlight_selected_nets(&state, request.id, request.params)).unwrap(),
             "HighlightSelectedComponents" => serde_json::to_string(&handle_highlight_selected_components(&state, request.id, request.params)).unwrap(),
             "QueryNetAtPoint" => serde_json::to_string(&handle_query_net_at_point(&state, request.id, request.params)).unwrap(),
+            "RunDRC" => serde_json::to_string(&handle_run_drc(&mut state, request.id, request.params)).unwrap(),
+            "GetDRCViolations" => serde_json::to_string(&handle_get_drc_violations(&state, request.id)).unwrap(),
+            "RunDRCWithRegions" => {
+                // Run DRC asynchronously
+                handle_run_drc_with_regions_async(&state, request.id, request.params, drc_sender.clone())
+            },
+            "GetDRCRegions" => serde_json::to_string(&handle_get_drc_regions(&state, request.id)).unwrap(),
             "GetMemory" => serde_json::to_string(&handle_get_memory(request.id)).unwrap(),
             "Close" => serde_json::to_string(&handle_close(&mut state, request.id)).unwrap(),
             _ => {
@@ -275,6 +341,9 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     eprintln!("[LSP Server] Object stats: {} total, {} pads, {} vias, {} with net, {} with component",
         object_ranges.len(), pads, vias, objects_with_net, objects_with_component);
     
+    // Keep a copy of object_ranges for DRC before consuming it for spatial index
+    let all_object_ranges = object_ranges.clone();
+    
     // Build spatial index
     let start_index = Instant::now();
     let selectable_objects: Vec<SelectableObject> = object_ranges.into_iter()
@@ -315,6 +384,9 @@ fn handle_load(state: &mut ServerState, id: Option<serde_json::Value>, params: O
     state.layer_colors = layer_colors;
     state.spatial_index = Some(spatial_index);
     state.padstack_defs = padstack_defs;
+    state.all_object_ranges = all_object_ranges;
+    // Clear old DRC violations when loading new file
+    state.drc_violations.clear();
 
     // Log memory savings
     eprintln!("[LSP Server] File loaded successfully (xml_root dropped to save memory)");
@@ -1854,6 +1926,8 @@ fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> Respo
     state.padstack_defs.clear();
     state.deleted_objects.clear();
     state.hidden_layers.clear();
+    state.all_object_ranges.clear();
+    state.drc_violations.clear();
     
     // Force a garbage collection hint by shrinking capacity
     state.layers.shrink_to_fit();
@@ -1861,6 +1935,8 @@ fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> Respo
     state.modified_colors.shrink_to_fit();
     state.padstack_defs.shrink_to_fit();
     state.deleted_objects.shrink_to_fit();
+    state.all_object_ranges.shrink_to_fit();
+    state.drc_violations.shrink_to_fit();
     
     let new_memory = get_process_memory_bytes().unwrap_or(0);
     eprintln!("[LSP Server] Close: freed {} MB", (old_memory as i64 - new_memory as i64) / 1024 / 1024);
@@ -1870,6 +1946,168 @@ fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> Respo
         result: Some(serde_json::json!({
             "freed_bytes": old_memory.saturating_sub(new_memory)
         })),
+        error: None,
+    }
+}
+
+/// Handle RunDRC request - runs Design Rule Check on all copper layers
+fn handle_run_drc(state: &mut ServerState, id: Option<serde_json::Value>, params: Option<serde_json::Value>) -> Response {
+    #[derive(Deserialize)]
+    struct RunDRCParams {
+        #[serde(default)]
+        clearance_mm: Option<f32>,
+    }
+
+    let params: RunDRCParams = params
+        .and_then(|p| serde_json::from_value(p).ok())
+        .unwrap_or(RunDRCParams { clearance_mm: None });
+
+    if state.xml_file_path.is_none() {
+        return Response {
+            id,
+            result: None,
+            error: Some(ErrorResponse {
+                code: 2,
+                message: "No file loaded. Call Load first.".to_string(),
+            }),
+        };
+    }
+
+    // Update design rules if custom clearance provided
+    if let Some(clearance) = params.clearance_mm {
+        state.design_rules.conductor_clearance_mm = clearance;
+    }
+
+    eprintln!("[LSP Server] Running DRC with clearance: {:.3}mm", state.design_rules.conductor_clearance_mm);
+    
+    let start = Instant::now();
+    
+    // Run full DRC
+    let violations = if let Some(ref spatial_index) = state.spatial_index {
+        run_full_drc(
+            &state.layers,
+            spatial_index,
+            &state.design_rules,
+        )
+    } else {
+        vec![]
+    };
+    
+    let elapsed = start.elapsed();
+    let violation_count = violations.len();
+    
+    eprintln!("[LSP Server] DRC completed in {:.2}ms: {} violations found", 
+        elapsed.as_secs_f64() * 1000.0, violation_count);
+    
+    // Cache violations
+    state.drc_violations = violations;
+
+    Response {
+        id,
+        result: Some(serde_json::json!({
+            "status": "ok",
+            "violation_count": violation_count,
+            "elapsed_ms": elapsed.as_secs_f64() * 1000.0
+        })),
+        error: None,
+    }
+}
+
+/// Handle GetDRCViolations request - returns cached DRC violations
+fn handle_get_drc_violations(state: &ServerState, id: Option<serde_json::Value>) -> Response {
+    Response {
+        id,
+        result: Some(serde_json::to_value(&state.drc_violations).unwrap()),
+        error: None,
+    }
+}
+
+/// Handle RunDRCWithRegions request asynchronously - spawns DRC in background thread
+fn handle_run_drc_with_regions_async(
+    state: &ServerState, 
+    id: Option<serde_json::Value>, 
+    params: Option<serde_json::Value>,
+    tx: Option<Sender<DrcAsyncResult>>
+) -> String {
+    #[derive(Deserialize)]
+    struct RunDRCParams {
+        #[serde(default)]
+        clearance_mm: Option<f32>,
+    }
+
+    let params: RunDRCParams = params
+        .and_then(|p| serde_json::from_value(p).ok())
+        .unwrap_or(RunDRCParams { clearance_mm: None });
+
+    if state.xml_file_path.is_none() {
+        let response = Response {
+            id,
+            result: None,
+            error: Some(ErrorResponse {
+                code: 2,
+                message: "No file loaded. Call Load first.".to_string(),
+            }),
+        };
+        return serde_json::to_string(&response).unwrap();
+    }
+
+    let tx = match tx {
+        Some(tx) => tx,
+        None => {
+            let response = Response {
+                id,
+                result: None,
+                error: Some(ErrorResponse {
+                    code: 3,
+                    message: "DRC channel not available".to_string(),
+                }),
+            };
+            return serde_json::to_string(&response).unwrap();
+        }
+    };
+
+    let clearance = params.clearance_mm.unwrap_or(state.design_rules.conductor_clearance_mm);
+    
+    // Clone data needed for background thread
+    let layers = state.layers.clone();
+    let spatial_index = state.spatial_index.clone();
+    let design_rules = DesignRules { conductor_clearance_mm: clearance };
+
+    eprintln!("[LSP Server] Starting async DRC with clearance: {:.3}mm", clearance);
+    
+    // Spawn DRC in background thread
+    thread::spawn(move || {
+        let start = Instant::now();
+        
+        let regions = if let Some(ref index) = spatial_index {
+            run_full_drc_with_regions(&layers, index, &design_rules)
+        } else {
+            vec![]
+        };
+        
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        
+        // Send result back to main thread
+        let _ = tx.send(DrcAsyncResult { regions, elapsed_ms });
+    });
+
+    // Return immediately with "started" status
+    let response = Response {
+        id,
+        result: Some(serde_json::json!({
+            "status": "started",
+            "message": "DRC running in background"
+        })),
+        error: None,
+    };
+    serde_json::to_string(&response).unwrap()
+}
+
+/// Handle GetDRCRegions request - returns cached DRC regions with triangle data
+fn handle_get_drc_regions(state: &ServerState, id: Option<serde_json::Value>) -> Response {
+    Response {
+        id,
+        result: Some(serde_json::to_value(&state.drc_regions).unwrap()),
         error: None,
     }
 }

@@ -60,6 +60,7 @@ pub fn generate_layer_json(
     layer_id: &str,
     layer_index: u32, // Added layer_index for ID generation
     layer_name: &str,
+    layer_function: &str, // Layer function from IPC-2581 (SIGNAL, CONDUCTOR, etc.)
     color: [f32; 4],
     geometries: &LayerGeometries,
     culling_stats: &mut CullingStats,
@@ -161,6 +162,7 @@ pub fn generate_layer_json(
     Ok((LayerJSON {
         layer_id: layer_id.to_string(),
         layer_name: layer_name.to_string(),
+        layer_function: layer_function.to_string(),
         default_color: color,
         geometry: shader_geom,
     }, object_ranges))

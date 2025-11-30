@@ -22,11 +22,15 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
     // Parse padstack definitions (for vias)
     let padstack_defs = parse_padstack_definitions(root);
     
+    // Parse layer functions from Layer elements (SIGNAL, CONDUCTOR, PLANE, etc.)
+    let layer_functions = parse_layer_functions(root);
+    
     if std::env::var("PROFILE_TIMING").is_ok() {
         eprintln!("\n=== Detailed Timing Profile ===");
         eprintln!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
         eprintln!("Parsed {} standard primitives", primitives.len());
         eprintln!("Parsed {} padstack definitions", padstack_defs.len());
+        eprintln!("Parsed {} layer functions", layer_functions.len());
     }
 
     // Find Ecad node which contains all the CAD data
@@ -77,10 +81,17 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
             // Generate default color based on layer type
             let color = get_layer_color(&layer_ref);
             
+            // Look up layer function (default to empty string if not found)
+            let layer_function = layer_functions.get(&layer_ref)
+                .or_else(|| layer_functions.get(&layer_name))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            
             let (layer_json, object_ranges) = generate_layer_json(
                 &layer_ref,
                 idx as u32, // Pass layer index
                 &layer_name,
+                layer_function,
                 color,
                 &geometries,
                 &mut local_culling_stats,
@@ -1183,6 +1194,34 @@ fn collect_vias_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<String
     
     visit_nodes(layer_node, &mut vias, padstack_defs, false, None, None);
     vias
+}
+
+/// Parse layer function attribute from Layer elements in the StackupGroup
+/// Returns a map from layer name to function (SIGNAL, CONDUCTOR, PLANE, MIXED, etc.)
+fn parse_layer_functions(root: &XmlNode) -> HashMap<String, String> {
+    let mut layer_functions = HashMap::new();
+    
+    // Recursive helper to find all Layer elements
+    fn find_layers(node: &XmlNode, functions: &mut HashMap<String, String>) {
+        if node.name == "Layer" {
+            if let Some(name) = node.attributes.get("name") {
+                if let Some(function) = node.attributes.get("layerFunction") {
+                    functions.insert(name.clone(), function.clone());
+                    // Also store with the full layer ref format
+                    if !name.starts_with("LAYER:") && !name.starts_with("LAYER_") {
+                        functions.insert(format!("LAYER:{}", name), function.clone());
+                    }
+                }
+            }
+        }
+        
+        for child in &node.children {
+            find_layers(child, functions);
+        }
+    }
+    
+    find_layers(root, &mut layer_functions);
+    layer_functions
 }
 
 /// Get a color for a layer based on its name/type

@@ -22,16 +22,52 @@
         .ui-panel button, .ui-panel input {
             pointer-events: auto;
         }
-        #ui-top-left { top: 10px; left: 10px; }
+        #ui-top-left { top: 10px; left: 10px; pointer-events: auto; display: flex; flex-direction: column; }
         #ui-bottom-right { bottom: 10px; right: 10px; }
+        
+        /* Stats panel - collapsible */
+        #stats-header {
+            background: #3c3c3c;
+            color: #ccc;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            border-radius: 3px;
+            margin-bottom: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            user-select: none;
+        }
+        #stats-header:hover { background: #4a4a4a; }
+        #stats-header .collapse-icon { font-size: 10px; }
+        #stats-content { display: none; padding: 6px 0 0 0; }
+        #stats-content.expanded { display: block; }
+        
+        /* Layer panel resize handle */
+        #layer-resize-handle {
+            height: 6px;
+            background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px);
+            cursor: ns-resize;
+            margin: 4px -10px -10px -10px;
+            border-radius: 0 0 5px 5px;
+        }
+        #layer-resize-handle:hover { background: linear-gradient(to bottom, transparent 0px, #5a5a5a 2px, #5a5a5a 4px, transparent 6px); }
     </style>
 </head>
 <body>
     <canvas id="viewer"></canvas>
     
     <div id="ui-top-left" class="ui-panel">
-        <div id="fps"></div>
+        <div id="stats-header">
+            <span class="collapse-icon">▶</span>
+            <span>Stats</span>
+        </div>
+        <div id="stats-content">
+            <div id="fps"></div>
+        </div>
         <div id="layers" style="margin-top: 10px;"></div>
+        <div id="layer-resize-handle" title="Drag to resize"></div>
     </div>
     
     <div id="ui-bottom-right" class="ui-panel">

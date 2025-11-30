@@ -302,6 +302,10 @@ pub struct LayerJSON {
     #[serde(rename = "layerName")]
     pub layer_name: String,
     
+    /// Layer function from IPC-2581 (SIGNAL, CONDUCTOR, PLANE, MIXED, SOLDERMASK, etc.)
+    #[serde(rename = "layerFunction")]
+    pub layer_function: String,
+    
     #[serde(rename = "defaultColor")]
     pub default_color: [f32; 4],
     

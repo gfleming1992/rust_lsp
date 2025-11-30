@@ -1,6 +1,6 @@
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
-import { LayerColor } from "./types";
+import { LayerColor, DrcRegion } from "./types";
 import { DebugOverlay } from "./DebugOverlay";
 
 export class UI {
@@ -20,6 +20,17 @@ export class UI {
   private contextMenu: HTMLDivElement;
   private currentHighlightBounds: [number, number, number, number] | null = null;
   private onDelete: (() => void) | null = null;
+
+  // DRC UI elements
+  private drcPanel: HTMLDivElement | null = null;
+  private drcCountLabel: HTMLSpanElement | null = null;
+  private drcInfoLabel: HTMLDivElement | null = null;
+  private drcListContainer: HTMLDivElement | null = null;
+  private drcListVisible = false;
+  private onRunDrc: (() => void) | null = null;
+  private onDrcNavigate: ((direction: 'prev' | 'next') => void) | null = null;
+  private onDrcSelect: ((index: number) => void) | null = null;
+  private onClearDrc: (() => void) | null = null;
 
   constructor(scene: Scene, renderer: Renderer) {
     this.scene = scene;
@@ -107,6 +118,73 @@ export class UI {
 
     this.interceptConsoleLog(this.debugLogEl);
     this.createDebugControls();
+    this.setupStatsToggle();
+    this.setupLayerResize();
+  }
+
+  private setupStatsToggle() {
+    const statsHeader = document.getElementById('stats-header');
+    const statsContent = document.getElementById('stats-content');
+    if (!statsHeader || !statsContent) return;
+
+    statsHeader.addEventListener('click', () => {
+      const isExpanded = statsContent.classList.contains('expanded');
+      if (isExpanded) {
+        statsContent.classList.remove('expanded');
+        statsHeader.querySelector('.collapse-icon')!.textContent = '▶';
+      } else {
+        statsContent.classList.add('expanded');
+        statsHeader.querySelector('.collapse-icon')!.textContent = '▼';
+      }
+    });
+  }
+
+  private setupLayerResize() {
+    const resizeHandle = document.getElementById('layer-resize-handle');
+    const layersEl = this.layersEl;
+    if (!resizeHandle || !layersEl) return;
+
+    // Find the scrollable layer list div (created in refreshLayerLegend)
+    let isDragging = false;
+    let startY = 0;
+    let startHeight = 400; // Default max-height
+
+    resizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDragging = true;
+      startY = e.clientY;
+      
+      // Get current height from the inner scrollable div
+      const scrollDiv = layersEl.querySelector('div[style*="overflow-y"]') as HTMLDivElement;
+      if (scrollDiv) {
+        const currentMaxHeight = parseInt(scrollDiv.style.maxHeight) || 400;
+        startHeight = currentMaxHeight;
+      }
+
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+
+      const deltaY = e.clientY - startY;
+      const newHeight = Math.max(100, Math.min(800, startHeight + deltaY));
+
+      // Apply to the scrollable div inside layers
+      const scrollDiv = layersEl.querySelector('div[style*="overflow-y"]') as HTMLDivElement;
+      if (scrollDiv) {
+        scrollDiv.style.maxHeight = `${newHeight}px`;
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
   }
 
   public setOnDelete(callback: () => void) {
@@ -178,6 +256,245 @@ export class UI {
       this.scene.state.needsDraw = true;
       console.log("Next frame will be logged to console...");
     });
+
+    // Create DRC panel after debug controls
+    this.createDrcPanel(debugContainer);
+  }
+
+  private createDrcPanel(afterElement: HTMLElement) {
+    this.drcPanel = document.createElement('div');
+    this.drcPanel.style.marginTop = '10px';
+    this.drcPanel.style.borderTop = '1px solid #444';
+    this.drcPanel.style.paddingTop = '5px';
+    this.drcPanel.style.pointerEvents = 'auto';
+    this.drcPanel.innerHTML = `
+      <div style="margin-bottom: 5px; font-weight: bold; color: #ff6b6b;">⚠️ DRC Violations</div>
+      <button id="runDrcBtn" style="width: 100%; background: #ff4444; color: white; border: 1px solid #cc3333; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 3px;">Run DRC</button>
+      <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
+        <span>⏳ Checking clearances...</span>
+      </div>
+      <div id="drcSummary" style="display: none; margin-bottom: 5px; cursor: pointer; padding: 6px; background: #2a2a2a; border-radius: 3px; border: 1px solid #444;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span id="drcCount" style="font-size: 12px; color: #ff6b6b; font-weight: bold;">0 violations found</span>
+          <span id="drcExpandIcon" style="color: #888;">▼</span>
+        </div>
+      </div>
+      <div id="drcListContainer" style="display: none; max-height: 250px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-radius: 3px; margin-bottom: 5px;">
+        <div id="drcListHeader" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: #2a2a2a; border-bottom: 1px solid #444; position: sticky; top: 0;">
+          <span style="font-size: 11px; color: #aaa;">Select violation:</span>
+          <button id="drcCloseListBtn" style="background: none; border: none; color: #888; cursor: pointer; font-size: 14px; padding: 0 4px;">✕</button>
+        </div>
+        <div id="drcList" style="padding: 4px;"></div>
+      </div>
+      <div id="drcNavContainer" style="display: none; margin-bottom: 5px;">
+        <div style="display: flex; gap: 4px;">
+          <button id="drcPrevBtn" style="flex: 1; background: #444; color: white; border: 1px solid #555; padding: 4px; cursor: pointer;">◀ Prev</button>
+          <button id="drcNextBtn" style="flex: 1; background: #444; color: white; border: 1px solid #555; padding: 4px; cursor: pointer;">Next ▶</button>
+        </div>
+        <div id="drcViolationInfo" style="margin-top: 5px; font-size: 10px; color: #ccc; background: #2a2a2a; padding: 5px; border-radius: 3px;"></div>
+      </div>
+      <button id="clearDrcBtn" style="width: 100%; background: #333; color: #aaa; border: 1px solid #555; padding: 4px; cursor: pointer; display: none;">Clear DRC</button>
+    `;
+
+    afterElement.parentElement?.insertBefore(this.drcPanel, afterElement.nextSibling);
+
+    // Wire up buttons
+    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
+    runBtn.addEventListener('click', () => {
+      if (this.onRunDrc) {
+        this.showDrcProgress();
+        this.onRunDrc();
+      }
+    });
+
+    // Summary click to toggle list
+    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
+    summaryDiv.addEventListener('click', () => {
+      this.toggleDrcList();
+    });
+
+    // Close list button
+    const closeListBtn = this.drcPanel.querySelector('#drcCloseListBtn') as HTMLButtonElement;
+    closeListBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.hideDrcList();
+    });
+
+    const prevBtn = this.drcPanel.querySelector('#drcPrevBtn') as HTMLButtonElement;
+    prevBtn.addEventListener('click', () => {
+      if (this.onDrcNavigate) this.onDrcNavigate('prev');
+    });
+
+    const nextBtn = this.drcPanel.querySelector('#drcNextBtn') as HTMLButtonElement;
+    nextBtn.addEventListener('click', () => {
+      if (this.onDrcNavigate) this.onDrcNavigate('next');
+    });
+
+    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
+    clearBtn.addEventListener('click', () => {
+      if (this.onClearDrc) this.onClearDrc();
+    });
+
+    this.drcCountLabel = this.drcPanel.querySelector('#drcCount') as HTMLSpanElement;
+    this.drcInfoLabel = this.drcPanel.querySelector('#drcViolationInfo') as HTMLDivElement;
+    this.drcListContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
+  }
+
+  public showDrcProgress() {
+    if (!this.drcPanel) return;
+    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
+    const progressDiv = this.drcPanel.querySelector('#drcProgress') as HTMLDivElement;
+    
+    runBtn.style.display = 'none';
+    progressDiv.style.display = 'block';
+  }
+
+  public hideDrcProgress() {
+    if (!this.drcPanel) return;
+    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
+    const progressDiv = this.drcPanel.querySelector('#drcProgress') as HTMLDivElement;
+    
+    runBtn.style.display = 'block';
+    progressDiv.style.display = 'none';
+  }
+
+  private toggleDrcList() {
+    if (this.drcListVisible) {
+      this.hideDrcList();
+    } else {
+      this.showDrcList();
+    }
+  }
+
+  private showDrcList() {
+    if (!this.drcPanel || !this.drcListContainer) return;
+    this.drcListVisible = true;
+    this.drcListContainer.style.display = 'block';
+    const expandIcon = this.drcPanel.querySelector('#drcExpandIcon') as HTMLSpanElement;
+    if (expandIcon) expandIcon.textContent = '▲';
+  }
+
+  private hideDrcList() {
+    if (!this.drcPanel || !this.drcListContainer) return;
+    this.drcListVisible = false;
+    this.drcListContainer.style.display = 'none';
+    const expandIcon = this.drcPanel.querySelector('#drcExpandIcon') as HTMLSpanElement;
+    if (expandIcon) expandIcon.textContent = '▼';
+  }
+
+  public populateDrcList(regions: DrcRegion[]) {
+    if (!this.drcPanel) return;
+    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
+    if (!listDiv) return;
+
+    listDiv.innerHTML = '';
+    
+    regions.forEach((region, index) => {
+      const netA = region.net_a || 'unnamed';
+      const netB = region.net_b || 'unnamed';
+      const item = document.createElement('div');
+      item.className = 'drc-list-item';
+      item.dataset.index = String(index);
+      item.style.cssText = 'padding: 6px 8px; border-bottom: 1px solid #333; cursor: pointer; font-size: 10px;';
+      item.innerHTML = `
+        <div style="display: flex; justify-content: space-between;">
+          <span style="color: #aaa;">#${index + 1}</span>
+          <span style="color: #ff6b6b; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
+        </div>
+        <div style="color: #888; margin-top: 2px;">${region.layer_id.replace('LAYER:', '')}</div>
+        <div style="color: #666; margin-top: 1px; font-size: 9px;">${netA} ↔ ${netB}</div>
+      `;
+      
+      item.addEventListener('mouseenter', () => {
+        item.style.background = '#333';
+      });
+      item.addEventListener('mouseleave', () => {
+        item.style.background = 'transparent';
+      });
+      item.addEventListener('click', () => {
+        if (this.onDrcSelect) {
+          this.onDrcSelect(index);
+          this.hideDrcList();
+        }
+      });
+      
+      listDiv.appendChild(item);
+    });
+  }
+
+  public setOnRunDrc(callback: () => void) {
+    this.onRunDrc = callback;
+  }
+
+  public setOnDrcNavigate(callback: (direction: 'prev' | 'next') => void) {
+    this.onDrcNavigate = callback;
+  }
+
+  public setOnDrcSelect(callback: (index: number) => void) {
+    this.onDrcSelect = callback;
+  }
+
+  public setOnClearDrc(callback: () => void) {
+    this.onClearDrc = callback;
+  }
+
+  public updateDrcPanel(regionCount: number, currentIndex: number, currentRegion: DrcRegion | null, showNav = true) {
+    if (!this.drcPanel) return;
+
+    this.hideDrcProgress();
+
+    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
+    const navContainer = this.drcPanel.querySelector('#drcNavContainer') as HTMLDivElement;
+    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
+
+    if (regionCount > 0) {
+      summaryDiv.style.display = 'block';
+      clearBtn.style.display = 'block';
+
+      if (this.drcCountLabel) {
+        this.drcCountLabel.textContent = `${regionCount} clearance violation${regionCount !== 1 ? 's' : ''} found`;
+      }
+
+      // Show navigation only if explicitly navigating
+      if (showNav && currentRegion) {
+        navContainer.style.display = 'block';
+        
+        if (this.drcInfoLabel) {
+          const netA = currentRegion.net_a || 'unnamed';
+          const netB = currentRegion.net_b || 'unnamed';
+          this.drcInfoLabel.innerHTML = `
+            <div style="margin-bottom: 3px; color: #888;">${currentIndex + 1} / ${regionCount}</div>
+            <div>Layer: <b>${currentRegion.layer_id}</b></div>
+            <div>Distance: <b style="color:#ff6b6b;">${currentRegion.min_distance_mm.toFixed(3)}mm</b> (req: ${currentRegion.clearance_mm.toFixed(3)}mm)</div>
+            <div>Nets: <b>${netA}</b> ↔ <b>${netB}</b></div>
+            <div>Triangles: ${currentRegion.triangle_count}</div>
+          `;
+        }
+      } else {
+        navContainer.style.display = 'none';
+      }
+    } else {
+      summaryDiv.style.display = 'none';
+      navContainer.style.display = 'none';
+      clearBtn.style.display = 'none';
+    }
+  }
+
+  public resetDrcPanel() {
+    if (!this.drcPanel) return;
+
+    this.hideDrcProgress();
+    this.hideDrcList();
+
+    const summaryDiv = this.drcPanel.querySelector('#drcSummary') as HTMLDivElement;
+    const navContainer = this.drcPanel.querySelector('#drcNavContainer') as HTMLDivElement;
+    const clearBtn = this.drcPanel.querySelector('#clearDrcBtn') as HTMLButtonElement;
+    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
+    
+    summaryDiv.style.display = 'none';
+    navContainer.style.display = 'none';
+    clearBtn.style.display = 'none';
+    if (listDiv) listDiv.innerHTML = '';
   }
 
   private interceptConsoleLog(target: HTMLDivElement | null) {
@@ -203,7 +520,8 @@ export class UI {
 
     const entries = this.scene.layerOrder.map((layerId) => [layerId, this.scene.getLayerColor(layerId)] as const);
 
-    legendParts.push(`<div>`);
+    // Scrollable layer list with max height
+    legendParts.push(`<div style="max-height: 400px; overflow-y: auto; margin-right: -5px; padding-right: 5px;">`);
     for (const [layerId, color] of entries) {
       const visible = this.scene.layerVisible.get(layerId) !== false;
       legendParts.push(this.createLegendRow(layerId, color, visible));

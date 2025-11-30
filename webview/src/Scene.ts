@@ -7,7 +7,8 @@ import {
   ShaderGeometry, 
   GeometryLOD,
   GeometryType,
-  ObjectRange
+  ObjectRange,
+  DrcRegion
 } from "./types";
 
 export class Scene {
@@ -33,6 +34,13 @@ export class Scene {
   
   // Global via visibility toggle
   public viasVisible = true;
+
+  // DRC overlay state
+  public drcRegions: DrcRegion[] = [];
+  public drcEnabled = false;
+  public drcCurrentIndex = 0;
+  public drcVertexBuffer: GPUBuffer | null = null;
+  public drcTriangleCount = 0;
 
   private device: GPUDevice | null = null;
   private pipelines: {
@@ -858,6 +866,124 @@ export class Scene {
         }
     }
   }
+
+  // ==================== DRC Overlay Methods ====================
+
+  /**
+   * Load DRC regions and create GPU buffers for overlay rendering
+   */
+  public loadDrcRegions(regions: DrcRegion[]) {
+    this.drcRegions = regions;
+    this.drcCurrentIndex = 0;
+    
+    // Clean up old buffer
+    if (this.drcVertexBuffer) {
+      this.drcVertexBuffer.destroy();
+      this.drcVertexBuffer = null;
+    }
+    
+    if (!this.device || regions.length === 0) {
+      this.drcEnabled = false;
+      return;
+    }
+    
+    console.log(`[DRC] Loading ${regions.length} DRC regions`);
+    
+    // Update buffer for current region
+    this.updateDrcBufferForRegion(this.drcCurrentIndex);
+    this.drcEnabled = true;
+    this.state.needsDraw = true;
+  }
+
+  /**
+   * Update GPU buffer for a specific DRC region
+   */
+  private updateDrcBufferForRegion(index: number) {
+    if (!this.device || index < 0 || index >= this.drcRegions.length) {
+      this.drcTriangleCount = 0;
+      return;
+    }
+    
+    const region = this.drcRegions[index];
+    const vertices = new Float32Array(region.triangle_vertices);
+    
+    // Clean up old buffer
+    if (this.drcVertexBuffer) {
+      this.drcVertexBuffer.destroy();
+    }
+    
+    // Create new buffer
+    this.drcVertexBuffer = this.device.createBuffer({
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true,
+    });
+    new Float32Array(this.drcVertexBuffer.getMappedRange()).set(vertices);
+    this.drcVertexBuffer.unmap();
+    
+    this.drcTriangleCount = region.triangle_count;
+  }
+
+  /**
+   * Navigate to a specific DRC region
+   * Returns the region for camera fitting
+   */
+  public navigateToDrcRegion(index: number): DrcRegion | null {
+    if (index < 0 || index >= this.drcRegions.length) {
+      return null;
+    }
+    
+    this.drcCurrentIndex = index;
+    this.updateDrcBufferForRegion(index);
+    this.state.needsDraw = true;
+    
+    return this.drcRegions[index];
+  }
+
+  /**
+   * Go to next DRC region (with wrap-around)
+   */
+  public nextDrcRegion(): DrcRegion | null {
+    if (this.drcRegions.length === 0) return null;
+    const nextIndex = (this.drcCurrentIndex + 1) % this.drcRegions.length;
+    return this.navigateToDrcRegion(nextIndex);
+  }
+
+  /**
+   * Go to previous DRC region (with wrap-around)
+   */
+  public prevDrcRegion(): DrcRegion | null {
+    if (this.drcRegions.length === 0) return null;
+    const prevIndex = (this.drcCurrentIndex - 1 + this.drcRegions.length) % this.drcRegions.length;
+    return this.navigateToDrcRegion(prevIndex);
+  }
+
+  /**
+   * Clear DRC overlay
+   */
+  public clearDrc() {
+    this.drcEnabled = false;
+    this.drcRegions = [];
+    this.drcCurrentIndex = 0;
+    this.drcTriangleCount = 0;
+    if (this.drcVertexBuffer) {
+      this.drcVertexBuffer.destroy();
+      this.drcVertexBuffer = null;
+    }
+    this.state.needsDraw = true;
+  }
+
+  /**
+   * Get current DRC region
+   */
+  public getCurrentDrcRegion(): DrcRegion | null {
+    if (this.drcCurrentIndex < 0 || this.drcCurrentIndex >= this.drcRegions.length) {
+      return null;
+    }
+    return this.drcRegions[this.drcCurrentIndex];
+  }
+
+  // ==================== End DRC Overlay Methods ====================
 
   // Map obj_type from ObjectRange to shader key
   // obj_type: 0=Polyline, 1=Polygon, 2=Via, 3=Pad

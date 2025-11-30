@@ -100,6 +100,21 @@ export interface ObjectRange {
   pin_ref?: string; // Pin reference (e.g., "PIN:1") for pad identification
 }
 
+// DRC Region from Rust backend (fused violations with triangle data)
+export interface DrcRegion {
+  id: number;
+  layer_id: string;
+  min_distance_mm: number;
+  clearance_mm: number;
+  net_a: string | null;
+  net_b: string | null;
+  bounds: [number, number, number, number]; // [min_x, min_y, max_x, max_y]
+  center: [number, number];
+  object_ids: number[];
+  triangle_vertices: number[]; // Flattened [x0,y0,x1,y1,x2,y2, ...]
+  triangle_count: number;
+}
+
 // Minimal per-layer render data
 export interface LayerRenderData {
   layerId: string;
