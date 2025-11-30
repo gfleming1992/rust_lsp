@@ -314,6 +314,17 @@ wss.on('connection', (ws) => {
       // TODO: Implement backend delete
       // For now, just acknowledge
       
+    } else if (data.command === 'GetMemory') {
+      // Forward get memory command to LSP server (don't log to reduce spam)
+      sendLspRequest('GetMemory', null, (response) => {
+        if (response.result) {
+          ws.send(JSON.stringify({
+            command: 'memoryResult',
+            memoryBytes: response.result.memory_bytes
+          }));
+        }
+      });
+      
     } else if (data.command === 'UpdateLayerColor') {
       console.log(`[DevServer] UpdateLayerColor: ${data.layerId}`, data.color);
       sendLspRequest('UpdateLayerColor', { 
@@ -342,6 +353,32 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ 
             command: 'saveComplete', 
             filePath: response.result.file_path 
+          }));
+        }
+      });
+      
+    } else if (data.command === 'HighlightSelectedNets') {
+      console.log(`[DevServer] HighlightSelectedNets for ${data.objectIds?.length || 0} objects`);
+      sendLspRequest('HighlightSelectedNets', { object_ids: data.objectIds }, (response) => {
+        if (response.result?.objects) {
+          console.log(`[DevServer] HighlightSelectedNets returned ${response.result.objects.length} objects`);
+          ws.send(JSON.stringify({
+            command: 'highlightNetsResult',
+            netNames: response.result.net_names,
+            objects: response.result.objects
+          }));
+        }
+      });
+      
+    } else if (data.command === 'HighlightSelectedComponents') {
+      console.log(`[DevServer] HighlightSelectedComponents for ${data.objectIds?.length || 0} objects`);
+      sendLspRequest('HighlightSelectedComponents', { object_ids: data.objectIds }, (response) => {
+        if (response.result?.objects) {
+          console.log(`[DevServer] HighlightSelectedComponents returned ${response.result.objects.length} objects`);
+          ws.send(JSON.stringify({
+            command: 'highlightComponentsResult',
+            componentRefs: response.result.component_refs,
+            objects: response.result.objects
           }));
         }
       });
