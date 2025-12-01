@@ -10,6 +10,15 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use rayon::prelude::*;
 
+/// Line ending to use for serialization (CRLF on Windows, LF elsewhere)
+#[cfg(windows)]
+const LINE_ENDING: &[u8] = b"\r\n";
+#[cfg(not(windows))]
+const LINE_ENDING: &[u8] = b"\n";
+
+/// XML declaration with UTF-8 encoding
+const XML_DECLARATION: &[u8] = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+
 /// Serializes an XmlNode and all its descendants to an XML string
 /// 
 /// # Arguments
@@ -20,7 +29,8 @@ use rayon::prelude::*;
 /// A formatted XML string representation of the node tree
 pub fn xml_node_to_string(node: &XmlNode, indent_level: usize) -> String {
     let mut buffer = Vec::with_capacity(1024);
-    buffer.extend_from_slice(b"<?xml version=\"1.0\"?>\n");
+    buffer.extend_from_slice(XML_DECLARATION);
+    buffer.extend_from_slice(LINE_ENDING);
     write_node_pretty(node, &mut buffer, indent_level).expect("serialization failed");
     String::from_utf8(buffer).expect("serialized XML was not valid UTF-8")
 }
@@ -36,7 +46,8 @@ pub fn xml_node_to_string(node: &XmlNode, indent_level: usize) -> String {
 pub fn xml_node_to_file<P: AsRef<Path>>(node: &XmlNode, file_path: P) -> Result<()> {
     let file = File::create(&file_path).context("Failed to create XML file")?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file); // Increased buffer to 1MB
-    writer.write_all(b"<?xml version=\"1.0\"?>\n").context("Failed to write XML declaration")?;
+    writer.write_all(XML_DECLARATION).context("Failed to write XML declaration")?;
+    writer.write_all(LINE_ENDING).context("Failed to write line ending")?;
     write_node_pretty(node, &mut writer, 0).context("Failed to serialize XML")?;
     writer.flush().context("Failed to flush XML writer")?;
     Ok(())
@@ -51,7 +62,8 @@ pub fn xml_node_to_file<P: AsRef<Path>>(node: &XmlNode, file_path: P) -> Result<
 /// A compact XML string without extra whitespace
 pub fn xml_node_to_compact_string(node: &XmlNode) -> String {
     let mut buffer = Vec::with_capacity(1024);
-    buffer.extend_from_slice(b"<?xml version=\"1.0\"?>\n");
+    buffer.extend_from_slice(XML_DECLARATION);
+    buffer.extend_from_slice(LINE_ENDING);
     write_node_compact(node, &mut buffer).expect("serialization failed");
     String::from_utf8(buffer).expect("serialized XML was not valid UTF-8")
 }
@@ -74,16 +86,18 @@ fn write_node_pretty<W: Write>(node: &XmlNode, writer: &mut W, indent_level: usi
     let text = node.text_content.trim();
     let has_text = !text.is_empty();
     if node.children.is_empty() && !has_text {
-        writer.write_all(b" />\n")?;
+        writer.write_all(b" />")?;
+        writer.write_all(LINE_ENDING)?;
         return Ok(());
     }
 
-    writer.write_all(b">\n")?;
+    writer.write_all(b">")?;
+    writer.write_all(LINE_ENDING)?;
 
     if has_text {
         write_indent(writer, indent_level + 1)?;
         write_escaped_text(writer, text)?;
-        writer.write_all(b"\n")?;
+        writer.write_all(LINE_ENDING)?;
     }
 
     // Parallelization threshold: if a node has many children (like CadData with layers),
@@ -112,7 +126,8 @@ fn write_node_pretty<W: Write>(node: &XmlNode, writer: &mut W, indent_level: usi
     write_indent(writer, indent_level)?;
     writer.write_all(b"</")?;
     writer.write_all(node.name.as_bytes())?;
-    writer.write_all(b">\n")?;
+    writer.write_all(b">")?;
+    writer.write_all(LINE_ENDING)?;
     Ok(())
 }
 
