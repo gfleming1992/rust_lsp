@@ -69,9 +69,22 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
         if let (Some(inst_data), Some(inst_idx)) = (&lod_entry.instance_data, range.instance_index) {
             let floats_per_instance = 3;
             let base = (inst_idx as usize) * floats_per_instance;
-            if base + 1 < inst_data.len() {
+            if base + 2 < inst_data.len() {
                 let inst_x = inst_data[base];
                 let inst_y = inst_data[base + 1];
+                let packed = inst_data[base + 2];
+                
+                // Extract rotation for instanced_rot (obj_type == 3)
+                let rotation = if range.obj_type == 3 {
+                    let packed_bits = packed.to_bits();
+                    let angle_u16 = packed_bits >> 16;
+                    let angle_normalized = (angle_u16 as f32) / 65535.0;
+                    angle_normalized * std::f32::consts::TAU
+                } else {
+                    0.0f32
+                };
+                let cos_r = rotation.cos();
+                let sin_r = rotation.sin();
                 
                 if let Some(ref indices) = lod_entry.index_data {
                     for tri in indices.chunks(3) {
@@ -81,12 +94,21 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
                         let i2 = tri[2] as usize * 2;
                         
                         if i2 + 1 < lod_entry.vertex_data.len() {
-                            let x0 = lod_entry.vertex_data[i0] + inst_x;
-                            let y0 = lod_entry.vertex_data[i0 + 1] + inst_y;
-                            let x1 = lod_entry.vertex_data[i1] + inst_x;
-                            let y1 = lod_entry.vertex_data[i1 + 1] + inst_y;
-                            let x2 = lod_entry.vertex_data[i2] + inst_x;
-                            let y2 = lod_entry.vertex_data[i2 + 1] + inst_y;
+                            // Get local vertices
+                            let lx0 = lod_entry.vertex_data[i0];
+                            let ly0 = lod_entry.vertex_data[i0 + 1];
+                            let lx1 = lod_entry.vertex_data[i1];
+                            let ly1 = lod_entry.vertex_data[i1 + 1];
+                            let lx2 = lod_entry.vertex_data[i2];
+                            let ly2 = lod_entry.vertex_data[i2 + 1];
+                            
+                            // Apply rotation then translation
+                            let x0 = lx0 * cos_r - ly0 * sin_r + inst_x;
+                            let y0 = lx0 * sin_r + ly0 * cos_r + inst_y;
+                            let x1 = lx1 * cos_r - ly1 * sin_r + inst_x;
+                            let y1 = lx1 * sin_r + ly1 * cos_r + inst_y;
+                            let x2 = lx2 * cos_r - ly2 * sin_r + inst_x;
+                            let y2 = lx2 * sin_r + ly2 * cos_r + inst_y;
                             
                             if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
                                 return true;

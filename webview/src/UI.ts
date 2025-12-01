@@ -618,15 +618,16 @@ export class UI {
         const action = (event.currentTarget as HTMLButtonElement).dataset.layerAction;
         if (action === "all") {
           for (const layerId of this.scene.layerColors.keys()) {
-            this.scene.layerVisible.set(layerId, true);
+            this.scene.toggleLayerVisibility(layerId, true);
           }
         } else if (action === "none") {
           for (const layerId of this.scene.layerColors.keys()) {
-            this.scene.layerVisible.set(layerId, false);
+            this.scene.toggleLayerVisibility(layerId, false);
           }
         } else if (action === "invert") {
           for (const layerId of this.scene.layerColors.keys()) {
-            this.scene.layerVisible.set(layerId, !(this.scene.layerVisible.get(layerId) !== false));
+            const currentVisible = this.scene.layerVisible.get(layerId) !== false;
+            this.scene.toggleLayerVisibility(layerId, !currentVisible);
           }
         }
         this.refreshLayerLegend();

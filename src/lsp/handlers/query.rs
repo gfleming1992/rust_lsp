@@ -36,21 +36,37 @@ pub fn handle_query_net_at_point(
     // only_visible=true ensures hidden layers are excluded from tooltip
     let objects = find_objects_at_point(state, p.x, p.y, true);
     
-    // Extract first net/component/pin from copper layers only
+    // Extract net/component/pin from the topmost copper-layer object.
+    // Priority: first object with net_name gets all its values used.
+    // If no object has a net, fall back to first object with component/pin.
     let mut net_name: Option<String> = None;
     let mut component_ref: Option<String> = None;
     let mut pin_ref: Option<String> = None;
     
+    // First pass: find the topmost object with a net_name
     for obj in &objects {
-        // Skip non-copper layers for tooltip
         if !copper_layers.contains(obj.layer_id.as_str()) {
             continue;
         }
-        if net_name.is_none() { net_name = obj.net_name.clone(); }
-        if component_ref.is_none() { component_ref = obj.component_ref.clone(); }
-        if pin_ref.is_none() { pin_ref = obj.pin_ref.clone(); }
-        if net_name.is_some() && component_ref.is_some() && pin_ref.is_some() {
+        if obj.net_name.is_some() {
+            net_name = obj.net_name.clone();
+            component_ref = obj.component_ref.clone();
+            pin_ref = obj.pin_ref.clone();
             break;
+        }
+    }
+    
+    // If no net found, fall back to first object with component/pin (e.g., fiducial pad)
+    if net_name.is_none() {
+        for obj in &objects {
+            if !copper_layers.contains(obj.layer_id.as_str()) {
+                continue;
+            }
+            if obj.component_ref.is_some() || obj.pin_ref.is_some() {
+                component_ref = obj.component_ref.clone();
+                pin_ref = obj.pin_ref.clone();
+                break;
+            }
         }
     }
 
