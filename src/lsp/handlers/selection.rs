@@ -6,15 +6,34 @@ use crate::lsp::util::{point_in_triangle, parse_params};
 use crate::draw::geometry::{LayerJSON, ObjectRange};
 use serde::Deserialize;
 
-/// Sort objects by priority: objects with nets first, then by type (pad > via > polygon > polyline)
-pub fn sort_by_priority(objects: &mut [ObjectRange]) {
+/// Sort objects by visual priority: layer order first (later = on top), then by type.
+/// This matches the rendering order where later layers appear on top.
+pub fn sort_by_priority(objects: &mut [ObjectRange], layers: &[LayerJSON]) {
+    // Build layer index map for O(1) lookup
+    let layer_indices: std::collections::HashMap<&str, usize> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.layer_id.as_str(), i))
+        .collect();
+    
     objects.sort_by(|a, b| {
+        // Primary: layer order (higher index = rendered later = on top = higher priority)
+        let a_layer_idx = layer_indices.get(a.layer_id.as_str()).copied().unwrap_or(0);
+        let b_layer_idx = layer_indices.get(b.layer_id.as_str()).copied().unwrap_or(0);
+        let layer_cmp = b_layer_idx.cmp(&a_layer_idx); // Reverse: higher index first
+        if layer_cmp != std::cmp::Ordering::Equal {
+            return layer_cmp;
+        }
+        
+        // Secondary: objects with nets over objects without
         let has_net_priority = |r: &ObjectRange| if r.net_name.is_some() { 0 } else { 1 };
         let net_cmp = has_net_priority(a).cmp(&has_net_priority(b));
         if net_cmp != std::cmp::Ordering::Equal {
             return net_cmp;
         }
-        let type_priority = |t: u8| match t { 3 => 0, 2 => 1, 1 => 2, _ => 3 };
+        
+        // Tertiary: type priority (pad > via > polyline > polygon)
+        let type_priority = |t: u8| match t { 3 => 0, 2 => 1, 0 => 2, 1 => 3, _ => 4 };
         type_priority(a.obj_type).cmp(&type_priority(b.obj_type))
     });
 }
@@ -128,7 +147,8 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
 
 /// Find all objects at a point with triangle intersection testing.
 /// Returns objects sorted by priority (net > no net, pad > via > polygon > polyline).
-pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32) -> Vec<ObjectRange> {
+/// If `only_visible` is true, hidden layers are excluded from results.
+pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32, only_visible: bool) -> Vec<ObjectRange> {
     let Some(tree) = &state.spatial_index else {
         return vec![];
     };
@@ -137,11 +157,17 @@ pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32) -> Vec<ObjectR
     let candidates: Vec<_> = tree.locate_all_at_point(&point).collect();
     
     let mut results: Vec<ObjectRange> = candidates.iter()
-        .filter(|obj| point_hits_object(x, y, &obj.range, &state.layers))
+        .filter(|obj| {
+            // Skip objects on hidden layers if only_visible is true
+            if only_visible && state.hidden_layers.contains(&obj.range.layer_id) {
+                return false;
+            }
+            point_hits_object(x, y, &obj.range, &state.layers)
+        })
         .map(|obj| obj.range.clone())
         .collect();
     
-    sort_by_priority(&mut results);
+    sort_by_priority(&mut results, &state.layers);
     results
 }
 
@@ -159,7 +185,7 @@ pub fn handle_select(
         Err(e) => return e,
     };
 
-    let results = find_objects_at_point(state, p.x, p.y);
+    let results = find_objects_at_point(state, p.x, p.y, true);
     Response::success(id, serde_json::to_value(results).unwrap())
 }
 
@@ -186,7 +212,7 @@ pub fn handle_box_select(
             .map(|obj| obj.range.clone())
             .collect();
         
-        sort_by_priority(&mut results);
+        sort_by_priority(&mut results, &state.layers);
             
         Response::success(id, serde_json::to_value(results).unwrap())
     } else {
