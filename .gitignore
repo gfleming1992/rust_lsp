@@ -19,7 +19,6 @@ Cargo.lock
 *.pdb
 
 # IDE and editor files
-.vscode/
 .idea/
 *.swp
 *.swo

@@ -1,0 +1,105 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Extension Debug (Full Build)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${workspaceFolder}/test-workspace",
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/dist/**/*.js"
+      ],
+      "preLaunchTask": "build:all",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      }
+    },
+    {
+      "name": "Extension Debug (Watch Mode)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${workspaceFolder}/test-workspace",
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/dist/**/*.js"
+      ],
+      "preLaunchTask": "build:webview+watch:extension",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      }
+    },
+    {
+      "name": "Dev Server (with Rust rebuild)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dev-server.mjs",
+      "preLaunchTask": "build:rust",
+      "runtimeArgs": [
+        "--enable-source-maps"
+      ],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      }
+    },
+    {
+      "name": "Dev Server (watch mode - no rebuild)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dev-server.mjs",
+      "runtimeArgs": [
+        "--enable-source-maps"
+      ],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      }
+    },
+
+    {
+      "name": "Full Stack (Rust + WebView + Hot Reload)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dev-server.mjs",
+      "preLaunchTask": "build:all:rust",
+      "runtimeArgs": [
+        "--enable-source-maps"
+      ],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared"
+      },
+      "serverReadyAction": {
+        "pattern": "Running at http://localhost:([0-9]+)",
+        "uriFormat": "http://localhost:%s",
+        "action": "openExternally"
+      }
+    }
+  ]
+}

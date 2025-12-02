@@ -38,14 +38,13 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:rust && npm run build:extension && npm run build:webview",
-    "build:all": "npm run clean && npm run build:rust && npm run copy:rust && npm run build:extension && npm run build:webview",
+    "build:all": "npm run build:rust && npm run copy:rust && npm run build:extension && npm run build:webview",
     "build:rust": "cargo build --release --bin lsp_server",
-    "copy:rust": "powershell -Command \"Copy-Item 'target/release/lsp_server.exe' 'bin/lsp_server.exe' -Force\"",
-    "postbuild:rust": "if not exist bin mkdir bin && copy /Y target\\release\\lsp_server.exe bin\\lsp_server.exe",
-    "build:extension": "tsc -p tsconfig.extension.json && if not exist dist\\assets mkdir dist\\assets && copy assets\\webview.html dist\\assets\\",
+    "copy:rust": "mkdir -p bin && cp target/release/lsp_server bin/lsp_server",
+    "build:extension": "tsc -p tsconfig.extension.json && mkdir -p dist/assets && cp assets/webview.html dist/assets/",
     "build:webview": "node build-webview.mjs",
     "watch:extension": "tsc -watch -p tsconfig.extension.json",
-    "clean": "powershell -ExecutionPolicy Bypass -File kill-all.ps1",
+    "clean": "pkill -f lsp_server || true",
     "dev": "npm run clean && nodemon --watch dev-server.mjs dev-server.mjs",
     "dev:extension": "npm run watch:extension"
   },

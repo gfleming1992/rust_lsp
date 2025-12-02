@@ -356,7 +356,8 @@ export function deactivate() {
 }
 
 function startLspServer(context: vscode.ExtensionContext) {
-    const serverPath = path.join(context.extensionPath, 'bin', 'lsp_server.exe');
+    const serverName = process.platform === 'win32' ? 'lsp_server.exe' : 'lsp_server';
+    const serverPath = path.join(context.extensionPath, 'bin', serverName);
     
     console.log('[Extension] Starting LSP server:', serverPath);
 
