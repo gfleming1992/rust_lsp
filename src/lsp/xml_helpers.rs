@@ -247,3 +247,202 @@ fn check_should_remove(
     
     Some(false)
 }
+
+/// Apply move deltas to objects in XML tree
+/// Returns the number of objects modified
+pub fn apply_moved_objects_to_xml(
+    root: &mut XmlNode,
+    moved_objects: &HashMap<u64, crate::lsp::state::ObjectMove>,
+    all_object_ranges: &[ObjectRange],
+    padstack_defs: &IndexMap<String, PadStackDef>,
+) -> usize {
+    if moved_objects.is_empty() {
+        return 0;
+    }
+    
+    // Build lookup: object_id -> (delta_x, delta_y, layer_id, obj_type)
+    let mut move_lookup: HashMap<(String, u8, usize), (f32, f32)> = HashMap::new();
+    
+    for (obj_id, mov) in moved_objects {
+        // Find the object range to get layer_id and obj_type
+        if let Some(range) = all_object_ranges.iter().find(|r| r.id == *obj_id) {
+            let obj_index = (*obj_id & 0xFFFFFFFFF) as usize;
+            let key = (range.layer_id.clone(), range.obj_type, obj_index);
+            move_lookup.insert(key, (mov.delta_x, mov.delta_y));
+            eprintln!("[XML Move] Marking for move: layer={}, obj_type={}, index={}, delta=({:.3}, {:.3})", 
+                range.layer_id, range.obj_type, obj_index, mov.delta_x, mov.delta_y);
+        }
+    }
+    
+    let mut total_modified = 0;
+    let mut counters: HashMap<String, HashMap<u8, usize>> = HashMap::new();
+    
+    apply_moves_to_node(root, &move_lookup, None, false, &mut counters, &mut total_modified, padstack_defs);
+    
+    eprintln!("[XML Move] Total modified: {}", total_modified);
+    total_modified
+}
+
+fn apply_moves_to_node(
+    node: &mut XmlNode,
+    move_lookup: &HashMap<(String, u8, usize), (f32, f32)>,
+    current_layer: Option<&str>,
+    in_via_set: bool,
+    counters: &mut HashMap<String, HashMap<u8, usize>>,
+    modified: &mut usize,
+    padstack_defs: &IndexMap<String, PadStackDef>,
+) {
+    let layer_ref = if node.name == "LayerFeature" {
+        node.attributes.get("layerRef").map(|s| s.as_str())
+    } else {
+        current_layer
+    };
+    
+    let is_via_set = node.name == "Set" && 
+        node.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+    let child_in_via_set = in_via_set || is_via_set;
+    
+    for child in &mut node.children {
+        // Check if this child should be moved
+        if let Some((delta_x, delta_y)) = check_should_move(
+            child, 
+            layer_ref, 
+            child_in_via_set, 
+            counters, 
+            move_lookup,
+            padstack_defs
+        ) {
+            apply_move_to_node(child, delta_x, delta_y);
+            *modified += 1;
+        }
+        
+        // Recurse into children
+        apply_moves_to_node(child, move_lookup, layer_ref, child_in_via_set, 
+            counters, modified, padstack_defs);
+    }
+}
+
+fn check_should_move(
+    child: &XmlNode, 
+    layer: Option<&str>, 
+    parent_in_via_set: bool, 
+    counters: &mut HashMap<String, HashMap<u8, usize>>,
+    move_lookup: &HashMap<(String, u8, usize), (f32, f32)>,
+    padstack_defs: &IndexMap<String, PadStackDef>
+) -> Option<(f32, f32)> {
+    let layer_id = layer?;
+    
+    let obj_type = match child.name.as_str() {
+        "Polyline" | "Line" => Some(0u8),
+        "Polygon" => Some(1u8),
+        "Pad" => {
+            let has_via_attr = child.attributes.get("padUsage").map(|s| s.as_str()) == Some("VIA");
+            let in_via_set = parent_in_via_set;
+            
+            let is_pth = if let Some(padstack_ref) = child.attributes.get("padstackDefRef") {
+                if let Some(def) = padstack_defs.get(padstack_ref) {
+                    def.hole_diameter > 0.01
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            
+            if has_via_attr || in_via_set || is_pth {
+                Some(2u8) // Via / PTH pad
+            } else {
+                Some(3u8) // SMD Pad
+            }
+        }
+        _ => None,
+    }?;
+    
+    let count = counters
+        .entry(layer_id.to_string())
+        .or_default()
+        .entry(obj_type)
+        .or_insert(0);
+    
+    let current_idx = *count;
+    *count += 1;
+    
+    let key = (layer_id.to_string(), obj_type, current_idx);
+    move_lookup.get(&key).copied()
+}
+
+/// Apply a move delta to a geometry node (Pad, Polyline, Polygon, etc.)
+fn apply_move_to_node(node: &mut XmlNode, delta_x: f32, delta_y: f32) {
+    match node.name.as_str() {
+        "Pad" => {
+            // Pads have x, y attributes directly
+            if let Some(x_str) = node.attributes.get("x") {
+                if let Ok(x) = x_str.parse::<f32>() {
+                    node.attributes.insert("x".to_string(), format!("{:.6}", x + delta_x));
+                }
+            }
+            if let Some(y_str) = node.attributes.get("y") {
+                if let Ok(y) = y_str.parse::<f32>() {
+                    node.attributes.insert("y".to_string(), format!("{:.6}", y + delta_y));
+                }
+            }
+            eprintln!("[XML Move] Applied delta to Pad: ({:.3}, {:.3})", delta_x, delta_y);
+        }
+        "Polyline" | "Line" => {
+            // Polylines have child PolyBegin and PolyStepSegment/PolyStepCurve nodes
+            for child in &mut node.children {
+                apply_move_to_coordinate_node(child, delta_x, delta_y);
+            }
+            eprintln!("[XML Move] Applied delta to {}", node.name);
+        }
+        "Polygon" => {
+            // Polygons have Outline and potentially Cutout children
+            for child in &mut node.children {
+                if child.name == "Outline" || child.name == "Cutout" {
+                    for contour_child in &mut child.children {
+                        apply_move_to_coordinate_node(contour_child, delta_x, delta_y);
+                    }
+                }
+            }
+            eprintln!("[XML Move] Applied delta to Polygon");
+        }
+        _ => {}
+    }
+}
+
+/// Apply move to a coordinate node (PolyBegin, PolyStepSegment, PolyStepCurve, etc.)
+fn apply_move_to_coordinate_node(node: &mut XmlNode, delta_x: f32, delta_y: f32) {
+    match node.name.as_str() {
+        "PolyBegin" | "PolyStepSegment" | "Segment" => {
+            if let Some(x_str) = node.attributes.get("x") {
+                if let Ok(x) = x_str.parse::<f32>() {
+                    node.attributes.insert("x".to_string(), format!("{:.6}", x + delta_x));
+                }
+            }
+            if let Some(y_str) = node.attributes.get("y") {
+                if let Ok(y) = y_str.parse::<f32>() {
+                    node.attributes.insert("y".to_string(), format!("{:.6}", y + delta_y));
+                }
+            }
+        }
+        "PolyStepCurve" => {
+            // Curves have x, y and cx, cy (control point)
+            for attr in ["x", "cx"] {
+                if let Some(val_str) = node.attributes.get(attr) {
+                    if let Ok(val) = val_str.parse::<f32>() {
+                        node.attributes.insert(attr.to_string(), format!("{:.6}", val + delta_x));
+                    }
+                }
+            }
+            for attr in ["y", "cy"] {
+                if let Some(val_str) = node.attributes.get(attr) {
+                    if let Ok(val) = val_str.parse::<f32>() {
+                        node.attributes.insert(attr.to_string(), format!("{:.6}", val + delta_y));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+

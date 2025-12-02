@@ -21,7 +21,8 @@ export class Renderer {
   private configuredWidth = 0;
   private configuredHeight = 0;
   
-  private uniformData = new Float32Array(16);
+  // Uniform data layout: color(4) + m0(4) + m1(4) + m2(4) + moveOffset(4) = 20 floats
+  private uniformData = new Float32Array(20);
   
   // DRC overlay bind group and uniform buffer
   // Uniforms: v0(vec4) + v1(vec4) + v2(vec4) + stripeColor(vec4) = 64 bytes
@@ -346,6 +347,13 @@ export class Renderer {
     this.uniformData[13] = 0;
     this.uniformData[14] = 1;
     this.uniformData[15] = 0;
+    
+    // Move offset (xy = offset, zw = unused padding)
+    const moveOffset = this.scene.getMoveOffset();
+    this.uniformData[16] = moveOffset.x;
+    this.uniformData[17] = moveOffset.y;
+    this.uniformData[18] = 0;
+    this.uniformData[19] = 0;
   }
 
   private selectLODForZoom(zoom: number): number {

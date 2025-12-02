@@ -3,6 +3,7 @@ import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { ContextMenu } from "./ContextMenu";
 import { Tooltip } from "./Tooltip";
+import { ObjectRange } from "./types";
 
 export class Input {
   private scene: Scene;
@@ -19,6 +20,8 @@ export class Input {
   
   private dragStartX = 0;
   private dragStartY = 0;
+  private dragStartWorldX = 0;
+  private dragStartWorldY = 0;
 
   private ZOOM_SPEED = 0.005;
   private MIN_ZOOM = 0.1;
@@ -31,6 +34,16 @@ export class Input {
   private onBoxSelect: ((minX: number, minY: number, maxX: number, maxY: number) => void) | null = null;
   private onHighlightNets: (() => void) | null = null;
   private onClearSelection: (() => void) | null = null;
+  
+  // Move mode state - click-to-pick-up, click-to-drop (no drag required)
+  private isMoving = false;           // True when object is following mouse
+  private moveStartWorldX = 0;        // World position when move started
+  private moveStartWorldY = 0;
+  private onMoveStart: (() => void) | null = null;
+  private onMoveUpdate: ((deltaX: number, deltaY: number) => void) | null = null;
+  private onMoveEnd: ((deltaX: number, deltaY: number) => void) | null = null;
+  private onMoveCancel: (() => void) | null = null;
+  private getSelectedObjects: (() => ObjectRange[]) | null = null;
   
   // Hover tooltip tracking
   private hoverTimer: number | null = null;
@@ -111,6 +124,53 @@ export class Input {
     this.onQueryNetAtPoint = callback;
   }
 
+  // Move operation callbacks
+  public setOnMoveStart(callback: () => void) {
+    this.onMoveStart = callback;
+  }
+
+  public setOnMoveUpdate(callback: (deltaX: number, deltaY: number) => void) {
+    this.onMoveUpdate = callback;
+  }
+
+  public setOnMoveEnd(callback: (deltaX: number, deltaY: number) => void) {
+    this.onMoveEnd = callback;
+  }
+
+  public setOnMoveCancel(callback: () => void) {
+    this.onMoveCancel = callback;
+  }
+
+  public setGetSelectedObjects(callback: () => ObjectRange[]) {
+    this.getSelectedObjects = callback;
+  }
+
+  // Called by main.ts when user clicks on an already-selected object
+  // This immediately starts move mode (object follows mouse until next click)
+  public startMoveMode(worldX: number, worldY: number) {
+    this.isMoving = true;
+    this.moveStartWorldX = worldX;
+    this.moveStartWorldY = worldY;
+    this.canvas.style.cursor = "move";
+    console.log(`[Input] Move mode started at (${worldX.toFixed(2)}, ${worldY.toFixed(2)}) - click to drop`);
+    
+    if (this.onMoveStart) {
+      this.onMoveStart();
+    }
+  }
+
+  // Called by main.ts to cancel move mode (e.g., on Escape)
+  public cancelMoveMode() {
+    if (this.isMoving) {
+      console.log('[Input] Move mode cancelled');
+      this.isMoving = false;
+      this.canvas.style.cursor = "grab";
+      if (this.onMoveCancel) {
+        this.onMoveCancel();
+      }
+    }
+  }
+
   public showNetTooltip(netName: string | null, clientX: number, clientY: number) {
     if (netName) {
       this.tooltip.show(clientX, clientY, `Net: ${netName}`);
@@ -185,27 +245,35 @@ export class Input {
     });
 
     // Keyboard listeners for Delete, Undo, Redo, Escape
+    // Note: Use metaKey for macOS (Cmd) and ctrlKey for Windows/Linux
     window.addEventListener('keydown', (event) => {
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const modifierKey = isMac ? event.metaKey : event.ctrlKey;
+      
       if (event.key === 'Escape') {
         event.preventDefault();
-        if (this.onClearSelection) {
+        // If in move mode, cancel the move first
+        if (this.isMoving) {
+          this.cancelMoveMode();
+        } else if (this.onClearSelection) {
           this.onClearSelection();
         }
-      } else if (event.key === 'Delete' || (event.ctrlKey && (event.key === 'd' || event.key === 'D'))) {
+      } else if (event.key === 'Delete' || event.key === 'Backspace' || (modifierKey && (event.key === 'd' || event.key === 'D'))) {
         event.preventDefault();
         console.log('[Input] Delete key pressed');
         if (this.onDelete) {
           this.onDelete();
         }
-      } else if (event.ctrlKey && (event.key === 'z' || event.key === 'Z') && !event.shiftKey) {
+      } else if (modifierKey && (event.key === 'z' || event.key === 'Z') && !event.shiftKey) {
         event.preventDefault();
-        console.log('[Input] Undo (Ctrl+Z) pressed');
+        console.log('[Input] Undo pressed');
         if (this.onUndo) {
           this.onUndo();
         }
-      } else if (event.ctrlKey && (event.key === 'y' || event.key === 'Y')) {
+      } else if (modifierKey && ((event.key === 'y' || event.key === 'Y') || (event.shiftKey && (event.key === 'z' || event.key === 'Z')))) {
+        // Redo: Ctrl+Y (Windows) or Cmd+Shift+Z (Mac)
         event.preventDefault();
-        console.log('[Input] Redo (Ctrl+Y) pressed');
+        console.log('[Input] Redo pressed');
         if (this.onRedo) {
           this.onRedo();
         }
@@ -215,18 +283,44 @@ export class Input {
     this.canvas.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 && event.button !== 1) return;
       
+      // Calculate world coordinates
+      const rect = this.canvas.getBoundingClientRect();
+      const cssX = event.clientX - rect.left;
+      const cssY = event.clientY - rect.top;
+      const world = this.renderer.screenToWorld(cssX, cssY);
+      
+      // If we're in move mode and left-click, DROP the object
+      if (this.isMoving && event.button === 0) {
+        const deltaX = world.x - this.moveStartWorldX;
+        const deltaY = world.y - this.moveStartWorldY;
+        
+        console.log(`[Input] Move dropped at (${world.x.toFixed(2)}, ${world.y.toFixed(2)}), delta (${deltaX.toFixed(3)}, ${deltaY.toFixed(3)})`);
+        
+        if (this.onMoveEnd) {
+          this.onMoveEnd(deltaX, deltaY);
+        }
+        
+        this.isMoving = false;
+        this.canvas.style.cursor = "grab";
+        // Don't start a new selection - the click was just to drop
+        return;
+      }
+      
+      // Normal drag/selection handling
       this.scene.state.dragging = true;
       this.scene.state.dragButton = event.button;
       this.scene.state.lastX = event.clientX;
       this.scene.state.lastY = event.clientY;
       this.dragStartX = event.clientX;
       this.dragStartY = event.clientY;
-      this.lastClickCtrlKey = event.ctrlKey; // Track Ctrl key state
+      this.lastClickCtrlKey = event.ctrlKey;
       this.canvas.setPointerCapture(event.pointerId);
+      this.dragStartWorldX = world.x;
+      this.dragStartWorldY = world.y;
       
       if (event.button === 1) { // Middle mouse - Pan
         this.canvas.style.cursor = "grabbing";
-      } else if (event.button === 0) { // Left mouse - Select
+      } else if (event.button === 0) { // Left mouse - Selection box
         this.canvas.style.cursor = "crosshair";
         this.selectionBox.style.display = 'block';
         this.selectionBox.style.left = `${event.clientX}px`;
@@ -241,8 +335,24 @@ export class Input {
       this.lastMouseY = event.clientY;
       this.haveMouse = true;
       
-      // Reset hover timer on mouse move (only when not dragging)
-      if (!this.scene.state.dragging) {
+      // Calculate world coordinates
+      const rect = this.canvas.getBoundingClientRect();
+      const cssX = event.clientX - rect.left;
+      const cssY = event.clientY - rect.top;
+      const world = this.renderer.screenToWorld(cssX, cssY);
+      
+      // If in move mode (click-to-pick-up), update preview continuously
+      if (this.isMoving) {
+        const deltaX = world.x - this.moveStartWorldX;
+        const deltaY = world.y - this.moveStartWorldY;
+        
+        if (this.onMoveUpdate) {
+          this.onMoveUpdate(deltaX, deltaY);
+        }
+        this.scene.state.needsDraw = true;
+        this.cancelHoverTimer(); // No tooltips while moving
+      } else if (!this.scene.state.dragging) {
+        // Reset hover timer on mouse move (only when not dragging and not moving)
         this.startHoverTimer(event.clientX, event.clientY);
       } else {
         this.cancelHoverTimer();
@@ -280,6 +390,7 @@ export class Input {
       
       // Check for click (minimal movement)
       const dist = Math.hypot(event.clientX - this.dragStartX, event.clientY - this.dragStartY);
+      
       if (dist < 5 && this.scene.state.dragButton === 0) { // Left click only
         this.handleClick(event.clientX, event.clientY);
       } else if (dist >= 5 && this.scene.state.dragButton === 0) {
@@ -296,7 +407,10 @@ export class Input {
       if (this.canvas.hasPointerCapture(event.pointerId)) {
         this.canvas.releasePointerCapture(event.pointerId);
       }
-      this.canvas.style.cursor = "grab";
+      // Only reset cursor if not in move mode
+      if (!this.isMoving) {
+        this.canvas.style.cursor = "grab";
+      }
     };
 
     this.canvas.addEventListener("pointerup", endDrag);

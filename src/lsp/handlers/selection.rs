@@ -39,7 +39,8 @@ pub fn sort_by_priority(objects: &mut [ObjectRange], layers: &[LayerJSON]) {
 }
 
 /// Check if a point hits an object's actual geometry (not just bounding box)
-pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON]) -> bool {
+/// `move_delta` is the (dx, dy) to apply if this object was moved
+pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON], move_delta: Option<(f32, f32)>) -> bool {
     let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
         Some(l) => l,
         None => return true,
@@ -58,6 +59,9 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
         _ => return true,
     };
     
+    // Apply move delta if object was moved
+    let (dx, dy) = move_delta.unwrap_or((0.0, 0.0));
+    
     // Handle instanced geometry (vias, pads)
     if range.obj_type == 2 || range.obj_type == 3 {
         let shape_idx = range.shape_index.unwrap_or(0) as usize;
@@ -70,8 +74,9 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
             let floats_per_instance = 3;
             let base = (inst_idx as usize) * floats_per_instance;
             if base + 2 < inst_data.len() {
-                let inst_x = inst_data[base];
-                let inst_y = inst_data[base + 1];
+                // Apply move delta to instance position
+                let inst_x = inst_data[base] + dx;
+                let inst_y = inst_data[base + 1] + dy;
                 let packed = inst_data[base + 2];
                 
                 // Extract rotation for instanced_rot (obj_type == 3)
@@ -184,7 +189,10 @@ pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32, only_visible: 
             if only_visible && state.hidden_layers.contains(&obj.range.layer_id) {
                 return false;
             }
-            point_hits_object(x, y, &obj.range, &state.layers)
+            // Get move delta if this object was moved
+            let move_delta = state.moved_objects.get(&obj.range.id)
+                .map(|m| (m.delta_x, m.delta_y));
+            point_hits_object(x, y, &obj.range, &state.layers, move_delta)
         })
         .map(|obj| obj.range.clone())
         .collect();
@@ -240,4 +248,47 @@ pub fn handle_box_select(
     } else {
         Response::success(id, serde_json::json!([]))
     }
+}
+
+/// Handle CheckPointHitsSelection request - checks if a point hits any of the given object IDs
+/// Uses full triangle intersection testing, not just AABB
+/// Returns the first hit object ID, or null if no hit
+pub fn handle_check_point_hits_selection(
+    state: &ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>
+) -> Response {
+    #[derive(Deserialize)]
+    struct Params {
+        x: f32,
+        y: f32,
+        object_ids: Vec<u64>,
+    }
+
+    let p: Params = match parse_params(id.clone(), params, "{x, y, object_ids}") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    // Build a set of object IDs for fast lookup
+    let target_ids: std::collections::HashSet<u64> = p.object_ids.into_iter().collect();
+    
+    // Find all objects at the point using full geometry intersection
+    let hits = find_objects_at_point(state, p.x, p.y, true);
+    
+    // Check if any of the hits are in our target set
+    // Return the first (highest priority) hit that matches
+    for hit in &hits {
+        if target_ids.contains(&hit.id) {
+            return Response::success(id, serde_json::json!({
+                "hit": true,
+                "object_id": hit.id
+            }));
+        }
+    }
+    
+    Response::success(id, serde_json::json!({
+        "hit": false,
+        "object_id": null
+    }))
 }

@@ -198,11 +198,17 @@ async function init() {
   
   // Store full net results (including hidden layers) for "Show only net layers" feature
   let lastNetHighlightAllObjects: ObjectRange[] = [];
+  
+  // Track click position for move mode
+  let lastSelectX = 0;
+  let lastSelectY = 0;
 
   // Setup Input handling
   const input = new Input(scene, renderer, ui, (x, y, ctrlKey) => {
     isBoxSelect = false; // Single point select
     isCtrlSelect = ctrlKey; // Track if appending to selection
+    lastSelectX = x;
+    lastSelectY = y;
     if (isVSCodeWebview && vscode) {
       vscode.postMessage({ command: 'Select', x, y });
     } else {
@@ -315,10 +321,14 @@ async function init() {
     }
   });
   
-  // Undo/Redo stacks - store batches of deleted objects for undo/redo as single events
+  // Unified Undo/Redo system - supports both deletes and moves
+  type UndoAction = 
+    | { type: 'delete'; objects: ObjectRange[] }
+    | { type: 'move'; objects: ObjectRange[]; deltaX: number; deltaY: number };
+  
   const MAX_UNDO_HISTORY = 100;
-  const undoStack: ObjectRange[][] = []; // Each entry is a batch of objects deleted together
-  const redoStack: ObjectRange[][] = [];
+  const undoStack: UndoAction[] = [];
+  const redoStack: UndoAction[] = [];
 
   function performDelete(objects: ObjectRange[], source: string) {
     if (objects.length === 0) return;
@@ -339,8 +349,8 @@ async function init() {
       }
     }
     
-    // Add entire batch to undo stack as single event
-    undoStack.push([...objects]);
+    // Add to unified undo stack
+    undoStack.push({ type: 'delete', objects: [...objects] });
     if (undoStack.length > MAX_UNDO_HISTORY) {
       undoStack.shift();
     }
@@ -358,22 +368,59 @@ async function init() {
       return;
     }
     
-    const batch = undoStack.pop()!;
-    console.log(`[Undo] Restoring ${batch.length} object(s)`);
+    const action = undoStack.pop()!;
     
-    // Show all objects in the batch
-    for (const obj of batch) {
-      scene.showObject(obj);
-      deletedObjectIds.delete(obj.id);
+    if (action.type === 'delete') {
+      console.log(`[Undo] Restoring ${action.objects.length} deleted object(s)`);
       
-      // Send undo command to backend
+      // Show all objects in the batch
+      for (const obj of action.objects) {
+        scene.showObject(obj);
+        deletedObjectIds.delete(obj.id);
+        
+        // Send undo command to backend
+        if (isVSCodeWebview && vscode) {
+          vscode.postMessage({ command: 'Undo', object: obj });
+        }
+      }
+    } else if (action.type === 'move') {
+      console.log(`[Undo] Reversing move of ${action.objects.length} object(s) by delta (${-action.deltaX}, ${-action.deltaY})`);
+      
+      // Apply reverse delta directly to object positions
+      scene.applyMoveOffset(action.objects, -action.deltaX, -action.deltaY);
+      
+      // Update selectedObjects bounds if they match the undone objects
+      const movedIds = new Set(action.objects.map(o => o.id));
+      for (const obj of selectedObjects) {
+        if (movedIds.has(obj.id)) {
+          obj.bounds[0] -= action.deltaX;
+          obj.bounds[1] -= action.deltaY;
+          obj.bounds[2] -= action.deltaX;
+          obj.bounds[3] -= action.deltaY;
+        }
+      }
+      
+      // Update action objects bounds for proper redo
+      for (const obj of action.objects) {
+        obj.bounds[0] -= action.deltaX;
+        obj.bounds[1] -= action.deltaY;
+        obj.bounds[2] -= action.deltaX;
+        obj.bounds[3] -= action.deltaY;
+      }
+      
+      // Send undo move to backend
       if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ command: 'Undo', object: obj });
+        vscode.postMessage({ 
+          command: 'UndoMove', 
+          objectIds: action.objects.map(o => o.id),
+          deltaX: action.deltaX,
+          deltaY: action.deltaY
+        });
       }
     }
     
-    // Add batch to redo stack
-    redoStack.push(batch);
+    // Add to redo stack
+    redoStack.push(action);
     if (redoStack.length > MAX_UNDO_HISTORY) {
       redoStack.shift();
     }
@@ -385,22 +432,59 @@ async function init() {
       return;
     }
     
-    const batch = redoStack.pop()!;
-    console.log(`[Redo] Re-deleting ${batch.length} object(s)`);
+    const action = redoStack.pop()!;
     
-    // Hide all objects in the batch again
-    for (const obj of batch) {
-      scene.hideObject(obj);
-      deletedObjectIds.add(obj.id);
+    if (action.type === 'delete') {
+      console.log(`[Redo] Re-deleting ${action.objects.length} object(s)`);
       
-      // Send redo command to backend
+      // Hide all objects in the batch again
+      for (const obj of action.objects) {
+        scene.hideObject(obj);
+        deletedObjectIds.add(obj.id);
+        
+        // Send redo command to backend
+        if (isVSCodeWebview && vscode) {
+          vscode.postMessage({ command: 'Redo', object: obj });
+        }
+      }
+    } else if (action.type === 'move') {
+      console.log(`[Redo] Re-applying move of ${action.objects.length} object(s) by delta (${action.deltaX}, ${action.deltaY})`);
+      
+      // Re-apply the move directly
+      scene.applyMoveOffset(action.objects, action.deltaX, action.deltaY);
+      
+      // Update selectedObjects bounds if they match the redone objects
+      const movedIds = new Set(action.objects.map(o => o.id));
+      for (const obj of selectedObjects) {
+        if (movedIds.has(obj.id)) {
+          obj.bounds[0] += action.deltaX;
+          obj.bounds[1] += action.deltaY;
+          obj.bounds[2] += action.deltaX;
+          obj.bounds[3] += action.deltaY;
+        }
+      }
+      
+      // Update action objects bounds for proper undo again
+      for (const obj of action.objects) {
+        obj.bounds[0] += action.deltaX;
+        obj.bounds[1] += action.deltaY;
+        obj.bounds[2] += action.deltaX;
+        obj.bounds[3] += action.deltaY;
+      }
+      
+      // Send redo move to backend
       if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ command: 'Redo', object: obj });
+        vscode.postMessage({ 
+          command: 'RedoMove', 
+          objectIds: action.objects.map(o => o.id),
+          deltaX: action.deltaX,
+          deltaY: action.deltaY
+        });
       }
     }
     
-    // Add batch back to undo stack
-    undoStack.push(batch);
+    // Add back to undo stack
+    undoStack.push(action);
     if (undoStack.length > MAX_UNDO_HISTORY) {
       undoStack.shift();
     }
@@ -435,6 +519,77 @@ async function init() {
       ui.clearHighlight();
       input.setHasSelection(false);
       input.setHasComponentSelection(false);
+    }
+  });
+
+  // Set up move operation callbacks
+  input.setGetSelectedObjects(() => selectedObjects);
+  
+  input.setOnMoveStart(() => {
+    if (selectedObjects.length === 0) return;
+    console.log(`[Move] Starting move for ${selectedObjects.length} objects`);
+    scene.startMove(selectedObjects);
+  });
+  
+  input.setOnMoveUpdate((deltaX: number, deltaY: number) => {
+    scene.updateMove(deltaX, deltaY);
+  });
+  
+  input.setOnMoveCancel(() => {
+    scene.cancelMove();
+    console.log('[Move] Move cancelled');
+  });
+  
+  input.setOnMoveEnd((deltaX: number, deltaY: number) => {
+    const result = scene.endMove();
+    if (Math.abs(result.deltaX) < 0.0001 && Math.abs(result.deltaY) < 0.0001) {
+      console.log('[Move] Move ended with no significant movement, skipping backend update');
+      return;
+    }
+    
+    console.log(`[Move] Move ended, sending to backend: delta=(${result.deltaX}, ${result.deltaY})`);
+    const objectIds = selectedObjects.map(obj => obj.id);
+    
+    // Update the bounds of selected objects to reflect the new positions
+    // This is critical so subsequent clicks/moves work correctly
+    for (const obj of selectedObjects) {
+      obj.bounds[0] += result.deltaX; // min_x
+      obj.bounds[1] += result.deltaY; // min_y
+      obj.bounds[2] += result.deltaX; // max_x
+      obj.bounds[3] += result.deltaY; // max_y
+    }
+    
+    // Add to undo stack (use a deep copy with original bounds for proper undo)
+    const objectsForUndo = selectedObjects.map(obj => ({
+      ...obj,
+      bounds: [
+        obj.bounds[0] - result.deltaX,
+        obj.bounds[1] - result.deltaY,
+        obj.bounds[2] - result.deltaX,
+        obj.bounds[3] - result.deltaY
+      ] as [number, number, number, number]
+    }));
+    undoStack.push({ 
+      type: 'move', 
+      objects: objectsForUndo, 
+      deltaX: result.deltaX, 
+      deltaY: result.deltaY 
+    });
+    if (undoStack.length > MAX_UNDO_HISTORY) {
+      undoStack.shift();
+    }
+    // Clear redo stack when new action is performed
+    redoStack.length = 0;
+    
+    if (isVSCodeWebview && vscode) {
+      vscode.postMessage({ 
+        command: 'MoveObjects', 
+        objectIds, 
+        deltaX: result.deltaX, 
+        deltaY: result.deltaY 
+      });
+    } else {
+      console.log(`[Dev] Move objects: ${objectIds.join(', ')} by (${result.deltaX}, ${result.deltaY})`);
     }
   });
 
@@ -654,8 +809,20 @@ async function init() {
         } else {
           // Point select: select and highlight only the topmost object
           const selected = visibleRanges[0];
-          selectedObjects = [selected];
-          scene.highlightObject(selected);
+          
+          // Check if the clicked object was already selected
+          // If so, enter move mode immediately (click-to-pick-up)
+          const wasAlreadySelected = selectedObjects.some(obj => obj.id === selected.id);
+          if (wasAlreadySelected && selectedObjects.length > 0) {
+            // User clicked on an already-selected object - start move mode now
+            console.log(`[Select] Clicked on already-selected object ${selected.id}, starting move mode`);
+            input.startMoveMode(lastSelectX, lastSelectY);
+            // Keep the current selection, don't change it
+          } else {
+            // New selection
+            selectedObjects = [selected];
+            scene.highlightObject(selected);
+          }
         }
         
         // Clear stored net highlight results since this is a new selection

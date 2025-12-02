@@ -35,6 +35,10 @@ export class Scene {
   // Global via visibility toggle
   public viasVisible = true;
 
+  // Move operation state
+  public movingObjects: ObjectRange[] = [];
+  private originalPositions: Map<string, { x: number; y: number }> = new Map(); // key: "layerId_instanceIndex_shapeIndex"
+
   // DRC overlay state
   public drcRegions: DrcRegion[] = [];
   public drcEnabled = false;
@@ -51,7 +55,12 @@ export class Scene {
   } | null = null;
 
   // Shared uniform data buffer for temp use
-  private uniformData = new Float32Array(16);
+  // Layout: color(4) + m0(4) + m1(4) + m2(4) + moveOffset(4) = 20 floats
+  private uniformData = new Float32Array(20);
+  
+  // Global move offset applied via shader uniform
+  private globalMoveOffsetX = 0;
+  private globalMoveOffsetY = 0;
 
   private BASE_PALETTE: LayerColor[] = [
     [0.95, 0.95, 0.95, 1],
@@ -865,6 +874,351 @@ export class Scene {
             );
         }
     }
+  }
+
+  // ==================== Move Operation Methods ====================
+
+  /**
+   * Get current move offset for shader uniform
+   */
+  public getMoveOffset(): { x: number; y: number } {
+    return { x: this.globalMoveOffsetX, y: this.globalMoveOffsetY };
+  }
+
+  /**
+   * Start a move operation - marks objects as "moving" so shader applies offset
+   */
+  public startMove(objects: ObjectRange[]) {
+    this.movingObjects = [...objects];
+    this.globalMoveOffsetX = 0;
+    this.globalMoveOffsetY = 0;
+    this.originalPositions.clear();
+    
+    // Mark all objects as "moving" via visibility flags
+    for (const range of objects) {
+      const shaderKey = this.getShaderKey(range.obj_type);
+      if (!shaderKey) continue;
+      
+      const renderKey = `${range.layer_id}_${shaderKey}`;
+      const renderData = this.layerRenderData.get(renderKey);
+      if (!renderData) continue;
+      
+      if (shaderKey === 'batch' || shaderKey === 'batch_colored') {
+        // Batch geometry: set visibility to 3.0 (moving state)
+        const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVisibilityBuffers.length);
+        for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+          const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+          const gpuBuffer = renderData.lodVisibilityBuffers[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const [start, count] = range.vertex_ranges[lodIndex] || [0, 0];
+          if (count === 0) continue;
+          
+          // Set visibility to 3.0 for moving
+          for (let i = start; i < start + count && i < cpuBuffer.length; i++) {
+            cpuBuffer[i] = 3.0;
+          }
+          
+          // Write to GPU
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            start * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + start * 4,
+            count * 4
+          );
+        }
+      } else if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced geometry: set moving bit (bit 2 = 4)
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3);
+        const shapeIdx = range.shape_index ?? 0;
+        
+        // Store original position for instanced objects (needed for final apply)
+        if (shapeIdx < numShapes) {
+          const cpuBuffer = renderData.cpuInstanceBuffers[shapeIdx];
+          if (cpuBuffer) {
+            const offset = range.instance_index * 3;
+            if (offset + 2 < cpuBuffer.length) {
+              const key = `${range.layer_id}_${range.instance_index}_${shapeIdx}`;
+              this.originalPositions.set(key, {
+                x: cpuBuffer[offset],
+                y: cpuBuffer[offset + 1]
+              });
+            }
+          }
+        }
+        
+        // Set moving bit on all LODs
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          if (lodIndex >= totalLODs) continue;
+          
+          const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const idx = range.instance_index;
+          const offset = idx * 3 + 2; // packed data is at offset+2
+          if (offset >= cpuBuffer.length) continue;
+          
+          // Add moving bit (4) to packed value
+          const view = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+          const packed = view.getUint32(offset * 4, true);
+          view.setUint32(offset * 4, packed | 4, true);
+          
+          // Write just the packed value to GPU
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            offset * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + offset * 4,
+            4
+          );
+        }
+      }
+    }
+    
+    console.log(`[Scene] Started move operation for ${objects.length} objects (using shader offset)`);
+  }
+
+  /**
+   * Update move offset - shader applies this to all objects marked as "moving"
+   */
+  public updateMove(deltaX: number, deltaY: number) {
+    this.globalMoveOffsetX = deltaX;
+    this.globalMoveOffsetY = deltaY;
+    this.state.needsDraw = true;
+  }
+
+  /**
+   * Finalize move operation - apply final positions to instanced objects, clear moving flags
+   */
+  public endMove(): { deltaX: number; deltaY: number } {
+    const result = { deltaX: this.globalMoveOffsetX, deltaY: this.globalMoveOffsetY };
+    
+    console.log(`[Scene] Ending move operation, delta: (${result.deltaX}, ${result.deltaY})`);
+    
+    // Apply final positions and clear moving flags
+    for (const range of this.movingObjects) {
+      const shaderKey = this.getShaderKey(range.obj_type);
+      if (!shaderKey) continue;
+      
+      const renderKey = `${range.layer_id}_${shaderKey}`;
+      const renderData = this.layerRenderData.get(renderKey);
+      if (!renderData) continue;
+      
+      if (shaderKey === 'batch' || shaderKey === 'batch_colored') {
+        // Batch geometry: restore visibility to 2.0 (highlighted, not moving)
+        const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVisibilityBuffers.length);
+        for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+          const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+          const gpuBuffer = renderData.lodVisibilityBuffers[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const [start, count] = range.vertex_ranges[lodIndex] || [0, 0];
+          if (count === 0) continue;
+          
+          // Set visibility back to 2.0 (highlighted)
+          for (let i = start; i < start + count && i < cpuBuffer.length; i++) {
+            cpuBuffer[i] = 2.0;
+          }
+          
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            start * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + start * 4,
+            count * 4
+          );
+        }
+      } else if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced geometry: apply final position and clear moving bit
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3);
+        const shapeIdx = range.shape_index ?? 0;
+        
+        const origKey = `${range.layer_id}_${range.instance_index}_${shapeIdx}`;
+        const origPos = this.originalPositions.get(origKey);
+        
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          if (lodIndex >= totalLODs) continue;
+          
+          const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const idx = range.instance_index;
+          const offset = idx * 3;
+          if (offset + 2 >= cpuBuffer.length) continue;
+          
+          // Apply final position if we have original
+          if (origPos) {
+            cpuBuffer[offset] = origPos.x + result.deltaX;
+            cpuBuffer[offset + 1] = origPos.y + result.deltaY;
+          }
+          
+          // Clear moving bit (4), keep visible and highlighted bits
+          const view = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+          const packed = view.getUint32((offset + 2) * 4, true);
+          view.setUint32((offset + 2) * 4, packed & ~4, true);
+          
+          // Write position and packed value to GPU
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            offset * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + offset * 4,
+            12 // 3 floats
+          );
+        }
+      }
+    }
+    
+    // Clean up state
+    this.movingObjects = [];
+    this.globalMoveOffsetX = 0;
+    this.globalMoveOffsetY = 0;
+    this.originalPositions.clear();
+    this.state.needsDraw = true;
+    
+    return result;
+  }
+
+  /**
+   * Cancel move operation - clear moving flags without applying positions
+   */
+  public cancelMove() {
+    // Clear moving flags on all objects
+    for (const range of this.movingObjects) {
+      const shaderKey = this.getShaderKey(range.obj_type);
+      if (!shaderKey) continue;
+      
+      const renderKey = `${range.layer_id}_${shaderKey}`;
+      const renderData = this.layerRenderData.get(renderKey);
+      if (!renderData) continue;
+      
+      if (shaderKey === 'batch' || shaderKey === 'batch_colored') {
+        // Batch geometry: restore visibility to 2.0 (highlighted)
+        const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVisibilityBuffers.length);
+        for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+          const cpuBuffer = renderData.cpuVisibilityBuffers[lodIndex];
+          const gpuBuffer = renderData.lodVisibilityBuffers[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const [start, count] = range.vertex_ranges[lodIndex] || [0, 0];
+          if (count === 0) continue;
+          
+          for (let i = start; i < start + count && i < cpuBuffer.length; i++) {
+            cpuBuffer[i] = 2.0;
+          }
+          
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            start * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + start * 4,
+            count * 4
+          );
+        }
+      } else if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced geometry: clear moving bit
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3);
+        const shapeIdx = range.shape_index ?? 0;
+        
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          if (lodIndex >= totalLODs) continue;
+          
+          const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const idx = range.instance_index;
+          const offset = idx * 3 + 2;
+          if (offset >= cpuBuffer.length) continue;
+          
+          // Clear moving bit
+          const view = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+          const packed = view.getUint32(offset * 4, true);
+          view.setUint32(offset * 4, packed & ~4, true);
+          
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            offset * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + offset * 4,
+            4
+          );
+        }
+      }
+    }
+    
+    // Clean up state
+    this.movingObjects = [];
+    this.globalMoveOffsetX = 0;
+    this.globalMoveOffsetY = 0;
+    this.originalPositions.clear();
+    
+    this.state.needsDraw = true;
+    console.log('[Scene] Move operation cancelled');
+  }
+
+  /**
+   * Directly apply a delta offset to objects (for undo/redo, not preview)
+   * This modifies GPU buffers immediately without the preview shader approach
+   */
+  public applyMoveOffset(objects: ObjectRange[], deltaX: number, deltaY: number) {
+    console.log(`[Scene] Applying move offset (${deltaX}, ${deltaY}) to ${objects.length} objects`);
+    
+    for (const range of objects) {
+      const shaderKey = this.getShaderKey(range.obj_type);
+      if (!shaderKey) continue;
+      
+      const renderKey = `${range.layer_id}_${shaderKey}`;
+      const renderData = this.layerRenderData.get(renderKey);
+      if (!renderData) continue;
+      
+      // For instanced geometry, update positions directly
+      if (range.instance_index !== undefined && range.instance_index !== null) {
+        const totalLODs = renderData.cpuInstanceBuffers.length;
+        const numShapes = Math.floor(totalLODs / 3);
+        const shapeIdx = range.shape_index ?? 0;
+        
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          if (lodIndex >= totalLODs) continue;
+          
+          const cpuBuffer = renderData.cpuInstanceBuffers[lodIndex];
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (!cpuBuffer || !gpuBuffer) continue;
+          
+          const idx = range.instance_index;
+          const offset = idx * 3;
+          if (offset + 1 >= cpuBuffer.length) continue;
+          
+          // Apply delta directly to current position
+          cpuBuffer[offset] += deltaX;
+          cpuBuffer[offset + 1] += deltaY;
+          
+          // Write position to GPU
+          this.device?.queue.writeBuffer(
+            gpuBuffer,
+            offset * 4,
+            cpuBuffer.buffer,
+            cpuBuffer.byteOffset + offset * 4,
+            8 // 2 floats (x, y)
+          );
+        }
+      }
+      // Note: For batch geometry, position changes require backend to regenerate tessellation
+      // The offset is applied via the uniform in the shader during preview,
+      // but for permanent changes, the backend updates vertex data
+    }
+    
+    this.state.needsDraw = true;
   }
 
   // ==================== DRC Overlay Methods ====================

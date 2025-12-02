@@ -224,6 +224,56 @@ export function activate(context: vscode.ExtensionContext) {
                             params: { object: message.object } 
                         }, panel);
                         break;
+                    case 'MoveObjects':
+                        // Forward move objects command to LSP server
+                        console.log('[Extension] Received MoveObjects command:', message.objectIds?.length, 'objects, delta:', message.deltaX, message.deltaY);
+                        const moveResponse = await sendToLspServer({ 
+                            method: 'MoveObjects', 
+                            params: { 
+                                object_ids: message.objectIds,
+                                delta_x: message.deltaX,
+                                delta_y: message.deltaY
+                            } 
+                        }, panel);
+                        
+                        if (moveResponse?.result) {
+                            console.log('[Extension] MoveObjects success:', moveResponse.result.moved_count, 'objects moved');
+                            panel.webview.postMessage({
+                                command: 'moveComplete',
+                                movedCount: moveResponse.result.moved_count
+                            });
+                        } else if (moveResponse?.error) {
+                            console.error('[Extension] MoveObjects error:', moveResponse.error);
+                            panel.webview.postMessage({
+                                command: 'moveError',
+                                error: moveResponse.error.message
+                            });
+                        }
+                        break;
+                    case 'UndoMove':
+                        // Forward undo move command to LSP server
+                        console.log('[Extension] Received UndoMove command');
+                        await sendToLspServer({ 
+                            method: 'UndoMove', 
+                            params: { 
+                                object_ids: message.objectIds,
+                                delta_x: message.deltaX,
+                                delta_y: message.deltaY
+                            } 
+                        }, panel);
+                        break;
+                    case 'RedoMove':
+                        // Forward redo move command to LSP server
+                        console.log('[Extension] Received RedoMove command');
+                        await sendToLspServer({ 
+                            method: 'RedoMove', 
+                            params: { 
+                                object_ids: message.objectIds,
+                                delta_x: message.deltaX,
+                                delta_y: message.deltaY
+                            } 
+                        }, panel);
+                        break;
                     case 'BoxSelect':
                         // Forward box select command to LSP server
                         const boxSelectResponse = await sendToLspServer({ 
@@ -240,6 +290,25 @@ export function activate(context: vscode.ExtensionContext) {
                             panel.webview.postMessage({
                                 command: 'selectionResult',
                                 ranges: boxSelectResponse.result
+                            });
+                        }
+                        break;
+                    case 'CheckPointHitsSelection':
+                        // Check if a point hits any of the provided object IDs
+                        const checkHitResponse = await sendToLspServer({ 
+                            method: 'CheckPointHitsSelection', 
+                            params: { 
+                                x: message.x, 
+                                y: message.y, 
+                                object_ids: message.objectIds 
+                            } 
+                        }, panel);
+                        
+                        if (checkHitResponse?.result !== undefined) {
+                            panel.webview.postMessage({
+                                command: 'checkPointHitsSelectionResult',
+                                requestId: message.requestId,
+                                hits: checkHitResponse.result
                             });
                         }
                         break;

@@ -15,6 +15,13 @@ pub struct ModifiedRegion {
     pub object_id: u64,
 }
 
+/// Represents a move operation for an object
+#[derive(Clone, Debug)]
+pub struct ObjectMove {
+    pub delta_x: f32,
+    pub delta_y: f32,
+}
+
 /// In-memory state: DOM, layers, and layer colors
 pub struct ServerState {
     pub xml_file_path: Option<String>,
@@ -25,6 +32,7 @@ pub struct ServerState {
     pub spatial_index: Option<RTree<SelectableObject>>,
     pub padstack_defs: IndexMap<String, PadStackDef>,
     pub deleted_objects: HashMap<u64, ObjectRange>,
+    pub moved_objects: HashMap<u64, ObjectMove>,  // Track moved objects by ID
     pub hidden_layers: HashSet<String>,
     pub all_object_ranges: Vec<ObjectRange>,
     pub design_rules: DesignRules,
@@ -44,6 +52,7 @@ impl ServerState {
             spatial_index: None,
             padstack_defs: IndexMap::new(),
             deleted_objects: HashMap::new(),
+            moved_objects: HashMap::new(),
             hidden_layers: HashSet::new(),
             all_object_ranges: Vec::new(),
             design_rules: DesignRules::default(),

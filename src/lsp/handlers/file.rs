@@ -3,7 +3,7 @@
 use crate::lsp::protocol::{Response, error_codes};
 use crate::lsp::state::ServerState;
 use crate::lsp::util::get_process_memory_bytes;
-use crate::lsp::xml_helpers::{parse_dictionary_colors, update_dictionary_colors, remove_deleted_objects_from_xml};
+use crate::lsp::xml_helpers::{parse_dictionary_colors, update_dictionary_colors, remove_deleted_objects_from_xml, apply_moved_objects_to_xml};
 use crate::parse_xml::parse_xml_file;
 use crate::draw::geometry::SelectableObject;
 use crate::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
@@ -107,6 +107,7 @@ pub fn handle_load(
     state.drc_violations.clear();
     state.drc_regions.clear();
     state.deleted_objects.clear();
+    state.moved_objects.clear();
     state.modified_regions.clear();
 
     eprintln!("[LSP Server] File loaded successfully (xml_root dropped to save memory)");
@@ -153,9 +154,14 @@ pub fn handle_save(
 
     eprintln!("[LSP Server] Saving file to: {}", output_path);
     eprintln!("[LSP Server] Deleted objects count: {}", state.deleted_objects.len());
+    eprintln!("[LSP Server] Moved objects count: {}", state.moved_objects.len());
     
     for (obj_id, range) in &state.deleted_objects {
         eprintln!("[LSP Server]   Deleted: id={}, layer={}, type={}", obj_id, range.layer_id, range.obj_type);
+    }
+    
+    for (obj_id, mov) in &state.moved_objects {
+        eprintln!("[LSP Server]   Moved: id={}, delta=({:.3}, {:.3})", obj_id, mov.delta_x, mov.delta_y);
     }
 
     // Re-parse the original XML file
@@ -175,6 +181,13 @@ pub fn handle_save(
         eprintln!("[LSP Server] Updated {} modified colors", state.modified_colors.len());
     }
     
+    // Apply moved objects
+    if !state.moved_objects.is_empty() {
+        let moved_count = apply_moved_objects_to_xml(
+            &mut root, &state.moved_objects, &state.all_object_ranges, &state.padstack_defs);
+        eprintln!("[LSP Server] Applied moves to {} objects in XML", moved_count);
+    }
+    
     // Remove deleted objects
     if !state.deleted_objects.is_empty() {
         let removed_count = remove_deleted_objects_from_xml(
@@ -186,11 +199,13 @@ pub fn handle_save(
     match xml_node_to_file(&root, &output_path) {
         Ok(_) => {
             let deleted_count = state.deleted_objects.len();
+            let moved_count = state.moved_objects.len();
             eprintln!("[LSP Server] File saved successfully");
             Response::success(id, serde_json::json!({
                 "status": "ok",
                 "file_path": output_path,
-                "deleted_objects_count": deleted_count
+                "deleted_objects_count": deleted_count,
+                "moved_objects_count": moved_count
             }))
         }
         Err(e) => {
@@ -213,6 +228,7 @@ pub fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> R
     state.spatial_index = None;
     state.padstack_defs.clear();
     state.deleted_objects.clear();
+    state.moved_objects.clear();
     state.hidden_layers.clear();
     state.all_object_ranges.clear();
     state.drc_violations.clear();
@@ -225,6 +241,7 @@ pub fn handle_close(state: &mut ServerState, id: Option<serde_json::Value>) -> R
     state.modified_colors.shrink_to_fit();
     state.padstack_defs.shrink_to_fit();
     state.deleted_objects.shrink_to_fit();
+    state.moved_objects.shrink_to_fit();
     state.all_object_ranges.shrink_to_fit();
     state.drc_violations.shrink_to_fit();
     state.drc_regions.shrink_to_fit();

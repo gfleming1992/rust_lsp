@@ -112,6 +112,7 @@ fn dispatch_request(
         // Selection
         "Select" => serde_json::to_string(&handlers::handle_select(state, request.id, request.params)).unwrap(),
         "BoxSelect" => serde_json::to_string(&handlers::handle_box_select(state, request.id, request.params)).unwrap(),
+        "CheckPointHitsSelection" => serde_json::to_string(&handlers::handle_check_point_hits_selection(state, request.id, request.params)).unwrap(),
         
         // Highlighting
         "HighlightSelectedNets" => serde_json::to_string(&handlers::handle_highlight_selected_nets(state, request.id, request.params)).unwrap(),
@@ -121,6 +122,9 @@ fn dispatch_request(
         "Delete" => serde_json::to_string(&handlers::handle_delete(state, request.id, request.params)).unwrap(),
         "Undo" => serde_json::to_string(&handlers::handle_undo(state, request.id, request.params)).unwrap(),
         "Redo" => serde_json::to_string(&handlers::handle_redo(state, request.id, request.params)).unwrap(),
+        "MoveObjects" => serde_json::to_string(&handlers::handle_move_objects(state, request.id, request.params)).unwrap(),
+        "UndoMove" => serde_json::to_string(&handlers::handle_undo_move(state, request.id, request.params)).unwrap(),
+        "RedoMove" => serde_json::to_string(&handlers::handle_redo_move(state, request.id, request.params)).unwrap(),
         
         // DRC operations
         "RunDRC" => serde_json::to_string(&handlers::handle_run_drc(state, request.id, request.params)).unwrap(),
