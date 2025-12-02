@@ -31,11 +31,9 @@ VS Code extension for viewing IPC-2581 PCB files. **Rust LSP server** (XML parsi
 
 ## Build Commands
 
-> **CRITICAL**: Always use `npm run` commands—they copy `lsp_server.exe` to `bin/` where the extension loads it.
-
 ```bash
-npm run build:all      # Full rebuild (clean + rust + extension + webview)
-npm run build:rust     # Rust only (with copy to bin/)
+npm run build:all      # Full rebuild (rust + extension + webview)
+npm run build:rust     # Rust only
 npm run build:webview  # WebView only
 npm run dev            # Dev server with hot reload
 ```

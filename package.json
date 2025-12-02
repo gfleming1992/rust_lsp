@@ -38,9 +38,8 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:rust && npm run build:extension && npm run build:webview",
-    "build:all": "npm run build:rust && npm run copy:rust && npm run build:extension && npm run build:webview",
+    "build:all": "npm run build:rust && npm run build:extension && npm run build:webview",
     "build:rust": "cargo build --release --bin lsp_server",
-    "copy:rust": "mkdir -p bin && cp target/release/lsp_server bin/lsp_server",
     "build:extension": "tsc -p tsconfig.extension.json && mkdir -p dist/assets && cp assets/webview.html dist/assets/",
     "build:webview": "node build-webview.mjs",
     "watch:extension": "tsc -watch -p tsconfig.extension.json",
