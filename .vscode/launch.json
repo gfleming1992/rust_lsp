@@ -6,7 +6,7 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "${workspaceFolder}/test-workspace",
+        "/Users/gfleming/Documents/test_project",
         "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": [
@@ -25,7 +25,7 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "${workspaceFolder}/test-workspace",
+        "/Users/gfleming/Documents/test_project",
         "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": [
