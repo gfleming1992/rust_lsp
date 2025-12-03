@@ -5,17 +5,15 @@ import instancedRotShaderCode from "./shaders/instanced_rot.wgsl?raw";
 import drcOverlayShaderCode from "./shaders/drc_overlay.wgsl?raw";
 import { Scene } from "./Scene";
 import { LayerColor, GPUBufferInfo } from "./types";
+import { createPipelines, Pipelines, DrcResources, getContrastingStripeColor, selectLODForZoom } from "./renderer/pipelines";
 
 export class Renderer {
   public canvas: HTMLCanvasElement;
   public device!: GPUDevice;
   public context!: GPUCanvasContext;
   
-  private pipelineNoAlpha!: GPURenderPipeline;
-  private pipelineWithAlpha!: GPURenderPipeline;
-  private pipelineInstanced!: GPURenderPipeline;
-  private pipelineInstancedRot!: GPURenderPipeline;
-  private pipelineDrcOverlay!: GPURenderPipeline;
+  private pipelines!: Pipelines;
+  private drcResources!: DrcResources;
   
   private canvasFormat!: GPUTextureFormat;
   private configuredWidth = 0;
@@ -24,11 +22,8 @@ export class Renderer {
   // Uniform data layout: color(4) + m0(4) + m1(4) + m2(4) + moveOffset(4) = 20 floats
   private uniformData = new Float32Array(20);
   
-  // DRC overlay bind group and uniform buffer
-  // Uniforms: v0(vec4) + v1(vec4) + v2(vec4) + stripeColor(vec4) = 64 bytes
-  private drcUniformBuffer!: GPUBuffer;
-  private drcUniformData = new Float32Array(16); // 4 vec4s
-  private drcBindGroup!: GPUBindGroup;
+  // DRC uniforms: v0(vec4) + v1(vec4) + v2(vec4) + stripeColor(vec4) = 16 floats
+  private drcUniformData = new Float32Array(16);
   
   public lastVertexCount = 0;
   public lastIndexCount = 0;
@@ -74,14 +69,23 @@ export class Renderer {
     this.context = ctx;
     this.canvasFormat = gpu.getPreferredCanvasFormat();
 
-    this.createPipelines();
+    // Create all pipelines
+    const { pipelines, drcResources } = createPipelines(this.device, this.canvasFormat, {
+      basic: basicShaderCode,
+      basicNoAlpha: basicNoAlphaShaderCode,
+      instanced: instancedShaderCode,
+      instancedRot: instancedRotShaderCode,
+      drcOverlay: drcOverlayShaderCode
+    });
+    this.pipelines = pipelines;
+    this.drcResources = drcResources;
     
     // Pass device and pipelines to Scene so it can load data
     this.scene.setDevice(this.device, {
-      noAlpha: this.pipelineNoAlpha,
-      withAlpha: this.pipelineWithAlpha,
-      instanced: this.pipelineInstanced,
-      instancedRot: this.pipelineInstancedRot
+      noAlpha: pipelines.noAlpha,
+      withAlpha: pipelines.withAlpha,
+      instanced: pipelines.instanced,
+      instancedRot: pipelines.instancedRot
     });
 
     const resizeObserver = new ResizeObserver(() => {
@@ -92,183 +96,6 @@ export class Renderer {
     window.addEventListener("resize", () => {
       this.configureSurface();
       this.scene.state.needsDraw = true;
-    });
-  }
-
-  private createPipelines() {
-    const shaderModuleWithAlpha = this.device.createShaderModule({ code: basicShaderCode });
-    const shaderModuleNoAlpha = this.device.createShaderModule({ code: basicNoAlphaShaderCode });
-    const shaderModuleInstanced = this.device.createShaderModule({ code: instancedShaderCode });
-    const shaderModuleInstancedRot = this.device.createShaderModule({ code: instancedRotShaderCode });
-
-    this.pipelineWithAlpha = this.device.createRenderPipeline({
-      layout: "auto",
-      vertex: {
-        module: shaderModuleWithAlpha,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-          },
-          {
-            arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
-          },
-          { // Visibility buffer
-            arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 2, offset: 0, format: "float32" }]
-          }
-        ]
-      },
-      fragment: {
-        module: shaderModuleWithAlpha,
-        entryPoint: "fs_main",
-        targets: [{
-          format: this.canvasFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          }
-        }]
-      },
-      primitive: { topology: "triangle-list" }
-    });
-
-    this.pipelineNoAlpha = this.device.createRenderPipeline({
-      layout: "auto",
-      vertex: {
-        module: shaderModuleNoAlpha,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-          },
-          { // Visibility buffer
-            arrayStride: 1 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 1, offset: 0, format: "float32" }]
-          }
-        ]
-      },
-      fragment: {
-        module: shaderModuleNoAlpha,
-        entryPoint: "fs_main",
-        targets: [{
-          format: this.canvasFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          }
-        }]
-      },
-      primitive: { topology: "triangle-list" }
-    });
-
-    this.pipelineInstanced = this.device.createRenderPipeline({
-      layout: "auto",
-      vertex: {
-        module: shaderModuleInstanced,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-          },
-          {
-            arrayStride: 3 * Float32Array.BYTES_PER_ELEMENT, // Changed to 3 floats (x, y, packed)
-            stepMode: "instance",
-            attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }]
-          }
-        ]
-      },
-      fragment: {
-        module: shaderModuleInstanced,
-        entryPoint: "fs_main",
-        targets: [{
-          format: this.canvasFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          }
-        }]
-      },
-      primitive: { topology: "triangle-list" }
-    });
-
-    this.pipelineInstancedRot = this.device.createRenderPipeline({
-      layout: "auto",
-      vertex: {
-        module: shaderModuleInstancedRot,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-          },
-          {
-            arrayStride: 3 * Float32Array.BYTES_PER_ELEMENT,
-            stepMode: "instance",
-            attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }]
-          }
-        ]
-      },
-      fragment: {
-        module: shaderModuleInstancedRot,
-        entryPoint: "fs_main",
-        targets: [{
-          format: this.canvasFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          }
-        }]
-      },
-      primitive: { topology: "triangle-list" }
-    });
-
-    // DRC overlay pipeline with stripe pattern
-    const shaderModuleDrcOverlay = this.device.createShaderModule({ code: drcOverlayShaderCode });
-    
-    this.pipelineDrcOverlay = this.device.createRenderPipeline({
-      layout: "auto",
-      vertex: {
-        module: shaderModuleDrcOverlay,
-        entryPoint: "vs_main",
-        buffers: [
-          {
-            arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-          }
-        ]
-      },
-      fragment: {
-        module: shaderModuleDrcOverlay,
-        entryPoint: "fs_main",
-        targets: [{
-          format: this.canvasFormat,
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
-          }
-        }]
-      },
-      primitive: { topology: "triangle-list" }
-    });
-
-    // Create DRC uniform buffer and bind group
-    // 4 x vec4<f32> = 64 bytes (v0, v1, v2, stripeColor)
-    this.drcUniformBuffer = this.device.createBuffer({
-      size: 64,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    
-    this.drcBindGroup = this.device.createBindGroup({
-      layout: this.pipelineDrcOverlay.getBindGroupLayout(0),
-      entries: [{
-        binding: 0,
-        resource: { buffer: this.drcUniformBuffer }
-      }]
     });
   }
 
@@ -356,14 +183,6 @@ export class Renderer {
     this.uniformData[19] = 0;
   }
 
-  private selectLODForZoom(zoom: number): number {
-    if (zoom >= 10) return 0;
-    if (zoom >= 5) return 1;
-    if (zoom >= 2) return 2;
-    if (zoom >= 0.5) return 3;
-    return 4;
-  }
-
   public screenToWorld(cssX: number, cssY: number): { x: number; y: number } {
     const width = Math.max(1, this.canvas.width);
     const height = Math.max(1, this.canvas.height);
@@ -424,7 +243,7 @@ export class Renderer {
         (window as any).debugLogNextFrame = false;
     }
 
-    const currentLOD = this.selectLODForZoom(this.scene.state.zoom);
+    const currentLOD = selectLODForZoom(this.scene.state.zoom);
     
     if (this.debugLogNextFrame) {
         console.log(`[Render] Frame start. Zoom: ${this.scene.state.zoom}, LOD: ${currentLOD}`);
@@ -471,8 +290,8 @@ export class Renderer {
           const lodEndIdx = lodStartIdx + numShapes;
           
           const pipeline = data.shaderType === 'instanced_rot' 
-             ? this.pipelineInstancedRot 
-             : this.pipelineInstanced;
+             ? this.pipelines.instancedRot 
+             : this.pipelines.instanced;
           
           pass.setPipeline(pipeline);
           
@@ -519,12 +338,9 @@ export class Renderer {
             console.log(`[Render] Drawing batch ${data.shaderType} layer=${layerId} LOD=${actualLOD} verts=${count}`);
         }
 
-        let usePipeline: GPURenderPipeline;
-        if (data.shaderType === 'batch') {
-          usePipeline = this.pipelineNoAlpha;
-        } else {
-          usePipeline = this.pipelineWithAlpha;
-        }
+        const usePipeline = data.shaderType === 'batch' 
+          ? this.pipelines.noAlpha 
+          : this.pipelines.withAlpha;
         
         pass.setPipeline(usePipeline);
         pass.setVertexBuffer(0, vb);
@@ -594,7 +410,7 @@ export class Renderer {
         const lodStartIdx = effectiveLOD * numShapes;
         const lodEndIdx = lodStartIdx + numShapes;
         
-        pass.setPipeline(this.pipelineInstanced);
+        pass.setPipeline(this.pipelines.instanced);
         
         for (let idx = lodStartIdx; idx < lodEndIdx && idx < totalLODs; idx++) {
           const vb = data.lodBuffers[idx];
@@ -636,7 +452,7 @@ export class Renderer {
       if (currentRegion) {
         // Get layer color and compute contrasting stripe color
         const layerColor = this.scene.getLayerColor(currentRegion.layer_id);
-        stripeColor = this.getContrastingStripeColor(layerColor);
+        stripeColor = getContrastingStripeColor(layerColor);
         if (this.debugLogNextFrame) {
           console.log(`[DRC] Layer ${currentRegion.layer_id} color: ${layerColor}, stripe: ${stripeColor}`);
         }
@@ -650,10 +466,10 @@ export class Renderer {
       this.drcUniformData[14] = stripeColor[2];
       this.drcUniformData[15] = stripeColor[3];
       
-      this.device.queue.writeBuffer(this.drcUniformBuffer, 0, this.drcUniformData);
+      this.device.queue.writeBuffer(this.drcResources.uniformBuffer, 0, this.drcUniformData);
       
-      pass.setPipeline(this.pipelineDrcOverlay);
-      pass.setBindGroup(0, this.drcBindGroup);
+      pass.setPipeline(this.pipelines.drcOverlay);
+      pass.setBindGroup(0, this.drcResources.bindGroup);
       pass.setVertexBuffer(0, this.scene.drcVertexBuffer);
       pass.draw(this.scene.drcTriangleCount * 3);
       
@@ -744,51 +560,5 @@ export class Renderer {
     state.panX = panX;
     state.panY = panY;
     state.needsDraw = true;
-  }
-
-  /**
-   * Get a contrasting stripe color based on the layer color
-   * Avoids colors too similar to: the layer color, and the fixed gold via color (1.0, 0.84, 0.0)
-   */
-  private getContrastingStripeColor(layerColor: LayerColor): [number, number, number, number] {
-    const [r, g, b, _a] = layerColor;
-    
-    // Calculate perceived luminance
-    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-    
-    // Check if the layer is predominantly red
-    const isReddish = r > 0.5 && g < 0.4 && b < 0.4;
-    
-    // Check if the layer is predominantly blue (like copper layers)
-    const isBluish = b > 0.5 && r < 0.5 && g < 0.6;
-    
-    // Check if the layer is very dark
-    const isDark = luminance < 0.3;
-    
-    // Check if the layer is very bright
-    const isBright = luminance > 0.7;
-    
-    // Check if the layer is yellowish/gold (avoid conflict with via gold)
-    const isYellowish = r > 0.7 && g > 0.6 && b < 0.4;
-    
-    if (isReddish) {
-      // Use cyan (opposite of red) for red layers
-      return [0.0, 1.0, 1.0, 0.9];
-    } else if (isBluish) {
-      // For blue layers (common copper), use bright magenta/pink - avoids gold conflict
-      return [1.0, 0.2, 0.6, 0.9];
-    } else if (isYellowish) {
-      // For yellow/gold layers, use bright magenta
-      return [1.0, 0.0, 0.8, 0.9];
-    } else if (isDark) {
-      // Use bright magenta for dark layers - avoids gold conflict
-      return [1.0, 0.3, 0.7, 0.9];
-    } else if (isBright) {
-      // Use dark magenta for bright layers
-      return [0.8, 0.0, 0.4, 0.9];
-    } else {
-      // Default: bright red
-      return [1.0, 0.15, 0.15, 0.85];
-    }
   }
 }
