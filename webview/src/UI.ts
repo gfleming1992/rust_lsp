@@ -2,6 +2,9 @@ import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { LayerColor, DrcRegion } from "./types";
 import { DebugOverlay } from "./DebugOverlay";
+import { DrcPanel } from "./ui/DrcPanel";
+import { showColorPicker } from "./ui/ColorPicker";
+import { setupResizeHandle } from "./ui/resizeHandle";
 
 export class UI {
   private scene: Scene;
@@ -21,16 +24,8 @@ export class UI {
   private currentHighlightBounds: [number, number, number, number] | null = null;
   private onDelete: (() => void) | null = null;
 
-  // DRC UI elements
-  private drcPanel: HTMLDivElement | null = null;
-  private drcCountLabel: HTMLSpanElement | null = null;
-  private drcInfoLabel: HTMLDivElement | null = null;
-  private drcListContainer: HTMLDivElement | null = null;
-  private onRunDrc: (() => void) | null = null;
-  private onRunIncrementalDrc: (() => void) | null = null;
-  private onDrcNavigate: ((direction: 'prev' | 'next') => void) | null = null;
-  private onDrcSelect: ((index: number) => void) | null = null;
-  private onDrcClear: (() => void) | null = null;
+  // DRC Panel component
+  private drcPanelComponent: DrcPanel | null = null;
 
   constructor(scene: Scene, renderer: Renderer) {
     this.scene = scene;
@@ -119,10 +114,8 @@ export class UI {
 
     this.interceptConsoleLog(this.debugLogEl);
     this.setupStatsToggle();
-    this.createDrcPanel();  // Creates resize handle
-    this.setupLayerResize(); // Attach layer list resize behavior
-    this.setupDrcResize(); // Attach DRC list resize behavior
-    this.setupPanelWidthResize(); // Attach horizontal resize behavior
+    this.createDrcPanel();
+    this.setupResizeHandles();
   }
 
   private setupStatsToggle() {
@@ -132,134 +125,32 @@ export class UI {
 
     statsHeader.addEventListener('click', () => {
       const isExpanded = statsContent.classList.contains('expanded');
-      if (isExpanded) {
-        statsContent.classList.remove('expanded');
-        statsHeader.querySelector('.collapse-icon')!.textContent = '▶';
-      } else {
-        statsContent.classList.add('expanded');
-        statsHeader.querySelector('.collapse-icon')!.textContent = '▼';
-      }
+      statsContent.classList.toggle('expanded');
+      statsHeader.querySelector('.collapse-icon')!.textContent = isExpanded ? '▶' : '▼';
     });
   }
 
-  private setupLayerResize() {
-    const resizeHandle = document.getElementById('layer-resize-handle');
-    const layersEl = this.layersEl;
-    if (!resizeHandle || !layersEl) return;
-
-    // Find the scrollable layer list div (created in refreshLayerLegend)
-    let isDragging = false;
-    let startY = 0;
-    let startHeight = 400; // Default max-height
-
-    resizeHandle.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      isDragging = true;
-      startY = e.clientY;
-      
-      // Get current height from the inner scrollable div
-      const scrollDiv = layersEl.querySelector('div[style*="overflow-y"]') as HTMLDivElement;
-      if (scrollDiv) {
-        const currentMaxHeight = parseInt(scrollDiv.style.maxHeight) || 400;
-        startHeight = currentMaxHeight;
-      }
-
-      document.body.style.cursor = 'ns-resize';
-      document.body.style.userSelect = 'none';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-
-      const deltaY = e.clientY - startY;
-      const newHeight = Math.max(100, Math.min(800, startHeight + deltaY));
-
-      // Apply to the scrollable div inside layers
-      const scrollDiv = layersEl.querySelector('div[style*="overflow-y"]') as HTMLDivElement;
-      if (scrollDiv) {
-        scrollDiv.style.maxHeight = `${newHeight}px`;
-      }
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
-    });
-  }
-
-  private setupDrcResize() {
-    const resizeHandle = document.getElementById('drc-resize-handle');
-    const listContainer = document.getElementById('drcListContainer');
-    if (!resizeHandle || !listContainer) return;
-
-    let isDragging = false;
-    let startY = 0;
-    let startHeight = 200;
-
-    resizeHandle.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      isDragging = true;
-      startY = e.clientY;
-      startHeight = listContainer.offsetHeight || 200;
-
-      document.body.style.cursor = 'ns-resize';
-      document.body.style.userSelect = 'none';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-
-      const deltaY = e.clientY - startY;
-      const newHeight = Math.max(100, Math.min(600, startHeight + deltaY));
-      listContainer.style.maxHeight = `${newHeight}px`;
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
-    });
-  }
-
-  private setupPanelWidthResize() {
-    const resizeHandle = document.getElementById('panel-width-handle');
-    const contentPanel = document.getElementById('ui-top-left-content');
-    if (!resizeHandle || !contentPanel) return;
-
-    let isDragging = false;
-    let startX = 0;
-    let startWidth = 220;
-
-    resizeHandle.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      isDragging = true;
-      startX = e.clientX;
-      startWidth = contentPanel.offsetWidth;
-
-      document.body.style.cursor = 'ew-resize';
-      document.body.style.userSelect = 'none';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-
-      const deltaX = e.clientX - startX;
-      const newWidth = Math.max(180, Math.min(500, startWidth + deltaX));
-      contentPanel.style.width = `${newWidth}px`;
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
-    });
+  private setupResizeHandles() {
+    // Layer list vertical resize
+    setupResizeHandle(
+      'layer-resize-handle',
+      () => this.layersEl?.querySelector('div[style*="overflow-y"]') as HTMLElement | null,
+      'y', 100, 800
+    );
+    
+    // DRC list vertical resize
+    setupResizeHandle(
+      'drc-resize-handle',
+      () => document.getElementById('drcListContainer'),
+      'y', 100, 600
+    );
+    
+    // Panel width horizontal resize
+    setupResizeHandle(
+      'panel-width-handle',
+      () => document.getElementById('ui-top-left-content'),
+      'x', 180, 500, 'width'
+    );
   }
 
   public setOnDelete(callback: () => void) {
@@ -299,315 +190,55 @@ export class UI {
 
   private createDrcPanel() {
     if (!this.layersEl) return;
-
-    // Create resize handle between layers and DRC
-    const resizeHandle = document.createElement('div');
-    resizeHandle.id = 'layer-resize-handle';
-    resizeHandle.title = 'Drag to resize';
-    resizeHandle.style.cssText = 'height: 6px; background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px); cursor: ns-resize; margin: 8px 0;';
-    this.layersEl.parentElement?.insertBefore(resizeHandle, this.layersEl.nextSibling);
-
-    // Create DRC panel after resize handle
-    this.drcPanel = document.createElement('div');
-    this.drcPanel.className = 'drc-panel';
-    this.drcPanel.style.marginTop = '0';
-    this.drcPanel.style.paddingTop = '5px';
-    this.drcPanel.style.pointerEvents = 'auto';
-    this.drcPanel.innerHTML = `
-      <div id="drcHeader" style="display: flex; align-items: center; gap: 4px; margin-bottom: 5px; cursor: pointer; user-select: none; padding: 2px 0;">
-        <span id="drcCollapseIcon" style="color: #888; font-size: 10px; width: 12px; text-align: center;">▼</span>
-        <span style="font-weight: bold; color: #cca700;">⚠ DRC Violations</span>
-      </div>
-      <div id="drcContent">
-        <button id="runDrcBtn" style="width: 100%; background: #0e639c; color: #fff; border: none; padding: 6px; margin-bottom: 5px; cursor: pointer; border-radius: 2px;">Run DRC</button>
-        <div id="drcProgress" style="display: none; margin-bottom: 5px; font-size: 11px; color: #aaa;">
-          <span>⏳ Checking clearances...</span>
-        </div>
-        <div id="drcResultsContainer" style="display: none;">
-          <div id="drcSummaryHeader" style="padding: 6px 8px; background: #2a2a2a; border: 1px solid #444; border-bottom: none; border-radius: 2px 2px 0 0; font-size: 11px;">
-            <span id="drcCount" style="color: #cca700; font-weight: bold;">0 violations found</span>
-            <span style="color: #666; margin-left: 8px; font-size: 10px;">↑↓ to navigate</span>
-          </div>
-          <div id="drcListContainer" style="max-height: 200px; overflow-y: auto; background: #1a1a1a; border: 1px solid #444; border-bottom: none;" tabindex="0">
-            <div id="drcList" style=""></div>
-          </div>
-          <div id="drcDetailPanel" style="background: #2a2a2a; border: 1px solid #444; border-radius: 0 0 2px 2px; padding: 8px; font-size: 10px; display: none;">
-            <div id="drcDetailIndex" style="color: #888; margin-bottom: 4px;"></div>
-            <div id="drcDetailLayer" style="color: #ccc; margin-bottom: 2px;"></div>
-            <div id="drcDetailDistance" style="margin-bottom: 2px;">
-              Distance: <span id="drcDistanceValue" style="color: #cca700; font-weight: bold;"></span>
-              <span style="color: #666;">(req: <span id="drcRequiredValue"></span>)</span>
-            </div>
-            <div id="drcDetailNets" style="color: #888;"></div>
-            <div id="drcDetailTriangles" style="color: #666; margin-top: 2px;"></div>
-          </div>
-          <div style="display: flex; gap: 4px; margin-top: 5px;">
-            <button id="rerunFullDrcBtn" style="flex: 1; background: #0e639c; color: #fff; border: none; padding: 5px 8px; cursor: pointer; border-radius: 2px; font-size: 11px;">Run Full DRC</button>
-            <button id="rerunIncrementalDrcBtn" style="flex: 1; background: #3c3c3c; color: #ccc; border: 1px solid #5a5a5a; padding: 5px 8px; cursor: pointer; border-radius: 2px; font-size: 11px;">Run Incremental</button>
-          </div>
-        </div>
-      </div>
-    `;
-
-    resizeHandle.parentElement?.insertBefore(this.drcPanel, resizeHandle.nextSibling);
-
-    // Create bottom resize handle after DRC panel
-    const bottomResizeHandle = document.createElement('div');
-    bottomResizeHandle.id = 'drc-resize-handle';
-    bottomResizeHandle.title = 'Drag to resize DRC list';
-    bottomResizeHandle.style.cssText = 'height: 6px; background: linear-gradient(to bottom, transparent 0px, #3c3c3c 2px, #3c3c3c 4px, transparent 6px); cursor: ns-resize; margin: 8px 0;';
-    this.drcPanel.parentElement?.insertBefore(bottomResizeHandle, this.drcPanel.nextSibling);
-
-    // Wire up collapse/expand header
-    const drcHeader = this.drcPanel.querySelector('#drcHeader') as HTMLDivElement;
-    const drcContent = this.drcPanel.querySelector('#drcContent') as HTMLDivElement;
-    const collapseIcon = this.drcPanel.querySelector('#drcCollapseIcon') as HTMLSpanElement;
     
-    drcHeader.addEventListener('click', () => {
-      const isCollapsed = drcContent.style.display === 'none';
-      if (isCollapsed) {
-        drcContent.style.display = 'block';
-        collapseIcon.textContent = '▼';
-      } else {
-        drcContent.style.display = 'none';
-        collapseIcon.textContent = '▶';
-      }
-    });
-
-    // Hover effect on header
-    drcHeader.addEventListener('mouseenter', () => {
-      drcHeader.style.background = '#2a2a2a';
-    });
-    drcHeader.addEventListener('mouseleave', () => {
-      drcHeader.style.background = 'transparent';
-    });
-
-    // Wire up buttons
-    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
-    runBtn.addEventListener('click', () => {
-      if (this.onRunDrc) {
-        this.showDrcProgress();
-        this.onRunDrc();
-      }
-    });
-
-    const rerunFullBtn = this.drcPanel.querySelector('#rerunFullDrcBtn') as HTMLButtonElement;
-    rerunFullBtn.addEventListener('click', () => {
-      if (this.onRunDrc) {
-        this.showDrcProgress();
-        this.onRunDrc();
-      }
-    });
-
-    const rerunIncrementalBtn = this.drcPanel.querySelector('#rerunIncrementalDrcBtn') as HTMLButtonElement;
-    rerunIncrementalBtn.addEventListener('click', () => {
-      if (this.onRunIncrementalDrc) {
-        this.showDrcProgress();
-        this.onRunIncrementalDrc();
-      }
-    });
-
-    // Keyboard navigation on the list container
-    const listContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
-    listContainer.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (this.onDrcNavigate) this.onDrcNavigate('prev');
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (this.onDrcNavigate) this.onDrcNavigate('next');
-      }
-    });
-
-    this.drcCountLabel = this.drcPanel.querySelector('#drcCount') as HTMLSpanElement;
-    this.drcInfoLabel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
-    this.drcListContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
+    // Use the DrcPanel component
+    this.drcPanelComponent = new DrcPanel(this.layersEl);
+    this.drcPanelComponent.create();
   }
 
   public showDrcProgress() {
-    if (!this.drcPanel) return;
-    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
-    const progressDiv = this.drcPanel.querySelector('#drcProgress') as HTMLDivElement;
-    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
-    
-    runBtn.style.display = 'none';
-    progressDiv.style.display = 'block';
-    resultsContainer.style.display = 'none';
+    this.drcPanelComponent?.showProgress();
   }
 
   public hideDrcProgress() {
-    if (!this.drcPanel) return;
-    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
-    const progressDiv = this.drcPanel.querySelector('#drcProgress') as HTMLDivElement;
-    
-    runBtn.style.display = 'block';
-    progressDiv.style.display = 'none';
+    this.drcPanelComponent?.hideProgress();
   }
 
   public populateDrcList(regions: DrcRegion[]) {
-    if (!this.drcPanel) return;
-    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
-    if (!listDiv) return;
-
-    listDiv.innerHTML = '';
-    
-    regions.forEach((region, index) => {
-      const netA = region.net_a || 'unnamed';
-      const netB = region.net_b || 'unnamed';
-      const item = document.createElement('div');
-      item.className = 'drc-list-item';
-      item.dataset.index = String(index);
-      item.style.cssText = 'padding: 6px 8px; border-bottom: 1px solid #333; cursor: pointer; font-size: 10px; display: flex; justify-content: space-between; align-items: center;';
-      item.innerHTML = `
-        <div>
-          <span style="color: #888; margin-right: 6px;">#${index + 1}</span>
-          <span style="color: #aaa;">${region.layer_id.replace('LAYER:', '')}</span>
-        </div>
-        <span style="color: #cca700; font-weight: bold;">${region.min_distance_mm.toFixed(3)}mm</span>
-      `;
-      
-      item.addEventListener('click', () => {
-        if (this.onDrcSelect) {
-          this.onDrcSelect(index);
-        }
-      });
-      
-      listDiv.appendChild(item);
-    });
-
-    // Focus the list container for keyboard navigation
-    const listContainer = this.drcPanel.querySelector('#drcListContainer') as HTMLDivElement;
-    listContainer.focus();
-  }
-
-  private highlightDrcListItem(index: number) {
-    if (!this.drcPanel) return;
-    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
-    if (!listDiv) return;
-
-    // Remove previous selection
-    listDiv.querySelectorAll('.drc-list-item').forEach((item) => {
-      (item as HTMLDivElement).style.background = 'transparent';
-      (item as HTMLDivElement).style.borderLeft = 'none';
-    });
-
-    // Highlight selected item
-    const selectedItem = listDiv.querySelector(`[data-index="${index}"]`) as HTMLDivElement;
-    if (selectedItem) {
-      selectedItem.style.background = '#094771';
-      selectedItem.style.borderLeft = '3px solid #007acc';
-      
-      // Scroll into view if needed
-      selectedItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
+    this.drcPanelComponent?.populateList(regions);
   }
 
   /** Clear DRC highlight - deselect list item and hide detail panel */
   public clearDrcHighlight() {
-    if (!this.drcPanel) return;
-    
-    // Remove selection from all list items
-    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
-    if (listDiv) {
-      listDiv.querySelectorAll('.drc-list-item').forEach((item) => {
-        (item as HTMLDivElement).style.background = 'transparent';
-        (item as HTMLDivElement).style.borderLeft = 'none';
-      });
-    }
-    
-    // Hide detail panel
-    const detailPanel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
-    if (detailPanel) {
-      detailPanel.style.display = 'none';
-    }
-    
-    // Call the clear callback to disable overlay in scene
-    if (this.onDrcClear) {
-      this.onDrcClear();
-    }
+    this.drcPanelComponent?.clearHighlight();
   }
 
   public setOnRunDrc(callback: () => void) {
-    this.onRunDrc = callback;
+    this.drcPanelComponent?.setOnRunDrc(callback);
   }
 
   public setOnDrcNavigate(callback: (direction: 'prev' | 'next') => void) {
-    this.onDrcNavigate = callback;
+    this.drcPanelComponent?.setOnDrcNavigate(callback);
   }
 
   public setOnDrcSelect(callback: (index: number) => void) {
-    this.onDrcSelect = callback;
+    this.drcPanelComponent?.setOnDrcSelect(callback);
   }
 
   public setOnDrcClear(callback: () => void) {
-    this.onDrcClear = callback;
+    this.drcPanelComponent?.setOnDrcClear(callback);
   }
 
   public setOnIncrementalDrc(callback: () => void) {
-    this.onRunIncrementalDrc = callback;
+    this.drcPanelComponent?.setOnIncrementalDrc(callback);
   }
 
   public updateDrcPanel(regionCount: number, currentIndex: number, currentRegion: DrcRegion | null, showNav = true) {
-    if (!this.drcPanel) return;
-
-    this.hideDrcProgress();
-
-    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
-    const detailPanel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
-    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
-
-    if (regionCount > 0) {
-      runBtn.style.display = 'none';
-      resultsContainer.style.display = 'block';
-
-      if (this.drcCountLabel) {
-        this.drcCountLabel.textContent = `${regionCount} clearance violation${regionCount !== 1 ? 's' : ''} found`;
-      }
-
-      // Always show detail panel when we have a selection
-      if (currentRegion) {
-        detailPanel.style.display = 'block';
-        
-        const netA = currentRegion.net_a || 'unnamed';
-        const netB = currentRegion.net_b || 'unnamed';
-        
-        const indexEl = this.drcPanel.querySelector('#drcDetailIndex') as HTMLDivElement;
-        const layerEl = this.drcPanel.querySelector('#drcDetailLayer') as HTMLDivElement;
-        const distanceEl = this.drcPanel.querySelector('#drcDistanceValue') as HTMLSpanElement;
-        const requiredEl = this.drcPanel.querySelector('#drcRequiredValue') as HTMLSpanElement;
-        const netsEl = this.drcPanel.querySelector('#drcDetailNets') as HTMLDivElement;
-        const trianglesEl = this.drcPanel.querySelector('#drcDetailTriangles') as HTMLDivElement;
-        
-        if (indexEl) indexEl.textContent = `Violation ${currentIndex + 1} of ${regionCount}`;
-        if (layerEl) layerEl.textContent = `Layer: ${currentRegion.layer_id}`;
-        if (distanceEl) distanceEl.textContent = `${currentRegion.min_distance_mm.toFixed(3)}mm`;
-        if (requiredEl) requiredEl.textContent = `${currentRegion.clearance_mm.toFixed(3)}mm`;
-        if (netsEl) netsEl.textContent = `Nets: ${netA} ↔ ${netB}`;
-        if (trianglesEl) trianglesEl.textContent = `Triangles: ${currentRegion.triangle_count}`;
-        
-        // Highlight the selected item in the list
-        this.highlightDrcListItem(currentIndex);
-      } else {
-        detailPanel.style.display = 'none';
-      }
-    } else {
-      resultsContainer.style.display = 'none';
-      runBtn.style.display = 'block';
-    }
+    this.drcPanelComponent?.update(regionCount, currentIndex, currentRegion, showNav);
   }
 
   public resetDrcPanel() {
-    if (!this.drcPanel) return;
-
-    this.hideDrcProgress();
-
-    const resultsContainer = this.drcPanel.querySelector('#drcResultsContainer') as HTMLDivElement;
-    const runBtn = this.drcPanel.querySelector('#runDrcBtn') as HTMLButtonElement;
-    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
-    
-    resultsContainer.style.display = 'none';
-    runBtn.style.display = 'block';
-    if (listDiv) listDiv.innerHTML = '';
+    this.drcPanelComponent?.reset();
   }
 
   private interceptConsoleLog(target: HTMLDivElement | null) {
@@ -679,7 +310,7 @@ export class UI {
         const layerId = button.dataset.layerColor;
         if (!layerId) return;
         const current = this.scene.getLayerColor(layerId);
-        this.showColorPicker(layerId, current);
+        this.openColorPicker(layerId, current);
       });
     });
 
@@ -730,122 +361,20 @@ export class UI {
     `;
   }
 
-  private showColorPicker(layerId: string, currentColor: LayerColor) {
-    const existing = document.getElementById("colorPickerModal");
-    existing?.remove();
-
-    const modal = document.createElement("div");
-    modal.id = "colorPickerModal";
-    modal.style.cssText = "position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:10000;";
-
-    const picker = document.createElement("div");
-    picker.style.cssText = "background: #2b2b2b; padding:20px; border-radius:4px; box-shadow:0 4px 20px rgba(0,0,0,0.5); border: 1px solid #454545;";
-
-    const rgbString = (r: number, g: number, b: number) => `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
-
-    let html = `<div style="color: #fff; font:14px sans-serif; margin-bottom:12px;">Pick color for <strong>${layerId}</strong></div>`;
-    html += `<div style="display:grid; grid-template-columns:repeat(16, 24px); gap:2px; margin-bottom:12px;">`;
-
-    for (let i = 0; i < 16; i += 1) {
-      const grey = i / 15;
-      const rgb = rgbString(grey, grey, grey);
-      html += `<div class="color-cell" data-color="${grey},${grey},${grey}" style="width:24px; height:24px; background:${rgb}; cursor:pointer; border:1px solid #444;"></div>`;
-    }
-
-    for (let row = 0; row < 12; row += 1) {
-      for (let col = 0; col < 16; col += 1) {
-        const hue = (col / 16) * 360;
-        const sat = 0.3 + (row / 11) * 0.7;
-        const light = 0.3 + (col % 2) * 0.2 + (row % 3) * 0.15;
-
-        const c = (1 - Math.abs(2 * light - 1)) * sat;
-        const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
-        const m = light - c / 2;
-
-        let r = 0;
-        let g = 0;
-        let b = 0;
-
-        if (hue < 60) { r = c; g = x; b = 0; }
-        else if (hue < 120) { r = x; g = c; b = 0; }
-        else if (hue < 180) { r = 0; g = c; b = x; }
-        else if (hue < 240) { r = 0; g = x; b = c; }
-        else if (hue < 300) { r = x; g = 0; b = c; }
-        else { r = c; g = 0; b = x; }
-
-        r += m; g += m; b += m;
-        const rgb = rgbString(r, g, b);
-        html += `<div class="color-cell" data-color="${r},${g},${b}" style="width:24px; height:24px; background:${rgb}; cursor:pointer; border:1px solid #444;"></div>`;
-      }
-    }
-    html += `</div>`;
-
-    const hexValue = [0, 1, 2].map((idx) => Math.round(currentColor[idx] * 255).toString(16).padStart(2, "0")).join("");
-
-    html += `<div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">`;
-    html += `<div style="color:#aaa; font:12px sans-serif;">Current:</div>`;
-    html += `<div style="width:40px; height:24px; background:${rgbString(currentColor[0], currentColor[1], currentColor[2])}; border:1px solid #444;"></div>`;
-    html += `<button id="resetColorBtn" style="padding:4px 10px; background:#555; color:#fff; border:none; border-radius:3px; cursor:pointer; font:11px sans-serif;">Reset to Default</button>`;
-    html += `</div>`;
-
-    html += `<div style="display:flex; gap:8px; justify-content:space-between; align-items:center;">`;
-    html += `<div style="display:flex; gap:6px; align-items:center;">`;
-    html += `<label style="color:#aaa; font:11px sans-serif;">#</label>`;
-    html += `<input type="text" id="hexColorInput" value="${hexValue}" maxlength="6" style="width:80px; padding:6px 8px; background:#1a1a1a; color:#fff; border:1px solid #555; border-radius:3px; font:12px monospace; text-transform:uppercase;" />`;
-    html += `<button id="applyCustomBtn" style="padding:6px 12px; background:#4a9eff; color:#fff; border:none; border-radius:3px; cursor:pointer; font:11px sans-serif;">Apply</button>`;
-    html += `</div>`;
-    html += `<button id="cancelColorBtn" style="padding:6px 14px; background:#555; color:#fff; border:none; border-radius:4px; cursor:pointer; font:12px sans-serif;">Cancel</button>`;
-    html += `</div>`;
-
-    picker.innerHTML = html;
-    modal.appendChild(picker);
-    document.body.appendChild(modal);
-
-    picker.querySelectorAll<HTMLDivElement>(".color-cell").forEach((cell) => {
-      cell.addEventListener("click", (event) => {
-        const colorStr = (event.currentTarget as HTMLDivElement).dataset.color;
-        if (!colorStr) return;
-        const [r, g, b] = colorStr.split(",").map(parseFloat);
-        const color: LayerColor = [r, g, b, 1];
+  private openColorPicker(layerId: string, currentColor: LayerColor) {
+    showColorPicker(
+      layerId,
+      currentColor,
+      (color) => {
         this.scene.setLayerColor(layerId, color);
         this.notifyColorChange(layerId, color);
         this.refreshLayerLegend();
-        modal.remove();
-      });
-    });
-
-    const applyButton = document.getElementById("applyCustomBtn");
-    const hexInput = document.getElementById("hexColorInput") as HTMLInputElement | null;
-    applyButton?.addEventListener("click", () => {
-      if (!hexInput) return;
-      const cleaned = hexInput.value.replace(/[^0-9a-fA-F]/g, "");
-      if (cleaned.length === 6) {
-        const r = parseInt(cleaned.slice(0, 2), 16) / 255;
-        const g = parseInt(cleaned.slice(2, 4), 16) / 255;
-        const b = parseInt(cleaned.slice(4, 6), 16) / 255;
-        const color: LayerColor = [r, g, b, 1];
-        this.scene.setLayerColor(layerId, color);
-        this.notifyColorChange(layerId, color);
+      },
+      () => {
+        this.scene.resetLayerColor(layerId);
         this.refreshLayerLegend();
-        modal.remove();
       }
-    });
-
-    const resetButton = document.getElementById("resetColorBtn");
-    resetButton?.addEventListener("click", () => {
-      this.scene.resetLayerColor(layerId);
-      this.refreshLayerLegend();
-      modal.remove();
-    });
-
-    const cancelButton = document.getElementById("cancelColorBtn");
-    cancelButton?.addEventListener("click", () => modal.remove());
-
-    modal.addEventListener("click", (event) => {
-      if (event.target === modal) {
-        modal.remove();
-      }
-    });
+    );
   }
 
   public updateCoordOverlay(mouseX: number, mouseY: number, haveMouse: boolean) {
@@ -965,7 +494,7 @@ export class UI {
    * Used by "Show only Selected Net Layers" feature.
    */
   public updateLayerVisibility(visibleLayerIds: Set<string>) {
-    this.layersEl.querySelectorAll<HTMLInputElement>("input[data-layer-toggle]").forEach((checkbox) => {
+    this.layersEl?.querySelectorAll<HTMLInputElement>("input[data-layer-toggle]").forEach((checkbox) => {
       const layerId = checkbox.dataset.layerToggle;
       if (layerId) {
         checkbox.checked = visibleLayerIds.has(layerId);
