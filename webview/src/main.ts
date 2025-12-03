@@ -362,14 +362,14 @@ async function init() {
   ui.setOnRunDrc(() => {
     console.log('[DRC] Running Full DRC...');
     if (isVSCodeWebview && vscode) {
-      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: true });
+      vscode.postMessage({ command: 'RunDRCWithRegions', force_full: true });
     }
   });
 
   ui.setOnIncrementalDrc(() => {
     console.log('[DRC] Running Incremental DRC...');
     if (isVSCodeWebview && vscode) {
-      vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: false });
+      vscode.postMessage({ command: 'RunDRCWithRegions', force_full: false });
     }
   });
 

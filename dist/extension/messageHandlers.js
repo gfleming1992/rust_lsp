@@ -255,9 +255,15 @@ async function handleGetMemory(panel, sendToLspServer) {
 }
 async function handleRunDRC(message, panel, sendToLspServer) {
     console.log('[Extension] Starting async DRC...');
+    // Only pass clearance_mm if explicitly provided; otherwise let LSP use file's design rules
+    const params = {};
+    if (message.force_full !== undefined)
+        params.force_full = message.force_full;
+    if (message.clearance_mm !== undefined)
+        params.clearance_mm = message.clearance_mm;
     const response = await sendToLspServer({
         method: 'RunDRCWithRegions',
-        params: { clearance_mm: message.clearance_mm || 0.15 }
+        params
     }, panel);
     if (response?.result?.status === 'started') {
         console.log('[Extension] DRC started in background');

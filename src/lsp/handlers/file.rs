@@ -3,7 +3,7 @@
 use crate::lsp::protocol::{Response, error_codes};
 use crate::lsp::state::ServerState;
 use crate::lsp::util::get_process_memory_bytes;
-use crate::lsp::xml_helpers::{parse_dictionary_colors, update_dictionary_colors, remove_deleted_objects_from_xml, apply_moved_objects_to_xml};
+use crate::lsp::xml_helpers::{parse_dictionary_colors, update_dictionary_colors, remove_deleted_objects_from_xml, apply_moved_objects_to_xml, parse_dfx_clearance_rule};
 use crate::parse_xml::parse_xml_file;
 use crate::draw::geometry::SelectableObject;
 use crate::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
@@ -84,6 +84,15 @@ pub fn handle_load(
     // Parse DictionaryColor from XML
     let layer_colors = parse_dictionary_colors(&root);
     eprintln!("[LSP Server] Parsed {} layer colors from DictionaryColor", layer_colors.len());
+
+    // Parse DFM design rules from Dfx elements
+    if let Some(clearance_mm) = parse_dfx_clearance_rule(&root) {
+        state.design_rules.conductor_clearance_mm = clearance_mm;
+        eprintln!("[LSP Server] Using DFM clearance from file: {:.4}mm", clearance_mm);
+    } else {
+        eprintln!("[LSP Server] No DFM clearance rule found, using default: {:.4}mm", 
+            state.design_rules.conductor_clearance_mm);
+    }
 
     // Apply colors to layers
     let mut layers = layers;

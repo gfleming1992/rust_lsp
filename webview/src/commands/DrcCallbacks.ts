@@ -23,13 +23,13 @@ export function setupDrcCallbacks(deps: DrcCallbacksDeps): void {
     // Run full DRC
     ui.setOnRunDrc(() => {
         console.log('[DRC] Running Full DRC...');
-        api.send({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: true });
+        api.send({ command: 'RunDRCWithRegions', force_full: true });
     });
     
     // Run incremental DRC
     ui.setOnIncrementalDrc(() => {
         console.log('[DRC] Running Incremental DRC...');
-        api.send({ command: 'RunDRCWithRegions', clearance_mm: 0.15, force_full: false });
+        api.send({ command: 'RunDRCWithRegions', force_full: false });
     });
     
     // DRC navigation (prev/next)

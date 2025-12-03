@@ -475,3 +475,64 @@ fn apply_move_to_coordinate_node(node: &mut XmlNode, delta_x: f32, delta_y: f32)
     }
 }
 
+/// Parse DFM design rules from Dfx elements in the XML
+/// Looks for clearance rules in Step/Dfx/Criteria/Property elements
+/// Returns the conductor clearance in mm if found, otherwise None
+pub fn parse_dfx_clearance_rule(root: &XmlNode) -> Option<f32> {
+    // Navigate to Ecad/CadData/Step
+    let ecad = root.children.iter().find(|n| n.name == "Ecad")?;
+    let cad_data = ecad.children.iter().find(|n| n.name == "CadData")?;
+    
+    for step in cad_data.children.iter().filter(|n| n.name == "Step") {
+        // Look for Dfx elements with clearance-related names
+        for dfx in step.children.iter().filter(|n| n.name == "Dfx") {
+            let dfx_name = dfx.attributes.get("name").map(|s| s.as_str()).unwrap_or("");
+            let category = dfx.attributes.get("category").map(|s| s.as_str()).unwrap_or("");
+            
+            // Only look at BOARDFAB category for clearance rules
+            if category != "BOARDFAB" {
+                continue;
+            }
+            
+            // Check if this is a clearance-related rule
+            let is_clearance_rule = dfx_name.to_lowercase().contains("clearance") 
+                || dfx_name.to_lowercase().contains("spacing")
+                || dfx_name.to_lowercase().contains("minclearance");
+            
+            if !is_clearance_rule {
+                continue;
+            }
+            
+            // Look in Criteria/Property for the value
+            if let Some(criteria) = dfx.children.iter().find(|n| n.name == "Criteria") {
+                // Check criteria name for clearance indication
+                let criteria_name = criteria.attributes.get("name").map(|s| s.as_str()).unwrap_or("");
+                if criteria_name.to_lowercase().contains("clearance") 
+                    || criteria_name.to_lowercase().contains("spacing") {
+                    
+                    // Look for Property with value
+                    for prop in criteria.children.iter().filter(|n| n.name == "Property") {
+                        if let Some(value_str) = prop.attributes.get("value") {
+                            if let Ok(value) = value_str.parse::<f32>() {
+                                // Check unit - assume MILLIMETER if not specified
+                                let unit = prop.attributes.get("unit").map(|s| s.as_str()).unwrap_or("MILLIMETER");
+                                
+                                let value_mm = match unit.to_uppercase().as_str() {
+                                    "MILLIMETER" | "MM" => value,
+                                    "INCH" | "IN" => value * 25.4,
+                                    "MIL" => value * 0.0254,
+                                    _ => value, // Assume mm
+                                };
+                                
+                                eprintln!("[LSP Server] Found DFM clearance rule '{}': {:.4}mm", dfx_name, value_mm);
+                                return Some(value_mm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}

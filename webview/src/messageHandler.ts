@@ -76,7 +76,7 @@ export function setupMessageHandler(ctx: MessageHandlerContext) {
           drcAutoTriggered = true;
           console.log('[DRC] Auto-triggering DRC after initial load...');
           ui.showDrcProgress();
-          vscode.postMessage({ command: 'RunDRCWithRegions', clearance_mm: 0.15 });
+          vscode.postMessage({ command: 'RunDRCWithRegions' });
         }
       }, 500);
     }

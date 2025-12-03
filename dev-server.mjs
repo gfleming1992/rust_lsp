@@ -125,9 +125,12 @@ app.get('/', (req, res) => {
 
 // Start LSP server
 function startLspServer() {
+  // Determine executable name based on platform
+  const serverName = process.platform === 'win32' ? 'lsp_server.exe' : 'lsp_server';
+  
   // Try release first, fall back to debug
-  const releasePath = path.join(__dirname, 'target', 'release', 'lsp_server.exe');
-  const debugPath = path.join(__dirname, 'target', 'debug', 'lsp_server.exe');
+  const releasePath = path.join(__dirname, 'target', 'release', serverName);
+  const debugPath = path.join(__dirname, 'target', 'debug', serverName);
   const serverPath = fs.existsSync(releasePath) ? releasePath : debugPath;
   
   console.log('[DevServer] Starting LSP server:', serverPath);
@@ -426,11 +429,11 @@ wss.on('connection', (ws) => {
       });
       
     } else if (data.command === 'RunDRCWithRegions') {
-      console.log(`[DevServer] RunDRCWithRegions (clearance: ${data.clearance_mm || 0.15}mm)`);
-      sendLspRequest('RunDRCWithRegions', { 
-        clearance_mm: data.clearance_mm || 0.15,
-        force_full: data.force_full || false
-      }, (response) => {
+      console.log(`[DevServer] RunDRCWithRegions (clearance: ${data.clearance_mm || 'from file'})`);
+      const params = { force_full: data.force_full || false };
+      if (data.clearance_mm !== undefined) params.clearance_mm = data.clearance_mm;
+      
+      sendLspRequest('RunDRCWithRegions', params, (response) => {
         if (response.result?.status === 'started') {
           console.log('[DevServer] DRC started in background');
         } else if (response.error) {
@@ -454,7 +457,7 @@ wss.on('connection', (ws) => {
 async function startEsbuild() {
   // Build the worker separately
   const workerCtx = await esbuild.context({
-    entryPoints: ['webview/src/binaryParserWorker.ts'],
+    entryPoints: ['webview/src/parsing/binaryParserWorker.ts'],
     bundle: true,
     outfile: 'webview/dist/binaryParserWorker.js',
     format: 'iife', // Workers need IIFE format

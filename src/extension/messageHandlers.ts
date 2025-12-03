@@ -265,9 +265,14 @@ async function handleGetMemory(panel: vscode.WebviewPanel, sendToLspServer: Send
 
 async function handleRunDRC(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
   console.log('[Extension] Starting async DRC...');
+  // Only pass clearance_mm if explicitly provided; otherwise let LSP use file's design rules
+  const params: { force_full?: boolean; clearance_mm?: number } = {};
+  if (message.force_full !== undefined) params.force_full = message.force_full;
+  if (message.clearance_mm !== undefined) params.clearance_mm = message.clearance_mm;
+  
   const response = await sendToLspServer({ 
     method: 'RunDRCWithRegions', 
-    params: { clearance_mm: message.clearance_mm || 0.15 } 
+    params 
   }, panel);
   
   if (response?.result?.status === 'started') {
