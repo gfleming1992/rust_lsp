@@ -375,36 +375,65 @@ fn check_should_move(
 fn apply_move_to_node(node: &mut XmlNode, delta_x: f32, delta_y: f32) {
     match node.name.as_str() {
         "Pad" => {
-            // Pads have x, y attributes directly
-            if let Some(x_str) = node.attributes.get("x") {
-                if let Ok(x) = x_str.parse::<f32>() {
-                    node.attributes.insert("x".to_string(), format!("{:.6}", x + delta_x));
-                }
-            }
-            if let Some(y_str) = node.attributes.get("y") {
-                if let Ok(y) = y_str.parse::<f32>() {
-                    node.attributes.insert("y".to_string(), format!("{:.6}", y + delta_y));
+            // Pads have a Location child element with x, y attributes
+            for child in &mut node.children {
+                if child.name == "Location" {
+                    if let Some(x_str) = child.attributes.get("x") {
+                        if let Ok(x) = x_str.parse::<f32>() {
+                            child.attributes.insert("x".to_string(), format!("{:.6}", x + delta_x));
+                        }
+                    }
+                    if let Some(y_str) = child.attributes.get("y") {
+                        if let Ok(y) = y_str.parse::<f32>() {
+                            child.attributes.insert("y".to_string(), format!("{:.6}", y + delta_y));
+                        }
+                    }
                 }
             }
             eprintln!("[XML Move] Applied delta to Pad: ({:.3}, {:.3})", delta_x, delta_y);
         }
-        "Polyline" | "Line" => {
+        "Polyline" => {
             // Polylines have child PolyBegin and PolyStepSegment/PolyStepCurve nodes
             for child in &mut node.children {
                 apply_move_to_coordinate_node(child, delta_x, delta_y);
             }
-            eprintln!("[XML Move] Applied delta to {}", node.name);
+            eprintln!("[XML Move] Applied delta to Polyline");
+        }
+        "Line" => {
+            // Line elements have startX, startY, endX, endY attributes directly
+            for attr in ["startX", "endX"] {
+                if let Some(val_str) = node.attributes.get(attr) {
+                    if let Ok(val) = val_str.parse::<f32>() {
+                        node.attributes.insert(attr.to_string(), format!("{:.6}", val + delta_x));
+                    }
+                }
+            }
+            for attr in ["startY", "endY"] {
+                if let Some(val_str) = node.attributes.get(attr) {
+                    if let Ok(val) = val_str.parse::<f32>() {
+                        node.attributes.insert(attr.to_string(), format!("{:.6}", val + delta_y));
+                    }
+                }
+            }
+            eprintln!("[XML Move] Applied delta to Line");
         }
         "Polygon" => {
-            // Polygons have Outline and potentially Cutout children
+            // Polygon elements directly contain PolyBegin/PolyStepSegment
             for child in &mut node.children {
-                if child.name == "Outline" || child.name == "Cutout" {
+                apply_move_to_coordinate_node(child, delta_x, delta_y);
+            }
+            eprintln!("[XML Move] Applied delta to Polygon");
+        }
+        "Contour" => {
+            // Contour elements have Polygon (outer boundary) and Cutout children
+            for child in &mut node.children {
+                if child.name == "Polygon" || child.name == "Cutout" {
                     for contour_child in &mut child.children {
                         apply_move_to_coordinate_node(contour_child, delta_x, delta_y);
                     }
                 }
             }
-            eprintln!("[XML Move] Applied delta to Polygon");
+            eprintln!("[XML Move] Applied delta to Contour");
         }
         _ => {}
     }

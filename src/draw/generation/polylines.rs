@@ -38,7 +38,7 @@ pub fn generate_polyline_geometry(
     // Initialize object ranges for polylines
     let start_obj_idx = object_ranges.len();
     for (i, polyline) in polylines.iter().enumerate() {
-        let id = ((layer_index as u64) << 40) | (i as u64);
+        let id = ((layer_index as u64) << 40) | ((0u64) << 36) | (i as u64);
         
         // Calculate bounds
         let mut min_x = f32::MAX;
