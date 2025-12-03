@@ -68,10 +68,10 @@ pub fn generate_polygon_geometry(
         
         // Add alpha values
         let alpha = polygon.fill_color[3];
-        alpha_values.extend(std::iter::repeat(alpha).take(vert_count));
+        alpha_values.extend(std::iter::repeat_n(alpha, vert_count));
         
         // Add visibility values
-        visibility_values.extend(std::iter::repeat(1.0).take(vert_count));
+        visibility_values.extend(std::iter::repeat_n(1.0, vert_count));
     }
     
     if all_verts.is_empty() || all_indices.is_empty() {

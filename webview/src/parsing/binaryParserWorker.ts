@@ -4,7 +4,7 @@
  */
 
 import { parseBinaryLayer } from "./binaryParser";
-import { LayerJSON } from "./types";
+import { LayerJSON } from "../types";
 
 // Worker message types
 interface ParseRequest {

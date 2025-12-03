@@ -84,7 +84,7 @@ fn handle_drc_completion(state: &mut ServerState, result: &DrcAsyncResult, stdou
             "regions": &state.drc_regions
         }
     });
-    writeln!(stdout, "{}", notification.to_string()).unwrap();
+    writeln!(stdout, "{notification}").unwrap();
     stdout.flush().unwrap();
 }
 

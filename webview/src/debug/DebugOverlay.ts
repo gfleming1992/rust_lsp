@@ -1,5 +1,5 @@
-import { Scene } from "./Scene";
-import { Renderer } from "./Renderer";
+import { Scene } from "../Scene";
+import { Renderer } from "../Renderer";
 
 // DEBUG: Set to true to enable the debug overlay on startup
 // Set to false to have it default to off (checkbox still works)

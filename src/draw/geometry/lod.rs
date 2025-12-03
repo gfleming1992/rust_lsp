@@ -29,14 +29,14 @@ where
 }
 
 /// Serialize Vec<f32> as base64-encoded string (non-optional)
-pub fn serialize_f32_vec_base64<S>(data: &Vec<f32>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_f32_vec_base64<S>(data: &[f32], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     let bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(
             data.as_ptr() as *const u8,
-            data.len() * std::mem::size_of::<f32>(),
+            std::mem::size_of_val(data),
         )
     };
     let encoded = general_purpose::STANDARD.encode(bytes);

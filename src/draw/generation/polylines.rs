@@ -25,7 +25,7 @@ pub fn generate_polyline_geometry(
     
     // Use rayon to generate LODs in parallel
     let all_lod_points: Vec<Vec<Vec<Point>>> = polylines.par_iter()
-        .map(|polyline| generate_polyline_lods(polyline))
+        .map(generate_polyline_lods)
         .collect();
         
     let lod_gen_time = lod_gen_start.elapsed();
@@ -38,7 +38,7 @@ pub fn generate_polyline_geometry(
     // Initialize object ranges for polylines
     let start_obj_idx = object_ranges.len();
     for (i, polyline) in polylines.iter().enumerate() {
-        let id = ((layer_index as u64) << 40) | ((0u64) << 36) | (i as u64);
+        let id = ((layer_index as u64) << 40) | (i as u64);
         
         // Calculate bounds
         let mut min_x = f32::MAX;

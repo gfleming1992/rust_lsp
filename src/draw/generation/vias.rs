@@ -78,7 +78,7 @@ pub fn generate_via_geometry(
             }
         };
         shape_groups.entry(key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((i, via));
     }
     

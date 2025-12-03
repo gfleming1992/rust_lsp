@@ -39,6 +39,7 @@ export class Renderer {
   
   // Debug control
   public debugLogNextFrame = false;
+  public debugRenderType: 'all' | 'batch' | 'instanced' | 'instanced_rot' = 'all';
 
   // Loading state - keep canvas black until first layer batch is loaded
   private isLoading = true;

@@ -19,7 +19,7 @@ console.log('[Build] Building webview bundles...');
 
 // Build the worker separately (IIFE format for Web Workers)
 await esbuild.build({
-  entryPoints: ['webview/src/binaryParserWorker.ts'],
+  entryPoints: ['webview/src/parsing/binaryParserWorker.ts'],
   bundle: true,
   outfile: 'webview/dist/binaryParserWorker.js',
   format: 'iife',

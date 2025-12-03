@@ -128,6 +128,7 @@ pub fn log_to_file(msg: &str) {
 }
 
 /// Check if a point is inside a triangle using barycentric coordinates
+#[allow(clippy::too_many_arguments)]
 pub fn point_in_triangle(
     px: f32, py: f32, 
     x0: f32, y0: f32, 

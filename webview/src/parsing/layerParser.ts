@@ -1,4 +1,4 @@
-import { LayerJSON } from "./types";
+import { LayerJSON } from "../types";
 
 /**
  * Parse custom binary layer format

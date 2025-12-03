@@ -1,4 +1,4 @@
-import { LayerJSON, ShaderGeometry, GeometryLOD } from "./types";
+import { LayerJSON, ShaderGeometry, GeometryLOD } from "../types";
 
 /**
  * Parse binary layer data from the LayerBinary format

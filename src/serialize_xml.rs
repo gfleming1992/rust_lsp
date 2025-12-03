@@ -1,8 +1,7 @@
 /// XML serialization module - writes XmlNode structures back to XML files
-/// 
+///
 /// This module provides fast serialization of parsed XML trees back to file format,
 /// useful for validating parse fidelity, roundtrip testing, and performance benchmarking.
-
 use crate::parse_xml::XmlNode;
 use anyhow::{Result, Context};
 use std::fs::File;
@@ -177,6 +176,7 @@ fn write_indent<W: Write>(writer: &mut W, indent_level: usize) -> io::Result<()>
 
 /// Escapes special XML characters in attribute values
 fn write_escaped_attr<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
+    let bytes = input.as_bytes();
     let mut last = 0;
     for (idx, ch) in input.char_indices() {
         let entity = match ch {
@@ -188,22 +188,23 @@ fn write_escaped_attr<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
             _ => None,
         };
 
-        if let Some(bytes) = entity {
+        if let Some(ent_bytes) = entity {
             if last < idx {
-                writer.write_all(input[last..idx].as_bytes())?;
+                writer.write_all(&bytes[last..idx])?;
             }
-            writer.write_all(bytes)?;
+            writer.write_all(ent_bytes)?;
             last = idx + ch.len_utf8();
         }
     }
 
-    if last < input.len() {
-        writer.write_all(input[last..].as_bytes())?;
+    if last < bytes.len() {
+        writer.write_all(&bytes[last..])?;
     }
     Ok(())
 }
 
 fn write_escaped_text<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
+    let bytes = input.as_bytes();
     let mut last = 0;
     for (idx, ch) in input.char_indices() {
         let entity = match ch {
@@ -213,17 +214,17 @@ fn write_escaped_text<W: Write>(writer: &mut W, input: &str) -> io::Result<()> {
             _ => None,
         };
 
-        if let Some(bytes) = entity {
+        if let Some(ent_bytes) = entity {
             if last < idx {
-                writer.write_all(input[last..idx].as_bytes())?;
+                writer.write_all(&bytes[last..idx])?;
             }
-            writer.write_all(bytes)?;
+            writer.write_all(ent_bytes)?;
             last = idx + ch.len_utf8();
         }
     }
 
-    if last < input.len() {
-        writer.write_all(input[last..].as_bytes())?;
+    if last < bytes.len() {
+        writer.write_all(&bytes[last..])?;
     }
     Ok(())
 }

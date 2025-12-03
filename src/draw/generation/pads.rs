@@ -28,7 +28,7 @@ pub fn generate_pad_geometry(
     let mut shape_groups: HashMap<String, Vec<(usize, &PadInstance)>> = HashMap::new();
     for (i, pad) in pads.iter().enumerate() {
         shape_groups.entry(pad.shape_id.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((i, pad));
     }
     

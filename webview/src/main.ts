@@ -3,9 +3,9 @@ import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
 import { ObjectRange } from "./types";
-import { BinaryParserPool } from "./BinaryParserPool";
-import { DebugOverlay, DEBUG_SHOW_COORDS } from "./DebugOverlay";
-import { setupDevConsole, setupVSCodeConsoleForwarding } from "./devConsole";
+import { BinaryParserPool } from "./parsing/BinaryParserPool";
+import { DebugOverlay, DEBUG_SHOW_COORDS } from "./debug/DebugOverlay";
+import { setupDevConsole, setupVSCodeConsoleForwarding } from "./debug/devConsole";
 import { setupMessageHandler, MessageHandlerContext, UndoAction } from "./messageHandler";
 
 // ==================== Environment Detection ====================

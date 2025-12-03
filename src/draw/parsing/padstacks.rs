@@ -68,7 +68,7 @@ pub fn collect_pads_from_layer(layer_node: &XmlNode, padstack_defs: &IndexMap<St
                     }
                     "StandardPrimitiveRef" => {
                         shape_id = child.attributes.get("id")
-                            .map(|s| s.clone())
+                            .cloned()
                             .unwrap_or_default();
                     }
                     "PinRef" => {

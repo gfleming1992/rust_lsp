@@ -76,6 +76,7 @@ pub(crate) fn debug_print_polyline(
 }
 
 /// Generate LayerJSON for all geometry types (polylines, polygons, pads, vias) in a layer
+#[allow(clippy::too_many_arguments)]
 pub fn generate_layer_json(
     layer_id: &str,
     layer_index: u32,
@@ -135,11 +136,12 @@ pub fn generate_layer_json(
         eprintln!("    [{}] Total layer time: {:.2}ms\n", layer_name, layer_start.elapsed().as_secs_f64() * 1000.0);
     }
     
-    let mut shader_geom = ShaderGeometry::default();
-    shader_geom.batch = if polyline_lods.is_empty() { None } else { Some(polyline_lods) };
-    shader_geom.batch_colored = if polygon_lods.is_empty() { None } else { Some(polygon_lods) };
-    shader_geom.instanced_rot = if pad_lods.is_empty() { None } else { Some(pad_lods) };
-    shader_geom.instanced = if via_lods.is_empty() { None } else { Some(via_lods) };
+    let shader_geom = ShaderGeometry {
+        batch: if polyline_lods.is_empty() { None } else { Some(polyline_lods) },
+        batch_colored: if polygon_lods.is_empty() { None } else { Some(polygon_lods) },
+        instanced_rot: if pad_lods.is_empty() { None } else { Some(pad_lods) },
+        instanced: if via_lods.is_empty() { None } else { Some(via_lods) },
+    };
     
     if std::env::var("PROFILE_TIMING").is_ok() {
         eprintln!("    [{}] ShaderGeometry: batch={}, batch_colored={}, instanced_rot={}, instanced={}", 

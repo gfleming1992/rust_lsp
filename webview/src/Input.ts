@@ -1,8 +1,8 @@
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { UI } from "./UI";
-import { ContextMenu } from "./ContextMenu";
-import { Tooltip } from "./Tooltip";
+import { ContextMenu } from "./ui/ContextMenu";
+import { Tooltip } from "./ui/Tooltip";
 import { ObjectRange } from "./types";
 
 export class Input {

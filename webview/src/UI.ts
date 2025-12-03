@@ -1,7 +1,7 @@
 import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { LayerColor, DrcRegion } from "./types";
-import { DebugOverlay } from "./DebugOverlay";
+import { DebugOverlay } from "./debug/DebugOverlay";
 import { DrcPanel } from "./ui/DrcPanel";
 import { showColorPicker } from "./ui/ColorPicker";
 import { setupResizeHandle } from "./ui/resizeHandle";

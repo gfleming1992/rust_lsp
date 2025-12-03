@@ -84,8 +84,11 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
     // 2. Process layers in parallel (Parallel)
     let process_start = std::time::Instant::now();
     
+    // Type alias for the complex result type
+    type LayerResult = Result<(LayerJSON, Vec<ObjectRange>, CullingStats), anyhow::Error>;
+    
     // Use rayon to process layers in parallel
-    let results: Vec<Result<(LayerJSON, Vec<ObjectRange>, CullingStats), anyhow::Error>> = layer_contexts
+    let results: Vec<LayerResult> = layer_contexts
         .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()

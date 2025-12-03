@@ -3,8 +3,8 @@ import { Renderer } from "./Renderer";
 import { UI } from "./UI";
 import { Input } from "./Input";
 import { LayerJSON, ObjectRange, DrcRegion } from "./types";
-import { BinaryParserPool } from "./BinaryParserPool";
-import { DebugOverlay } from "./DebugOverlay";
+import { BinaryParserPool } from "./parsing/BinaryParserPool";
+import { DebugOverlay } from "./debug/DebugOverlay";
 
 export interface MessageHandlerContext {
   scene: Scene;

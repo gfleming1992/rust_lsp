@@ -3,7 +3,7 @@
  * Manages multiple workers to process layers concurrently
  */
 
-import type { LayerJSON } from "./types";
+import type { LayerJSON } from "../types";
 
 interface ParseTask {
   id: number;
