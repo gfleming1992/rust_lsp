@@ -218,6 +218,7 @@ export class Scene {
     const lodBuffers: GPUBuffer[] = [];
     const lodAlphaBuffers: (GPUBuffer | null)[] = [];
     const lodVisibilityBuffers: (GPUBuffer | null)[] = [];
+    const cpuVertexBuffers: (Float32Array | null)[] = [];
     const cpuVisibilityBuffers: (Float32Array | null)[] = [];
     const lodVertexCounts: number[] = [];
     const lodIndexBuffers: (GPUBuffer | null)[] = [];
@@ -228,17 +229,20 @@ export class Scene {
       if (!lod) continue;
       
       // Handle both base64 (from JSON) and typed arrays (from binary)
-      // NOTE: We don't need to copy vertex data here since it's only used for GPU upload
-      // and we don't store a reference to it. The GPU buffer is independent.
       let lodVertices: Float32Array;
       if (lod.vertexData instanceof Float32Array) {
-        lodVertices = lod.vertexData;
+        // Copy to avoid keeping the entire parsed buffer alive
+        lodVertices = new Float32Array(lod.vertexData.length);
+        lodVertices.set(lod.vertexData);
       } else {
         const vertexBin = atob(lod.vertexData as unknown as string);
         const vertexBytes = new Uint8Array(vertexBin.length);
         for (let j = 0; j < vertexBin.length; j++) vertexBytes[j] = vertexBin.charCodeAt(j);
         lodVertices = new Float32Array(vertexBytes.buffer);
       }
+      
+      // Store CPU copy for move operations (batch geometry only)
+      cpuVertexBuffers.push(lodVertices);
       
       const buffer = this.device.createBuffer({
         size: lodVertices.byteLength,
@@ -351,6 +355,7 @@ export class Scene {
       lodBuffers,
       lodAlphaBuffers,
       lodVisibilityBuffers,
+      cpuVertexBuffers,
       cpuVisibilityBuffers,
       cpuInstanceBuffers: [],
       lodVertexCounts,
@@ -482,6 +487,7 @@ export class Scene {
       lodInstanceBuffers,
       lodAlphaBuffers: [],
       lodVisibilityBuffers: [],
+      cpuVertexBuffers: [],
       cpuVisibilityBuffers: [],
       cpuInstanceBuffers,
       lodVertexCounts,
@@ -917,9 +923,13 @@ export class Scene {
     
     // Apply final delta and clear moving flags
     for (const range of this.movingObjects) {
-      // For instanced geometry, apply delta to GPU buffer positions
+      // Apply delta to geometry positions
       if (range.instance_index !== undefined && range.instance_index !== null) {
+        // Instanced geometry (pads, vias)
         this.applyDeltaToInstance(range, result.deltaX, result.deltaY);
+      } else {
+        // Batch geometry (polylines, polygons)
+        this.applyDeltaToBatch(range, result.deltaX, result.deltaY);
       }
       this.setMovingFlag(range, false);
     }
@@ -957,8 +967,9 @@ export class Scene {
     for (const range of objects) {
       if (range.instance_index !== undefined && range.instance_index !== null) {
         this.applyDeltaToInstance(range, deltaX, deltaY);
+      } else {
+        this.applyDeltaToBatch(range, deltaX, deltaY);
       }
-      // Note: Batch geometry positions are in vertex data managed by backend
     }
     this.state.needsDraw = true;
   }
@@ -970,7 +981,8 @@ export class Scene {
     const shaderKey = this.getShaderKey(range.obj_type);
     if (!shaderKey) return;
     
-    const renderKey = `${range.layer_id}_${shaderKey}`;
+    // Match the renderKey format used when loading geometry
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
     const renderData = this.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -1037,7 +1049,8 @@ export class Scene {
     const shaderKey = this.getShaderKey(range.obj_type);
     if (!shaderKey) return;
     
-    const renderKey = `${range.layer_id}_${shaderKey}`;
+    // Match the renderKey format used when loading geometry
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
     const renderData = this.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -1063,6 +1076,50 @@ export class Scene {
         gpuBuffer, offset * 4,
         cpuBuffer.buffer, cpuBuffer.byteOffset + offset * 4,
         8 // 2 floats
+      );
+    }
+  }
+
+  /**
+   * Apply delta to batch geometry vertex positions in GPU buffers
+   * Vertex format: [x, y] pairs (2 floats per vertex)
+   */
+  private applyDeltaToBatch(range: ObjectRange, deltaX: number, deltaY: number) {
+    const shaderKey = this.getShaderKey(range.obj_type);
+    if (!shaderKey) return;
+    
+    const renderKey = shaderKey === 'batch' ? range.layer_id : `${range.layer_id}_${shaderKey}`;
+    const renderData = this.layerRenderData.get(renderKey);
+    if (!renderData) return;
+    
+    const numLods = Math.min(range.vertex_ranges.length, renderData.cpuVertexBuffers.length);
+    
+    for (let lodIndex = 0; lodIndex < numLods; lodIndex++) {
+      const cpuBuffer = renderData.cpuVertexBuffers[lodIndex];
+      const gpuBuffer = renderData.lodBuffers[lodIndex];
+      if (!cpuBuffer || !gpuBuffer) continue;
+      
+      const [start, count] = range.vertex_ranges[lodIndex] || [0, 0];
+      if (count === 0) continue;
+      
+      // Each vertex is 2 floats (x, y)
+      const floatStart = start * 2;
+      const floatCount = count * 2;
+      
+      if (floatStart + floatCount > cpuBuffer.length) continue;
+      
+      // Update x,y positions for each vertex in range
+      for (let i = 0; i < count; i++) {
+        const idx = floatStart + i * 2;
+        cpuBuffer[idx] += deltaX;     // x
+        cpuBuffer[idx + 1] += deltaY; // y
+      }
+      
+      // Write updated vertices to GPU
+      this.device?.queue.writeBuffer(
+        gpuBuffer, floatStart * 4,
+        cpuBuffer.buffer, cpuBuffer.byteOffset + floatStart * 4,
+        floatCount * 4
       );
     }
   }

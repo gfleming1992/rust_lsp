@@ -125,6 +125,7 @@ export interface LayerRenderData {
   lodInstanceBuffers?: GPUBuffer[]; // For instanced geometry
   
   // CPU-side copies for modification
+  cpuVertexBuffers: (Float32Array | null)[]; // For batch geometry position updates
   cpuVisibilityBuffers: (Float32Array | null)[];
   cpuInstanceBuffers: (Float32Array | null)[];
 
