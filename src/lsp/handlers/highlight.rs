@@ -111,16 +111,19 @@ pub fn handle_highlight_selected_nets(
             .map(|obj| obj.range.clone())
             .collect();
         
-        // Find stacked layer objects (mask/paste/silkscreen)
+        // Find stacked layer objects (mask/paste/silkscreen or PTH pads on other layers)
+        // For vias and pads that span multiple layers, we want to highlight all instances
         let tolerance = 0.01;
         let mut stacked_layer_ids: HashSet<u64> = HashSet::new();
         
-        let pad_bounds: Vec<[f32; 4]> = matching_objects.iter()
-            .filter(|obj| obj.obj_type == 3)
+        // Collect bounds from both pads (obj_type == 3) and vias/PTH (obj_type == 2)
+        // PTH pads are stored as vias since they have holes
+        let pad_and_via_bounds: Vec<[f32; 4]> = matching_objects.iter()
+            .filter(|obj| obj.obj_type == 2 || obj.obj_type == 3)
             .map(|obj| obj.bounds)
             .collect();
         
-        for bounds in &pad_bounds {
+        for bounds in &pad_and_via_bounds {
             let center_x = (bounds[0] + bounds[2]) / 2.0;
             let center_y = (bounds[1] + bounds[3]) / 2.0;
             let point = [center_x, center_y];
