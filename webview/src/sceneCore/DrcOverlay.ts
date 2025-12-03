@@ -31,6 +31,9 @@ export class DrcOverlay {
     
     this.sceneState.drcCurrentIndex = 
       (this.sceneState.drcCurrentIndex + 1) % this.sceneState.drcRegions.length;
+    this.updateDrcBufferForRegion(this.sceneState.drcCurrentIndex);
+    this.sceneState.drcEnabled = true;
+    this.sceneState.state.needsDraw = true;
     return this.sceneState.drcRegions[this.sceneState.drcCurrentIndex];
   }
 
@@ -40,6 +43,9 @@ export class DrcOverlay {
     this.sceneState.drcCurrentIndex = 
       (this.sceneState.drcCurrentIndex - 1 + this.sceneState.drcRegions.length) % 
       this.sceneState.drcRegions.length;
+    this.updateDrcBufferForRegion(this.sceneState.drcCurrentIndex);
+    this.sceneState.drcEnabled = true;
+    this.sceneState.state.needsDraw = true;
     return this.sceneState.drcRegions[this.sceneState.drcCurrentIndex];
   }
 
@@ -47,6 +53,9 @@ export class DrcOverlay {
     if (index < 0 || index >= this.sceneState.drcRegions.length) return null;
     
     this.sceneState.drcCurrentIndex = index;
+    this.updateDrcBufferForRegion(index);
+    this.sceneState.drcEnabled = true;
+    this.sceneState.state.needsDraw = true;
     return this.sceneState.drcRegions[this.sceneState.drcCurrentIndex];
   }
 
@@ -60,16 +69,44 @@ export class DrcOverlay {
     }
     
     this.sceneState.drcRegions = regions;
-    this.sceneState.drcTriangleCount = regions.length * 2; // 2 triangles per region
     this.sceneState.drcCurrentIndex = 0;
     
     if (regions.length === 0 || !this.sceneState.device) {
       console.log('[DRC] No regions to load');
+      this.sceneState.drcEnabled = false;
       return;
     }
     
-    this.createDrcBuffer(regions);
-    console.log(`[DRC] Loaded ${regions.length} violation regions`);
+    console.log(`[DRC] Loading ${regions.length} DRC regions`);
+    this.updateDrcBufferForRegion(0);
+    this.sceneState.drcEnabled = true;
+    this.sceneState.state.needsDraw = true;
+  }
+
+  /** Update GPU buffer for a specific DRC region's triangles */
+  private updateDrcBufferForRegion(index: number) {
+    const device = this.sceneState.device;
+    if (!device || index < 0 || index >= this.sceneState.drcRegions.length) {
+      this.sceneState.drcTriangleCount = 0;
+      return;
+    }
+    
+    const region = this.sceneState.drcRegions[index];
+    const vertices = new Float32Array(region.triangle_vertices);
+    
+    if (this.sceneState.drcVertexBuffer) {
+      this.sceneState.drcVertexBuffer.destroy();
+    }
+    
+    this.sceneState.drcVertexBuffer = device.createBuffer({
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true,
+    });
+    
+    new Float32Array(this.sceneState.drcVertexBuffer.getMappedRange()).set(vertices);
+    this.sceneState.drcVertexBuffer.unmap();
+    this.sceneState.drcTriangleCount = region.triangle_count;
   }
 
   public clearDrcRegions() {
@@ -85,49 +122,5 @@ export class DrcOverlay {
     this.sceneState.state.needsDraw = true;
     
     console.log('[DRC] Cleared all violation regions');
-  }
-
-  // ==================== Rendering Support ====================
-
-  public getDrcBuffer(): GPUBuffer | null {
-    return this.sceneState.drcVertexBuffer;
-  }
-
-  public getDrcTriangleCount(): number {
-    return this.sceneState.drcTriangleCount;
-  }
-
-  // ==================== Private Helpers ====================
-
-  private createDrcBuffer(regions: DrcRegion[]) {
-    const device = this.sceneState.device;
-    if (!device) return;
-    
-    // Each region: 6 vertices (2 triangles) × 2 floats (x, y) = 12 floats
-    const vertexData = new Float32Array(regions.length * 12);
-    
-    let offset = 0;
-    for (const region of regions) {
-      const [minX, minY, maxX, maxY] = region.bounds;
-      
-      // Triangle 1: bottom-left, bottom-right, top-right
-      vertexData[offset++] = minX; vertexData[offset++] = minY;
-      vertexData[offset++] = maxX; vertexData[offset++] = minY;
-      vertexData[offset++] = maxX; vertexData[offset++] = maxY;
-      
-      // Triangle 2: bottom-left, top-right, top-left
-      vertexData[offset++] = minX; vertexData[offset++] = minY;
-      vertexData[offset++] = maxX; vertexData[offset++] = maxY;
-      vertexData[offset++] = minX; vertexData[offset++] = maxY;
-    }
-    
-    this.sceneState.drcVertexBuffer = device.createBuffer({
-      size: vertexData.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true,
-    });
-    
-    new Float32Array(this.sceneState.drcVertexBuffer.getMappedRange()).set(vertexData);
-    this.sceneState.drcVertexBuffer.unmap();
   }
 }

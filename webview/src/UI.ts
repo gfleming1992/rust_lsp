@@ -30,6 +30,7 @@ export class UI {
   private onRunIncrementalDrc: (() => void) | null = null;
   private onDrcNavigate: ((direction: 'prev' | 'next') => void) | null = null;
   private onDrcSelect: ((index: number) => void) | null = null;
+  private onDrcClear: (() => void) | null = null;
 
   constructor(scene: Scene, renderer: Renderer) {
     this.scene = scene;
@@ -501,6 +502,31 @@ export class UI {
     }
   }
 
+  /** Clear DRC highlight - deselect list item and hide detail panel */
+  public clearDrcHighlight() {
+    if (!this.drcPanel) return;
+    
+    // Remove selection from all list items
+    const listDiv = this.drcPanel.querySelector('#drcList') as HTMLDivElement;
+    if (listDiv) {
+      listDiv.querySelectorAll('.drc-list-item').forEach((item) => {
+        (item as HTMLDivElement).style.background = 'transparent';
+        (item as HTMLDivElement).style.borderLeft = 'none';
+      });
+    }
+    
+    // Hide detail panel
+    const detailPanel = this.drcPanel.querySelector('#drcDetailPanel') as HTMLDivElement;
+    if (detailPanel) {
+      detailPanel.style.display = 'none';
+    }
+    
+    // Call the clear callback to disable overlay in scene
+    if (this.onDrcClear) {
+      this.onDrcClear();
+    }
+  }
+
   public setOnRunDrc(callback: () => void) {
     this.onRunDrc = callback;
   }
@@ -511,6 +537,10 @@ export class UI {
 
   public setOnDrcSelect(callback: (index: number) => void) {
     this.onDrcSelect = callback;
+  }
+
+  public setOnDrcClear(callback: () => void) {
+    this.onDrcClear = callback;
   }
 
   public setOnIncrementalDrc(callback: () => void) {
