@@ -7,6 +7,9 @@ Cargo.lock
 # Generated output
 /output/
 
+# Debug logs
+/logs/
+
 # reference project
 /old/
 

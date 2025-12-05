@@ -366,11 +366,17 @@ async function init() {
       }
       
       // Re-apply rotation with stored offsets
+      // IMPORTANT: For polylines, we need to rotate around the MOVED center,
+      // since applyMoveOffset already translated them
       const preCalcOffsets = new Map<number, { dx: number; dy: number }>();
       for (const o of action.perObjectOffsets) {
         preCalcOffsets.set(o.id, { dx: o.dx, dy: o.dy });
       }
-      scene.applyRotation(action.objects, action.rotationDelta, action.componentCenter, preCalcOffsets);
+      const movedComponentCenter = {
+        x: action.componentCenter.x + action.deltaX,
+        y: action.componentCenter.y + action.deltaY
+      };
+      scene.applyRotation(action.objects, action.rotationDelta, movedComponentCenter, preCalcOffsets);
       
       // Update bounds for rotation offsets
       for (const offset of action.perObjectOffsets) {

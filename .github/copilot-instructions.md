@@ -64,6 +64,54 @@ npm run dev            # Dev server with hot reload
 | Extension | `console.log('[Extension]')` |
 | WebView | Console forwarded to Extension output |
 
+### LSP Message Log (AI Agent: Check This!)
+
+All LSP requests/responses are logged to **`logs/lsp_debug.txt`**. When debugging LSP issues:
+
+```bash
+# AI Agent should read this file to see message flow:
+read_file logs/lsp_debug.txt
+```
+
+Log format:
+```
+[LSP] >>> {"id":"1","method":"Select","params":{...}}     # Incoming request
+[LSP] <<< [0.45ms] {"id":"1","result":{...}}              # Outgoing response with timing
+```
+
+- File is **truncated on each new LSP session** (extension restart)
+- Binary responses (tessellation) show summary only: `BINARY response (X bytes)`
+- `GetMemory` requests are excluded to reduce noise
+
+### AI Agent Debugging Workflow
+
+Once user provides log file context, **replicate the issue by running LSP standalone**:
+
+```bash
+# macOS/Linux - replay specific requests and see all output (stdout + stderr)
+echo '{"id":"1","method":"Load","params":{"file_path":"tests/tinytapeout-demo.xml"}}
+{"id":"2","method":"QueryNetAtPoint","params":{"x":58.80,"y":-112.29}}' | ./target/release/lsp_server 2>&1
+```
+
+```powershell
+# Windows - same approach
+@'
+{"id":"1","method":"Load","params":{"file_path":"tests/tinytapeout-demo.xml"}}
+{"id":"2","method":"QueryNetAtPoint","params":{"x":58.80,"y":-112.29}}
+'@ | .\target\release\lsp_server.exe 2>&1
+```
+
+The `2>&1` redirects stderr to stdout, showing:
+- `[LSP] >>>` incoming requests
+- `[LSP] <<<` outgoing responses with timing
+- Debug messages from `eprintln!()` calls
+
+This allows rapid iteration without restarting VS Code:
+1. User reports issue or AI reads `logs/lsp_debug.txt` to get the exact request
+2. Modify Rust code, rebuild with `cargo build --release`
+3. Pipe the same request to test the fix in terminal
+4. Verify response in terminal output (no file approval needed)
+
 **Environment variables**: `PROFILE_TIMING=1`, `DEBUG_TESSELLATION_LAYER=<name>`, `DEBUG_PADS=1`
 
 ### Direct LSP Testing (bypass VS Code)

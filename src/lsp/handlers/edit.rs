@@ -233,16 +233,12 @@ pub fn handle_rotate_objects(
     }
     
     #[derive(Deserialize)]
-    struct ComponentCenter {
-        x: f32,
-        y: f32,
-    }
-    
-    #[derive(Deserialize)]
     struct Params {
         object_ids: Vec<u64>,
         rotation_delta: f32,  // Rotation in radians
-        component_center: Option<ComponentCenter>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        component_center: Option<serde_json::Value>,  // Kept for API compatibility, not used
         per_object_offsets: Option<Vec<PerObjectOffset>>,
     }
     

@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process each layer
     let mut total_pads = 0usize;
     let mut total_vias = 0usize;
-    let mut total_objects = ranges.len();
+    let total_objects = ranges.len();
     
     for layer in &layers {
         let layer_name = &layer.layer_name;

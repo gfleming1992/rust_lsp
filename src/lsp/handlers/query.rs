@@ -3,7 +3,7 @@
 use crate::draw::drc::is_copper_layer;
 use crate::lsp::protocol::Response;
 use crate::lsp::state::ServerState;
-use crate::lsp::util::{get_process_memory_bytes, parse_params, require_file_loaded};
+use crate::lsp::util::{get_process_memory_bytes, parse_params, require_file_loaded, log_to_file};
 use crate::lsp::handlers::selection::find_objects_at_point;
 use serde::Deserialize;
 
@@ -47,29 +47,62 @@ pub fn handle_query_net_at_point(
     // Get the topmost object (same as what Select would return)
     let top_obj = &objects[0];
     
+    // Log details for debugging
+    let obj_type_name = match top_obj.obj_type {
+        0 => "Polyline",
+        1 => "Polygon", 
+        2 => "Via",
+        3 => "Pad",
+        _ => "Unknown"
+    };
+    log_to_file(&format!("[QueryNetAtPoint] Found {} objects at ({}, {})", objects.len(), p.x, p.y));
+    log_to_file(&format!("[QueryNetAtPoint] Top object: type={}, layer={}, net={:?}, component={:?}, pin={:?}",
+        obj_type_name, top_obj.layer_id, top_obj.net_name, top_obj.component_ref, top_obj.pin_ref));
+    
+    // Log all objects for debugging
+    for (i, obj) in objects.iter().enumerate() {
+        let otype = match obj.obj_type { 0 => "Polyline", 1 => "Polygon", 2 => "Via", 3 => "Pad", _ => "?" };
+        log_to_file(&format!("[QueryNetAtPoint]   [{}] type={}, layer={}, net={:?}, comp={:?}, pin={:?}",
+            i, otype, obj.layer_id, obj.net_name, obj.component_ref, obj.pin_ref));
+    }
+    
     let mut net_name: Option<String> = None;
     let mut component_ref: Option<String> = None;
     let mut pin_ref: Option<String> = None;
     
     // Check if topmost object is a pad/via
-    let is_pad_or_via = top_obj.obj_type == 2 || top_obj.obj_type == 3;
+    let is_via = top_obj.obj_type == 2;
+    let is_pad = top_obj.obj_type == 3;
+    let is_pad_or_via = is_via || is_pad;
     let is_on_copper = copper_layers.contains(top_obj.layer_id.as_str());
     
     if is_pad_or_via {
-        if is_on_copper {
-            // Copper pad/via - use its info directly
+        if is_on_copper && is_pad {
+            // Copper pad - use its info directly
             net_name = top_obj.net_name.clone();
             component_ref = top_obj.component_ref.clone();
             pin_ref = top_obj.pin_ref.clone();
         } else {
-            // Non-copper pad (F.Mask, F.SolderPad, etc.) - find matching copper pad
-            // Look for a copper pad at the same location
+            // Non-copper pad/via OR copper via - find matching copper pad or via with pin info
+            // First, try to find a copper pad
             for obj in &objects {
-                if (obj.obj_type == 2 || obj.obj_type == 3) && copper_layers.contains(obj.layer_id.as_str()) {
+                if obj.obj_type == 3 && copper_layers.contains(obj.layer_id.as_str()) {
+                    // Found a copper pad - use its info
                     net_name = obj.net_name.clone();
                     component_ref = obj.component_ref.clone();
                     pin_ref = obj.pin_ref.clone();
                     break;
+                }
+            }
+            // If no copper pad found, look for a copper via (PTH pads are stored as vias)
+            if net_name.is_none() {
+                for obj in &objects {
+                    if obj.obj_type == 2 && copper_layers.contains(obj.layer_id.as_str()) {
+                        net_name = obj.net_name.clone();
+                        component_ref = obj.component_ref.clone();
+                        pin_ref = obj.pin_ref.clone();  // PTH vias now have pin_ref
+                        break;
+                    }
                 }
             }
         }

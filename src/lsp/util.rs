@@ -101,11 +101,13 @@ pub fn get_process_memory_bytes() -> Option<u64> {
 
 /// Helper to log to file for debugging (truncates on first write each session)
 pub fn log_to_file(msg: &str) {
-    let log_path = if cfg!(windows) {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs").join("lsp_debug.txt")
-    } else {
-        std::path::PathBuf::from("logs/lsp_debug.txt")
-    };
+    // Always use CARGO_MANIFEST_DIR to ensure logs go to project root
+    let log_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs");
+    
+    // Create logs directory if it doesn't exist
+    let _ = std::fs::create_dir_all(&log_dir);
+    
+    let log_path = log_dir.join("lsp_debug.txt");
     
     let is_first_write = !LOG_INITIALIZED.swap(true, Ordering::SeqCst);
     

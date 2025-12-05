@@ -243,7 +243,7 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
     const id = String(requestId++);
     const jsonRequest = JSON.stringify({ id, ...request }) + '\n';
 
-    // Suppress logging for frequent polling requests
+    // Suppress logging for frequent polling requests (Rust LSP logs all messages now)
     if (request.method !== 'GetMemory') {
         rateLimitedLog('[Extension] Sending to LSP server:', jsonRequest.trim());
     }

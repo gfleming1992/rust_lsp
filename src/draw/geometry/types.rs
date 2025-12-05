@@ -103,6 +103,8 @@ pub struct ViaInstance {
     pub net_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_ref: Option<String>,  // Component reference for PTH pads
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pin_ref: Option<String>,        // Pin reference for PTH component pads (e.g., "PIN:1")
 }
 
 /// Represents all geometries organized by layer

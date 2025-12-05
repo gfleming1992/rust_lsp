@@ -5,8 +5,22 @@
 
 use rust_extension::lsp::{Request, Response, ServerState, DrcAsyncResult, error_codes};
 use rust_extension::lsp::handlers;
+use rust_extension::lsp::util::log_to_file;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::time::Instant;
+
+/// Log incoming/outgoing LSP messages to both stderr and file (truncate long payloads)
+fn log_message(direction: &str, msg: &str) {
+    let display = if msg.len() > 500 {
+        format!("{}...[truncated {} bytes]", &msg[..500], msg.len() - 500)
+    } else {
+        msg.to_string()
+    };
+    let log_line = format!("[LSP] {} {}", direction, display);
+    eprintln!("{}", log_line);
+    log_to_file(&log_line);
+}
 
 fn main() {
     eprintln!("[LSP Server] Starting IPC-2581 LSP server...");
@@ -44,6 +58,11 @@ fn main() {
             continue;
         }
 
+        // Log incoming request (skip GetMemory to reduce noise)
+        if !line.contains("\"method\":\"GetMemory\"") {
+            log_message(">>>", &line);
+        }
+
         let request: Request = match serde_json::from_str(&line) {
             Ok(req) => req,
             Err(e) => {
@@ -52,7 +71,21 @@ fn main() {
             }
         };
 
+        let start = Instant::now();
+        let method = request.method.clone();
         let response_json = dispatch_request(&mut state, request, drc_sender.clone());
+        let elapsed = start.elapsed();
+
+        // Log outgoing response (skip GetMemory and binary responses to reduce noise)
+        if method != "GetMemory" {
+            if method == "GetTessellationBinary" {
+                // Just log summary for binary responses
+                eprintln!("[LSP] <<< [{:.2}ms] BINARY response ({} bytes)", 
+                    elapsed.as_secs_f64() * 1000.0, response_json.len());
+            } else {
+                log_message("<<<", &format!("[{:.2}ms] {}", elapsed.as_secs_f64() * 1000.0, response_json));
+            }
+        }
 
         writeln!(stdout, "{}", response_json).unwrap();
         stdout.flush().unwrap();

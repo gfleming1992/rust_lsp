@@ -125,7 +125,7 @@ pub fn generate_via_geometry(
                     bounds: [min_x, min_y, max_x, max_y],
                     net_name: inst.net_name.clone(),
                     component_ref: inst.component_ref.clone(),
-                    pin_ref: None,
+                    pin_ref: inst.pin_ref.clone(),
                     component_center: None,
                     polar_radius: None,
                     polar_angle: None,
