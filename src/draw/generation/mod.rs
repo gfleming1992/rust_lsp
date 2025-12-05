@@ -82,6 +82,7 @@ pub fn generate_layer_json(
     layer_index: u32,
     layer_name: &str,
     layer_function: &str,
+    layer_side: &str,
     color: [f32; 4],
     geometries: &LayerGeometries,
     culling_stats: &mut CullingStats,
@@ -168,6 +169,7 @@ pub fn generate_layer_json(
         layer_id: layer_id.to_string(),
         layer_name: layer_name.to_string(),
         layer_function: layer_function.to_string(),
+        layer_side: layer_side.to_string(),
         default_color: color,
         geometry: shader_geom,
     }, object_ranges))

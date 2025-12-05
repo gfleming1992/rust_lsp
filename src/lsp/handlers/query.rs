@@ -130,3 +130,48 @@ pub fn handle_get_memory(id: Option<serde_json::Value>) -> Response {
         "memory_mb": memory_mb
     }))
 }
+
+/// Handle GetObjectBounds request - returns the current bounds for specified object IDs
+/// Used for debugging to compare LSP bounds vs. WebView-calculated bounds after transforms
+pub fn handle_get_object_bounds(
+    state: &ServerState, 
+    id: Option<serde_json::Value>, 
+    params: Option<serde_json::Value>
+) -> Response {
+    #[derive(Deserialize)]
+    struct Params {
+        object_ids: Vec<u64>,
+    }
+
+    let p: Params = match parse_params(id.clone(), params, "{object_ids}") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    
+    if let Err(e) = require_file_loaded(state, id.clone()) {
+        return e;
+    }
+
+    // Build a set for quick lookup
+    let id_set: std::collections::HashSet<u64> = p.object_ids.iter().cloned().collect();
+
+    // Find matching objects
+    let mut result_objects = Vec::new();
+    for range in &state.all_object_ranges {
+        if id_set.contains(&range.id) {
+            result_objects.push(serde_json::json!({
+                "id": range.id,
+                "bounds": range.bounds,
+                "layer_id": range.layer_id,
+                "component_ref": range.component_ref,
+                "pin_ref": range.pin_ref,
+                "component_center": range.component_center,
+            }));
+        }
+    }
+
+    log_to_file(&format!("[GetObjectBounds] Returning {} objects (requested {})", 
+        result_objects.len(), p.object_ids.len()));
+
+    Response::success(id, serde_json::json!(result_objects))
+}

@@ -5,6 +5,20 @@ import { Input } from "./Input";
 import { LayerJSON, ObjectRange, DrcRegion } from "./types";
 import { BinaryParserPool } from "./parsing/BinaryParserPool";
 import { DebugOverlay } from "./debug/DebugOverlay";
+import { BoundsDebugOverlay } from "./debug/BoundsDebugOverlay";
+
+/** Transformed instance from LSP TransformPreview */
+interface TransformedInstance {
+  object_id: number;
+  layer_id: string;
+  /** The original layer where GPU buffer data lives (for buffer updates during preview) */
+  original_layer_id: string;
+  x: number;
+  y: number;
+  packed_rot_vis: number;
+  shape_idx: number;
+  instance_idx: number;
+}
 
 export interface MessageHandlerContext {
   scene: Scene;
@@ -12,6 +26,7 @@ export interface MessageHandlerContext {
   ui: UI;
   input: Input;
   debugOverlay: DebugOverlay | null;
+  boundsDebugOverlay: BoundsDebugOverlay | null;
   workerPool: BinaryParserPool;
   isVSCodeWebview: boolean;
   vscode: any;
@@ -24,6 +39,7 @@ export interface MessageHandlerContext {
   lastNetHighlightAllObjects: ObjectRange[];
   lastSelectX: number;
   lastSelectY: number;
+  preFlipRenderLayerById: Map<number, string>;
   
   // Undo/redo stacks
   undoStack: UndoAction[];
@@ -34,7 +50,42 @@ export type UndoAction =
   | { type: 'delete'; objects: ObjectRange[] }
   | { type: 'move'; objects: ObjectRange[]; deltaX: number; deltaY: number }
   | { type: 'rotate'; objects: ObjectRange[]; rotationDelta: number; componentCenter: { x: number; y: number }; perObjectOffsets: { id: number; dx: number; dy: number }[] }
-  | { type: 'move_rotate'; objects: ObjectRange[]; deltaX: number; deltaY: number; rotationDelta: number; componentCenter: { x: number; y: number }; perObjectOffsets: { id: number; dx: number; dy: number }[] };
+  | { type: 'move_rotate'; objects: ObjectRange[]; deltaX: number; deltaY: number; rotationDelta: number; componentCenter: { x: number; y: number }; perObjectOffsets: { id: number; dx: number; dy: number }[] }
+  | { type: 'transform'; objectIds: number[]; deltaX: number; deltaY: number; rotateDegrees: number; flipped: boolean };
+
+/** Active transform session tracking for undo support */
+export interface TransformSession {
+  objectIds: number[];
+  startCenter: { x: number; y: number };
+  lastDeltaX: number;
+  lastDeltaY: number;
+  lastRotateDegrees: number;
+  flipped: boolean;
+}
+
+/** Global transform session - set by main.ts when StartTransform is sent */
+let activeTransformSession: TransformSession | null = null;
+
+export function setActiveTransformSession(session: TransformSession | null) {
+  activeTransformSession = session;
+}
+
+export function getActiveTransformSession(): TransformSession | null {
+  return activeTransformSession;
+}
+
+export function updateTransformSession(deltaX: number, deltaY: number, rotateDegrees?: number, flip?: boolean) {
+  if (activeTransformSession) {
+    activeTransformSession.lastDeltaX = deltaX;
+    activeTransformSession.lastDeltaY = deltaY;
+    if (rotateDegrees !== undefined) {
+      activeTransformSession.lastRotateDegrees = rotateDegrees;
+    }
+    if (flip) {
+      activeTransformSession.flipped = !activeTransformSession.flipped;
+    }
+  }
+}
 
 /** Sets up the window message event listener for extension/dev server communication */
 export function setupMessageHandler(ctx: MessageHandlerContext) {
@@ -170,6 +221,30 @@ export function setupMessageHandler(ctx: MessageHandlerContext) {
       return;
     }
     
+    // Object bounds result - for debug overlay
+    if (data.command === "objectBoundsResult" && data.objects) {
+      const objects = data.objects as Array<{ id: number; bounds: [number, number, number, number]; layer_id: string; component_ref: string | null; pin_ref: string | null }>;
+      console.log(`[BoundsDebug] Received ${objects.length} object bounds from LSP`);
+      if (ctx.boundsDebugOverlay) {
+        // Convert to ObjectRange-like format for the overlay
+        const ranges: ObjectRange[] = objects.map(obj => ({
+          id: obj.id,
+          bounds: obj.bounds,
+          layer_id: obj.layer_id,
+          component_ref: obj.component_ref ?? undefined,
+          pin_ref: obj.pin_ref ?? undefined,
+          obj_type: 3, // Assume pad for now
+          net_name: undefined,
+          instance_index: undefined,
+          shape_index: undefined,
+          vertex_ranges: [],
+        }));
+        ctx.boundsDebugOverlay.setRustBounds(ranges);
+        scene.state.needsDraw = true;
+      }
+      return;
+    }
+    
     // DRC regions result
     if (data.command === "drcRegionsResult") {
       const regions = data.regions as DrcRegion[];
@@ -177,6 +252,156 @@ export function setupMessageHandler(ctx: MessageHandlerContext) {
       scene.loadDrcRegions(regions);
       ui.populateDrcList(regions);
       ui.updateDrcPanel(regions.length, 0, null, false);
+      return;
+    }
+    
+    // Layer pairs for flip operations
+    if (data.command === "layerPairs" && data.pairs) {
+      const pairs = data.pairs as Record<string, string>;
+      scene.setLayerPairs(pairs);
+      console.log(`[Flip] Received ${Object.keys(pairs).length / 2} layer pairs for flip operations`);
+      return;
+    }
+    
+    // Flip complete - layer remapping is already done in main.ts before FlipObjects was sent
+    // This just confirms the operation completed and updates any remaining selectedObjects
+    if (data.command === "flipComplete") {
+      const layerRemapping = data.layerRemapping as Record<string, string>;
+      const flippedCount = data.flippedCount as number;
+      const flippedObjectIds = (data.objectIds as number[]) || [];
+      
+      console.log(`[Flip] Flip complete: ${flippedCount} objects, layer pairs:`, Object.keys(layerRemapping).length);
+      console.log(`[Flip] flipComplete objectIds (${flippedObjectIds.length}): first 8 -> ${flippedObjectIds.slice(0, 8).join(', ')}`);
+
+      // Update layer_id on any selected objects that still have old layer_id
+      if (Object.keys(layerRemapping).length > 0) {
+        for (const obj of ctx.selectedObjects) {
+          const newLayerId = layerRemapping[obj.layer_id];
+          if (newLayerId) {
+            obj.layer_id = newLayerId;
+          }
+        }
+      }
+
+      // Fallback: ensure every flipped object has a render-layer mapping even if pre-recording was missed
+      if (flippedObjectIds.length > 0) {
+        // Invert the remapping so we can recover the original render layer from the new logical layer
+        const inverseRemap = new Map<string, string>();
+        for (const [from, to] of Object.entries(layerRemapping)) {
+          inverseRemap.set(to, from);
+        }
+
+        let mappedCount = 0;
+        let missingPreFlip = 0;
+        let missingAll = 0;
+        for (const objId of flippedObjectIds) {
+          const preFlipLayer = ctx.preFlipRenderLayerById.get(objId);
+          const selected = ctx.selectedObjects.find(o => o.id === objId);
+          const logicalLayer = selected?.layer_id;
+          const guessedOriginal = logicalLayer ? (inverseRemap.get(logicalLayer) || logicalLayer) : undefined;
+          const renderLayer = preFlipLayer || guessedOriginal;
+
+          if (renderLayer) {
+            scene.remapObjectRenderLayer(objId, renderLayer);
+            mappedCount++;
+          } else {
+            if (!preFlipLayer) missingPreFlip++;
+            missingAll++;
+          }
+        }
+        console.log(`[Flip] Fallback render-layer remap: mapped=${mappedCount}, missingPreFlip=${missingPreFlip}, missingAll=${missingAll}`);
+        ctx.preFlipRenderLayerById.clear();
+      }
+      return;
+    }
+
+    // ==================== New Transform API ====================
+    
+    if (data.command === "transformStarted") {
+      const center = data.center as { x: number; y: number };
+      const objectCount = data.objectCount as number;
+      console.log(`[Transform] Started: ${objectCount} objects, center=(${center.x.toFixed(3)}, ${center.y.toFixed(3)})`);
+      // Store center for UI display if needed
+      return;
+    }
+    
+    if (data.command === "transformPreviewResult") {
+      const instances = data.instances as TransformedInstance[];
+      console.log(`[Transform] Preview: ${instances.length} instances, rot=${data.rotationDegrees}°, flipped=${data.isFlipped}`);
+      
+      // Update GPU buffers with transformed positions
+      // Use original_layer_id because that's where the buffer data actually lives
+      for (const inst of instances) {
+        scene.updateInstancePosition(inst.object_id, inst.original_layer_id, inst.x, inst.y, inst.packed_rot_vis, inst.shape_idx, inst.instance_idx);
+      }
+      scene.state.needsDraw = true;
+      return;
+    }
+    
+    if (data.command === "transformApplied") {
+      const transformedCount = data.transformedCount as number;
+      console.log(`[Transform] Applied: ${transformedCount} objects committed`);
+      // Clear moving flags on all transformed instances
+      scene.clearMovingFlags();
+      return;
+    }
+    
+    if (data.command === "transformCancelled") {
+      const instances = data.instances as TransformedInstance[] | undefined;
+      console.log(`[Transform] Cancelled`);
+      
+      // If server sends original positions, use them. Otherwise use locally stored originals.
+      if (instances && instances.length > 0) {
+        for (const inst of instances) {
+          scene.updateInstancePosition(inst.object_id, inst.original_layer_id, inst.x, inst.y, inst.packed_rot_vis, inst.shape_idx, inst.instance_idx);
+        }
+        scene.clearMovingFlags(); // Just clear flags, positions already restored
+      } else {
+        // Use locally stored original positions
+        scene.restoreOriginalPositions();
+      }
+      scene.state.needsDraw = true;
+      return;
+    }
+    
+    if (data.command === "transformError") {
+      console.error('[Transform] Error:', data.error);
+      return;
+    }
+    
+    if (data.command === "undoTransformResult") {
+      const instances = data.instances as TransformedInstance[] | undefined;
+      const message = data.message as string | undefined;
+      
+      if (message) {
+        console.log(`[Undo] ${message}`);
+      }
+      
+      if (instances && instances.length > 0) {
+        console.log(`[Undo] Restoring ${instances.length} instances to original positions`);
+        for (const inst of instances) {
+          scene.updateInstancePosition(inst.object_id, inst.original_layer_id, inst.x, inst.y, inst.packed_rot_vis, inst.shape_idx, inst.instance_idx);
+        }
+        scene.state.needsDraw = true;
+      }
+      return;
+    }
+    
+    if (data.command === "redoTransformResult") {
+      const instances = data.instances as TransformedInstance[] | undefined;
+      const message = data.message as string | undefined;
+      
+      if (message) {
+        console.log(`[Redo] ${message}`);
+      }
+      
+      if (instances && instances.length > 0) {
+        console.log(`[Redo] Restoring ${instances.length} instances to transformed positions`);
+        for (const inst of instances) {
+          scene.updateInstancePosition(inst.object_id, inst.original_layer_id, inst.x, inst.y, inst.packed_rot_vis, inst.shape_idx, inst.instance_idx);
+        }
+        scene.state.needsDraw = true;
+      }
       return;
     }
   });
@@ -232,6 +457,13 @@ function handleSelectionResult(ctx: MessageHandlerContext, ranges: ObjectRange[]
       const bIndex = scene.layerOrder.indexOf(b.layer_id);
       return bIndex - aIndex;
     });
+    
+    // Update bounds debug overlay with selection (Rust bounds = what LSP returned)
+    if (ctx.boundsDebugOverlay) {
+      ctx.boundsDebugOverlay.setRustBounds(visibleRanges);
+      // Also set TS bounds initially (they match until transforms are applied)
+      ctx.boundsDebugOverlay.setTsBounds(visibleRanges);
+    }
     
     if (isBoxSelect) {
       // Box select changes selection - disable rotation

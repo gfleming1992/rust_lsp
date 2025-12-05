@@ -8,6 +8,7 @@ pub mod layers;
 pub mod query;
 pub mod selection;
 pub mod tessellation;
+pub mod transform;
 
 // Re-export all handlers for convenient access
 pub use drc::*;
@@ -18,3 +19,4 @@ pub use layers::*;
 pub use query::*;
 pub use selection::*;
 pub use tessellation::*;
+pub use transform::*;

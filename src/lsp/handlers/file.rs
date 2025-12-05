@@ -6,7 +6,7 @@ use crate::lsp::util::get_process_memory_bytes;
 use crate::lsp::xml_helpers::{parse_dictionary_colors, update_dictionary_colors, remove_deleted_objects_from_xml, apply_moved_objects_to_xml, parse_dfx_clearance_rule};
 use crate::parse_xml::parse_xml_file;
 use crate::draw::geometry::SelectableObject;
-use crate::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions};
+use crate::draw::parsing::{extract_and_generate_layers, parse_padstack_definitions, parse_layer_metadata, build_layer_pairs};
 use crate::serialize_xml::xml_node_to_file;
 use rstar::RTree;
 use serde::Deserialize;
@@ -82,6 +82,11 @@ pub fn handle_load(
     let padstack_defs = parse_padstack_definitions(&root);
     eprintln!("[LSP Server] Parsed {} padstack definitions", padstack_defs.len());
     
+    // Parse layer metadata and build layer pairs for flip operations
+    let layer_meta = parse_layer_metadata(&root);
+    let layer_pairs = build_layer_pairs(&layer_meta);
+    eprintln!("[LSP Server] Built {} layer pairs for flip operations", layer_pairs.len() / 2);
+    
     eprintln!("[LSP Server] Total Load time: {:.2?}", start_total.elapsed());
     eprintln!("[LSP Server] Generated {} layers", layers.len());
 
@@ -116,18 +121,21 @@ pub fn handle_load(
     state.layer_colors = layer_colors;
     state.spatial_index = Some(spatial_index);
     state.padstack_defs = padstack_defs;
+    state.layer_pairs = layer_pairs.clone();
     state.all_object_ranges = all_object_ranges;
     state.drc_violations.clear();
     state.drc_regions.clear();
     state.deleted_objects.clear();
     state.moved_objects.clear();
+    state.flipped_objects.clear();
     state.modified_regions.clear();
 
     eprintln!("[LSP Server] File loaded successfully (xml_root dropped to save memory)");
 
     Response::success(id, serde_json::json!({
         "status": "ok",
-        "file_path": params.file_path
+        "file_path": params.file_path,
+        "layer_pairs": layer_pairs
     }))
 }
 

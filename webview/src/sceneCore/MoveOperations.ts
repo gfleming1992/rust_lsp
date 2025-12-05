@@ -10,7 +10,10 @@ export class MoveOperations {
   // Store original instance positions for rotation preview and cancel/restore
   private originalInstancePositions: Map<number, { x: number; y: number; packedRotVis: number }> = new Map();
   
-  constructor(private sceneState: SceneState) {}
+  constructor(
+    private sceneState: SceneState,
+    private resolveRenderLayer: (objectId: number, logicalLayerId: string) => string
+  ) {}
 
   /** Get current move offset for shader uniform */
   public getMoveOffset(): { x: number; y: number } {
@@ -124,37 +127,10 @@ export class MoveOperations {
     this.sceneState.globalMoveOffsetX = deltaX;
     this.sceneState.globalMoveOffsetY = deltaY;
     
-    // If we have component rotation, we write absolute positions directly to instance buffers
-    // In this case, DON'T let the shader also add moveOffset (it would double-count)
+    // If we have component rotation, use unified transform preview
+    // This handles move + rotation + flip together
     if (this.componentCenter) {
-      for (const obj of this.sceneState.movingObjects) {
-        const original = this.originalInstancePositions.get(obj.id);
-        if (!original) continue;
-        
-        if (obj.instance_index !== undefined && obj.instance_index !== null) {
-          const rotOffset = this.perObjectRotationOffsets.get(obj.id) || { dx: 0, dy: 0 };
-          // Write absolute position: original + move + rotation offset
-          // AND rotate individual pads by the component rotation angle
-          this.writeInstancePositionPreview(obj,
-            original.x + deltaX + rotOffset.dx,
-            original.y + deltaY + rotOffset.dy,
-            original.packedRotVis,
-            this.sceneState.globalRotationOffset,  // Rotate pad by component rotation angle
-            true  // DO rotate individual pad
-          );
-        }
-      }
-      
-      // Also update polylines via direct buffer writes
-      // (Their moving flag is cleared, so shader won't apply moveOffset)
-      if (this.hasComponentPolylineData()) {
-        this.rotateComponentPolylines(
-          0, 0,  // Ignored - uses stored polylineComponentCenter
-          this.sceneState.globalRotationOffset,
-          deltaX,
-          deltaY
-        );
-      }
+      this.applyFullTransformPreview();
     }
     
     this.sceneState.state.needsDraw = true;
@@ -176,56 +152,43 @@ export class MoveOperations {
       this.sceneState.globalRotationOffset += Math.PI * 2;
     }
     
+    // Compute per-object rotation offsets for bounds tracking
     const cx = this.componentCenter.x;
     const cy = this.componentCenter.y;
     const rotationOffset = this.sceneState.globalRotationOffset;
+    const isFlipped = this.isFlipped();
     
     this.perObjectRotationOffsets.clear();
     
     for (const obj of this.sceneState.movingObjects) {
+      // Prefer exact instance position; fall back to bounds center
       const original = this.originalInstancePositions.get(obj.id);
-      if (!original) continue;
-      
-      // Calculate rotation offset for this object using Cartesian rotation formula
-      // (works for both instanced and batch objects)
-      const objCenterX = (obj.bounds[0] + obj.bounds[2]) / 2;
-      const objCenterY = (obj.bounds[1] + obj.bounds[3]) / 2;
-      const relX = objCenterX - cx;
-      const relY = objCenterY - cy;
+      const basePos = original
+        ? { x: original.x, y: original.y }
+        : { x: (obj.bounds[0] + obj.bounds[2]) / 2, y: (obj.bounds[1] + obj.bounds[3]) / 2 };
+
+      // Apply flip first (Rust order is Flip -> Rotate -> Move)
+      const flippedX = isFlipped ? (2 * cx - basePos.x) : basePos.x;
+      const flippedY = basePos.y;
+
+      // Rotate the flipped position around the component center
+      const relX = flippedX - cx;
+      const relY = flippedY - cy;
       const cos = Math.cos(rotationOffset);
       const sin = Math.sin(rotationOffset);
-      const newX = cx + relX * cos - relY * sin;
-      const newY = cy + relX * sin + relY * cos;
-      const dx = newX - objCenterX;
-      const dy = newY - objCenterY;
-      
+      const rotatedX = cx + relX * cos - relY * sin;
+      const rotatedY = cy + relX * sin + relY * cos;
+
+      // Offset is from flipped position to rotated position
+      const dx = rotatedX - flippedX;
+      const dy = rotatedY - flippedY;
+
       this.perObjectRotationOffsets.set(obj.id, { dx, dy });
-      
-      // Update preview: instanced objects get direct buffer writes, batch objects use shader uniform
-      if (obj.instance_index !== undefined && obj.instance_index !== null && original) {
-        // For component rotation: move pad position AND rotate the pad itself by the same angle
-        this.writeInstancePositionPreview(obj, 
-          original.x + this.sceneState.globalMoveOffsetX + dx,
-          original.y + this.sceneState.globalMoveOffsetY + dy,
-          original.packedRotVis,
-          rotationOffset,  // Rotate pad by same angle as component rotation
-          true  // DO rotate individual pad
-        );
-      }
-      // Note: Batch objects (polylines/polygons) are handled separately below
     }
     
-    // Rotate component polylines if we have their local coords
-    if (this.hasComponentPolylineData()) {
-      this.rotateComponentPolylines(
-        cx, cy,
-        rotationOffset,
-        this.sceneState.globalMoveOffsetX,
-        this.sceneState.globalMoveOffsetY
-      );
-    }
+    // Apply unified transform preview (handles flip + rotation + move)
+    this.applyFullTransformPreview();
     
-    this.sceneState.state.needsDraw = true;
     console.log(`[Scene] Rotation offset: ${(this.sceneState.globalRotationOffset * 180 / Math.PI).toFixed(1)}° around component center`);
   }
 
@@ -236,48 +199,70 @@ export class MoveOperations {
     rotationDelta: number;
     perObjectOffsets: Map<number, { dx: number; dy: number }>;
     componentCenter: { x: number; y: number } | null;
+    isFlipped: boolean;
   } {
+    const isFlipped = this.isFlipped();
     const result = { 
       deltaX: this.sceneState.globalMoveOffsetX, 
       deltaY: this.sceneState.globalMoveOffsetY,
       rotationDelta: this.sceneState.globalRotationOffset,
       perObjectOffsets: new Map(this.perObjectRotationOffsets),
-      componentCenter: this.componentCenter
+      componentCenter: this.componentCenter,
+      isFlipped
     };
+    
+    // When component rotation is active (which includes flip), the preview already wrote
+    // the correct final positions via applyFullTransformPreview. We just need to:
+    // 1. Clear moving flags
+    // 2. Ensure flag bits are correct (visible, not moving)
     
     for (const range of this.sceneState.movingObjects) {
       if (this.componentCenter) {
-        // Component rotation: finalize with moving flag cleared
+        // Component transform (move/rotate/flip): preview already wrote correct positions
         if (range.instance_index !== undefined && range.instance_index !== null) {
           const original = this.originalInstancePositions.get(range.id);
           if (original) {
-            // Use Cartesian rotation formula (same as preview)
-            const rotOffset = this.perObjectRotationOffsets.get(range.id) || { dx: 0, dy: 0 };
-            const finalX = original.x + result.deltaX + rotOffset.dx;
-            const finalY = original.y + result.deltaY + rotOffset.dy;
+            // Re-apply the full transform one more time to ensure correct final state
+            // with moving flag cleared (flag bits 0-1 only, no bit 2)
+            const cx = this.componentCenter.x;
+            const cy = this.componentCenter.y;
+            const rotation = result.rotationDelta;
+            const dx = result.deltaX;
+            const dy = result.deltaY;
             
-            // For component rotation: rotate individual pads by the component rotation angle
-            // Calculate final rotation = original + component rotation delta
+            // Transform chain: original → flip → rotate → translate
+            let x = original.x;
+            let y = original.y;
+            
+            if (isFlipped) {
+              x = 2 * cx - x;
+            }
+            
+            const relX = x - cx;
+            const relY = y - cy;
+            const cos = Math.cos(rotation);
+            const sin = Math.sin(rotation);
+            x = cx + relX * cos - relY * sin + dx;
+            y = cy + relX * sin + relY * cos + dy;
+            
+            // Calculate final rotation for the pad
             const originalRotBits = (original.packedRotVis >>> 16) & 0xFFFF;
             const originalAngle = (originalRotBits / 65535) * Math.PI * 2;
-            let finalAngle = originalAngle + result.rotationDelta;
+            let finalAngle = originalAngle + rotation;
             while (finalAngle >= Math.PI * 2) finalAngle -= Math.PI * 2;
             while (finalAngle < 0) finalAngle += Math.PI * 2;
             const finalRotBits = Math.round((finalAngle / (Math.PI * 2)) * 65535) & 0xFFFF;
-            const flagBits = original.packedRotVis & 0x3; // keep visible and highlighted, clear moving
+            const flagBits = original.packedRotVis & 0x3; // visible + highlighted, no moving
             const finalPacked = (finalRotBits << 16) | flagBits;
             
-            // Write to CPU buffers and sync to GPU
-            this.finalizeInstancePosition(range, finalX, finalY, finalPacked);
+            this.finalizeInstancePosition(range, x, y, finalPacked);
           }
         } else {
-          // Batch objects during component rotation
-          // Check if this object is handled by our polyline rotation system
+          // Batch objects during component transform
           const isHandledByPolylineRotation = this.componentPolylineData.has(range.id);
           
           if (isHandledByPolylineRotation) {
             // Polylines with rotation data: positions already written to buffer during preview
-            // Just clear the moving flag (already cleared in setupComponentRotation, but ensure it)
             this.setMovingFlag(range, false);
           } else {
             // Other batch objects not in our polyline system
@@ -289,7 +274,7 @@ export class MoveOperations {
           }
         }
       } else {
-        // Regular move (no component rotation): apply delta normally
+        // Regular move (no component rotation/flip): apply delta normally
         const rotOffset = this.perObjectRotationOffsets.get(range.id) || { dx: 0, dy: 0 };
         const totalDx = result.deltaX + rotOffset.dx;
         const totalDy = result.deltaY + rotOffset.dy;
@@ -304,18 +289,20 @@ export class MoveOperations {
     }
     
     // Finalize component polyline data (update originalCoords, localCoords, center)
-    // Do this for ANY move with component rotation, not just when there's rotation
+    // Do this for ANY move with component transform
     if (this.hasComponentPolylineData() && this.componentCenter) {
       const hasMoved = Math.abs(result.deltaX) > 0.0001 || Math.abs(result.deltaY) > 0.0001;
       const hasRotated = Math.abs(result.rotationDelta) > 0.0001;
+      const hasFlipped = isFlipped;
       
-      if (hasMoved || hasRotated) {
+      if (hasMoved || hasRotated || hasFlipped) {
         const newCenterX = this.componentCenter.x + result.deltaX;
         const newCenterY = this.componentCenter.y + result.deltaY;
         this.finalizeComponentPolylineRotation(
           newCenterX, newCenterY,
           result.rotationDelta,
-          result.deltaX, result.deltaY
+          result.deltaX, result.deltaY,
+          isFlipped
         );
       }
     }
@@ -332,7 +319,7 @@ export class MoveOperations {
     this.originalInstancePositions.clear();
     this.sceneState.state.needsDraw = true;
     
-    console.log(`[Scene] Move ended, delta: (${result.deltaX.toFixed(3)}, ${result.deltaY.toFixed(3)}), rotation: ${(result.rotationDelta * 180 / Math.PI).toFixed(1)}°`);
+    console.log(`[Scene] Move ended, delta: (${result.deltaX.toFixed(3)}, ${result.deltaY.toFixed(3)}), rotation: ${(result.rotationDelta * 180 / Math.PI).toFixed(1)}°, flipped: ${isFlipped}`);
     return result;
   }
 
@@ -430,8 +417,8 @@ export class MoveOperations {
     console.log(`[MoveOps.rotateBatchAroundCenter] id=${range.id} rotDelta=${rotationDelta.toFixed(6)} (${(rotationDelta*180/Math.PI).toFixed(2)}°) center=(${center.x.toFixed(4)}, ${center.y.toFixed(4)})`);
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -493,8 +480,8 @@ export class MoveOperations {
     
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return null;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData || renderData.cpuInstanceBuffers.length === 0) return null;
     
@@ -527,8 +514,8 @@ export class MoveOperations {
     
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -593,8 +580,8 @@ export class MoveOperations {
     
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -635,8 +622,8 @@ export class MoveOperations {
     
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -651,8 +638,8 @@ export class MoveOperations {
   private setMovingFlag(range: ObjectRange, moving: boolean) {
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -711,8 +698,8 @@ export class MoveOperations {
     
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -766,8 +753,8 @@ export class MoveOperations {
     // Note: rotationDelta is ignored for batch objects - would require re-tessellation
     const shaderKey = getShaderKey(range.obj_type);
     if (!shaderKey) return;
-    
-    const renderKey = getRenderKey(range.layer_id, shaderKey);
+    const actualLayerId = this.resolveRenderLayer(range.id, range.layer_id);
+    const renderKey = getRenderKey(actualLayerId, shaderKey);
     const renderData = this.sceneState.layerRenderData.get(renderKey);
     if (!renderData) return;
     
@@ -862,8 +849,8 @@ export class MoveOperations {
     for (const obj of batchObjects) {
       const shaderKey = getShaderKey(obj.obj_type);
       if (!shaderKey) continue;
-      
-      const renderKey = getRenderKey(obj.layer_id, shaderKey);
+      const actualLayerId = this.resolveRenderLayer(obj.id, obj.layer_id);
+      const renderKey = getRenderKey(actualLayerId, shaderKey);
       const renderData = this.sceneState.layerRenderData.get(renderKey);
       if (!renderData) continue;
       
@@ -910,7 +897,8 @@ export class MoveOperations {
       }
       
       if (lods.length > 0) {
-        this.componentPolylineData.set(obj.id, { layerId: obj.layer_id, lods });
+        const actualLayerId = this.resolveRenderLayer(obj.id, obj.layer_id);
+        this.componentPolylineData.set(obj.id, { layerId: actualLayerId, lods });
       }
     }
     
@@ -1056,7 +1044,8 @@ export class MoveOperations {
   public finalizeComponentPolylineRotation(
     newCenterX: number, newCenterY: number,
     totalRotation: number,
-    deltaX: number, deltaY: number
+    deltaX: number, deltaY: number,
+    isFlipped: boolean = false
   ) {
     if (!this.hasComponentPolylineData() || !this.polylineComponentCenter) return;
     
@@ -1064,30 +1053,429 @@ export class MoveOperations {
     const cos = Math.cos(totalRotation);
     const sin = Math.sin(totalRotation);
     
-    console.log(`[MoveOps] Finalizing polyline rotation: center (${oldCenter.x.toFixed(3)}, ${oldCenter.y.toFixed(3)}) -> (${newCenterX.toFixed(3)}, ${newCenterY.toFixed(3)}), angle=${(totalRotation * 180 / Math.PI).toFixed(1)}°`);
+    console.log(`[MoveOps] Finalizing polyline rotation: center (${oldCenter.x.toFixed(3)}, ${oldCenter.y.toFixed(3)}) -> (${newCenterX.toFixed(3)}, ${newCenterY.toFixed(3)}), angle=${(totalRotation * 180 / Math.PI).toFixed(1)}°, flipped=${isFlipped}`);
     
     for (const [_objId, data] of this.componentPolylineData) {
-      const vertexCount = data.floatCount / 2;
-      
-      for (let i = 0; i < vertexCount; i++) {
-        const lx = data.localCoords[i * 2];
-        const ly = data.localCoords[i * 2 + 1];
+      // Update all LODs
+      for (const lodData of data.lods) {
+        const vertexCount = lodData.floatCount / 2;
         
-        // Compute new world position
-        const newX = oldCenter.x + deltaX + lx * cos - ly * sin;
-        const newY = oldCenter.y + deltaY + lx * sin + ly * cos;
-        
-        // Update original coords to new world position
-        data.originalCoords[i * 2] = newX;
-        data.originalCoords[i * 2 + 1] = newY;
-        
-        // Update local coords relative to new center
-        data.localCoords[i * 2] = newX - newCenterX;
-        data.localCoords[i * 2 + 1] = newY - newCenterY;
+        for (let i = 0; i < vertexCount; i++) {
+          let lx = lodData.localCoords[i * 2];
+          let ly = lodData.localCoords[i * 2 + 1];
+          
+          // Apply flip to local coords if flipped
+          if (isFlipped) {
+            lx = -lx;
+          }
+          
+          // Compute new world position
+          const newX = oldCenter.x + deltaX + lx * cos - ly * sin;
+          const newY = oldCenter.y + deltaY + lx * sin + ly * cos;
+          
+          // Update original coords to new world position
+          lodData.originalCoords[i * 2] = newX;
+          lodData.originalCoords[i * 2 + 1] = newY;
+          
+          // Update local coords relative to new center
+          lodData.localCoords[i * 2] = newX - newCenterX;
+          lodData.localCoords[i * 2 + 1] = newY - newCenterY;
+        }
       }
     }
     
     // Update stored center
     this.polylineComponentCenter = { x: newCenterX, y: newCenterY };
+  }
+  
+  // ==================== Flip Operations ====================
+  
+  /** Get current pending flip count (odd = flipped) */
+  public getPendingFlipCount(): number {
+    return this.sceneState.pendingFlipCount;
+  }
+  
+  /** Check if currently in flipped state (odd flip count) */
+  public isFlipped(): boolean {
+    return this.sceneState.pendingFlipCount % 2 === 1;
+  }
+  
+  /**
+   * Toggle flip state. Does NOT modify buffers directly - just toggles the state.
+   * The flip is applied during the normal move/rotate preview via updateMoveWithFlip.
+   */
+  public toggleFlip() {
+    const objects = this.sceneState.movingObjects;
+    if (objects.length === 0) return;
+    
+    const center = this.componentCenter;
+    if (!center) {
+      console.warn('[MoveOps.toggleFlip] No component center set');
+      return;
+    }
+    
+    this.sceneState.pendingFlipCount++;
+    console.log(`[MoveOps.toggleFlip] Flip count now ${this.sceneState.pendingFlipCount} (flipped=${this.isFlipped()})`);
+    
+    // Re-apply the current transform with new flip state
+    // This ensures flip is integrated with the existing transform chain
+    this.applyFullTransformPreview();
+  }
+  
+  /**
+   * Apply full transform preview: flip → rotate → translate
+   * Called when flip state changes or during move/rotation updates.
+   */
+  private applyFullTransformPreview() {
+    if (!this.componentCenter) return;
+    
+    const cx = this.componentCenter.x;
+    const cy = this.componentCenter.y;
+    const isFlipped = this.isFlipped();
+    const rotation = this.sceneState.globalRotationOffset;
+    const dx = this.sceneState.globalMoveOffsetX;
+    const dy = this.sceneState.globalMoveOffsetY;
+    
+    // Transform instanced objects
+    for (const obj of this.sceneState.movingObjects) {
+      const original = this.originalInstancePositions.get(obj.id);
+      if (!original) continue;
+      
+      if (obj.instance_index !== undefined && obj.instance_index !== null) {
+        // Apply transform chain: original → flip → rotate → translate
+        let x = original.x;
+        let y = original.y;
+        
+        // 1. Flip around center (if flipped)
+        if (isFlipped) {
+          x = 2 * cx - x;
+        }
+        
+        // 2. Rotate around center
+        const relX = x - cx;
+        const relY = y - cy;
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+        x = cx + relX * cos - relY * sin;
+        y = cy + relX * sin + relY * cos;
+        
+        // 3. Translate
+        x += dx;
+        y += dy;
+        
+        // Calculate rotation for the pad itself
+        // For component rotation: rotate pad by same angle
+        // For flip: mirror the pad rotation (π - angle)
+        let padRotationDelta = rotation;
+        if (isFlipped) {
+          // When flipped, pads need their rotation mirrored AND the component rotation applied
+          // The mirroring is handled by negating the angle effect
+          // We need to modify the original angle, then add rotation
+        }
+        
+        this.writeInstancePositionPreview(obj, x, y, original.packedRotVis, padRotationDelta, true);
+      }
+    }
+    
+    // Transform polylines - use stored local coords
+    if (this.hasComponentPolylineData() && this.polylineComponentCenter) {
+      this.applyPolylineTransformPreview(isFlipped, rotation, dx, dy);
+    }
+    
+    this.sceneState.state.needsDraw = true;
+  }
+  
+  /**
+   * Apply transform to polylines: flip → rotate → translate
+   */
+  private applyPolylineTransformPreview(isFlipped: boolean, rotation: number, dx: number, dy: number) {
+    if (!this.polylineComponentCenter) return;
+    
+    const cx = this.polylineComponentCenter.x;
+    const cy = this.polylineComponentCenter.y;
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    
+    for (const [objId, data] of this.componentPolylineData) {
+      const shaderKey = 'batch';
+      const renderKey = getRenderKey(data.layerId, shaderKey);
+      const renderData = this.sceneState.layerRenderData.get(renderKey);
+      if (!renderData) continue;
+      
+      for (let lodIndex = 0; lodIndex < data.lods.length; lodIndex++) {
+        const lodData = data.lods[lodIndex];
+        if (!lodData) continue;
+        
+        const cpuBuffer = renderData.cpuVertexBuffers[lodIndex];
+        const gpuBuffer = renderData.lodBuffers[lodIndex];
+        if (!cpuBuffer || !gpuBuffer) continue;
+        
+        const { floatStart, floatCount, localCoords } = lodData;
+        const count = floatCount / 2;
+        
+        if (floatStart + floatCount > cpuBuffer.length) continue;
+        
+        for (let i = 0; i < count; i++) {
+          let lx = localCoords[i * 2];
+          let ly = localCoords[i * 2 + 1];
+          
+          // 1. Flip local X coordinate (if flipped)
+          if (isFlipped) {
+            lx = -lx;
+          }
+          
+          // 2. Rotate around origin (local coords are relative to center)
+          const rx = lx * cos - ly * sin;
+          const ry = lx * sin + ly * cos;
+          
+          // 3. Translate to world position (center + delta)
+          const newX = cx + dx + rx;
+          const newY = cy + dy + ry;
+          
+          const idx = floatStart + i * 2;
+          cpuBuffer[idx] = newX;
+          cpuBuffer[idx + 1] = newY;
+        }
+        
+        // Write to GPU
+        this.sceneState.device?.queue.writeBuffer(
+          gpuBuffer,
+          floatStart * 4,
+          cpuBuffer.buffer,
+          cpuBuffer.byteOffset + floatStart * 4,
+          floatCount * 4
+        );
+      }
+    }
+  }
+  
+  /**
+   * Reset flip state (called on move cancel).
+   */
+  public resetFlip() {
+    this.sceneState.pendingFlipCount = 0;
+  }
+  
+  /**
+   * Finalize flip (called on move end).
+   * Returns true if objects are in flipped state, false otherwise.
+   */
+  public finalizeFlip(): boolean {
+    const wasFlipped = this.isFlipped();
+    return wasFlipped;
+  }
+  
+  /**
+   * Clear flip state after LSP commit.
+   */
+  public clearFlipState() {
+    this.sceneState.pendingFlipCount = 0;
+  }
+
+  // ==================== LSP Transform Support ====================
+  
+  /**
+   * Directly update a single instance's position in GPU buffer.
+   * Used by the new LSP-based transform system where LSP computes positions.
+   * @param objectId - The object ID (for logging only)
+   * @param layerId - The layer containing this instance
+   * @param x - New X position
+   * @param y - New Y position  
+   * @param packedRotVis - Packed rotation/visibility/moving flags
+   * @param shapeIdx - Which shape group's buffer to update (index into lodInstanceBuffers)
+   * @param instanceIdx - Index within that shape group's instance buffer
+   */
+  public updateInstancePositionDirect(
+    objectId: number,
+    layerId: string,
+    x: number,
+    y: number,
+    packedRotVis: number,
+    shapeIdx: number,
+    instanceIdx: number
+  ) {
+    // Find the render key for this layer's instanced geometry
+    // Try instanced_rot first (pads), then instanced (vias)
+    let renderKey = getRenderKey(layerId, 'instanced_rot');
+    let renderData = this.sceneState.layerRenderData.get(renderKey);
+    
+    if (!renderData) {
+      renderKey = getRenderKey(layerId, 'instanced');
+      renderData = this.sceneState.layerRenderData.get(renderKey);
+    }
+    
+    if (!renderData) {
+      // Not all layers have instanced data (e.g., silkscreen uses polylines)
+      return;
+    }
+
+    // Calculate LOD structure
+    const totalLODs = renderData.cpuInstanceBuffers?.length ?? 0;
+    const numShapes = totalLODs > 0 ? Math.floor(totalLODs / 3) : 1;
+    
+    // Create buffer with correct data types
+    const buffer = new ArrayBuffer(12);
+    const dataView = new DataView(buffer);
+    dataView.setFloat32(0, x, true);
+    dataView.setFloat32(4, y, true);
+    dataView.setUint32(8, packedRotVis, true);
+    
+    // instanceIdx is the index within this shape's buffer
+    // Each instance is 3 floats: x, y, packedRotVis
+    const byteOffset = instanceIdx * 3 * 4; // 3 floats * 4 bytes per float
+    const floatOffset = instanceIdx * 3;
+    
+    // Update ALL LOD levels for this shape
+    for (let lod = 0; lod < 3; lod++) {
+      const lodIndex = lod * numShapes + shapeIdx;
+      
+      // Update GPU buffer
+      const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+      if (gpuBuffer) {
+        this.sceneState.device?.queue.writeBuffer(gpuBuffer, byteOffset, buffer);
+      }
+      
+      // Update CPU buffer (needed for clearMovingFlags to read correct values)
+      const cpuBuffer = renderData.cpuInstanceBuffers?.[lodIndex];
+      if (cpuBuffer && floatOffset + 2 < cpuBuffer.length) {
+        cpuBuffer[floatOffset] = x;
+        cpuBuffer[floatOffset + 1] = y;
+        // Write packedRotVis as uint32 into Float32Array slot
+        const cpuView = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+        cpuView.setUint32((floatOffset + 2) * 4, packedRotVis, true);
+      }
+    }
+  }
+  
+  /**
+   * Clear the "moving" flag on all instances WITHOUT restoring original positions.
+   * Called after transform is successfully applied - keeps the new transformed positions.
+   */
+  public clearMovingFlags() {
+    // For each moving object, clear bit 1 (moving flag) in packedRotVis
+    // but keep the current (transformed) positions intact
+    for (const obj of this.sceneState.movingObjects) {
+      if (obj.instance_index === undefined) continue;
+      
+      const layerId = obj.layer_id;
+      let renderKey = getRenderKey(layerId, 'instanced_rot');
+      let renderData = this.sceneState.layerRenderData.get(renderKey);
+      
+      if (!renderData) {
+        renderKey = getRenderKey(layerId, 'instanced');
+        renderData = this.sceneState.layerRenderData.get(renderKey);
+      }
+      
+      if (!renderData) continue;
+      
+      // Read current position from CPU buffer (already updated by updateInstancePositionDirect)
+      const currentPos = this.readInstancePosition(obj);
+      if (currentPos) {
+        const packed = currentPos.packedRotVis & ~2; // Clear bit 1 (moving flag)
+        const shapeIdx = obj.shape_index ?? 0;
+        const instanceIndex = obj.instance_index;
+        const byteOffset = instanceIndex * 3 * 4;
+        const floatOffset = instanceIndex * 3;
+        
+        // Calculate LOD structure
+        const totalLODs = renderData.cpuInstanceBuffers?.length ?? 0;
+        const numShapes = totalLODs > 0 ? Math.floor(totalLODs / 3) : 1;
+        
+        const data = new ArrayBuffer(12);
+        const dataView = new DataView(data);
+        dataView.setFloat32(0, currentPos.x, true);
+        dataView.setFloat32(4, currentPos.y, true);
+        dataView.setUint32(8, packed, true);
+        
+        // Update ALL LOD levels for this shape
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          
+          // Update GPU buffer
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (gpuBuffer) {
+            this.sceneState.device?.queue.writeBuffer(gpuBuffer, byteOffset, data);
+          }
+          
+          // Update CPU buffer
+          const cpuBuffer = renderData.cpuInstanceBuffers?.[lodIndex];
+          if (cpuBuffer && floatOffset + 2 < cpuBuffer.length) {
+            cpuBuffer[floatOffset] = currentPos.x;
+            cpuBuffer[floatOffset + 1] = currentPos.y;
+            const cpuView = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+            cpuView.setUint32((floatOffset + 2) * 4, packed, true);
+          }
+        }
+      }
+    }
+    
+    // Clear moving objects list
+    this.sceneState.movingObjects = [];
+    this.originalInstancePositions.clear();
+  }
+  
+  /**
+   * Restore original positions for all moving objects.
+   * Called when transform is cancelled - reverts all changes.
+   */
+  public restoreOriginalPositions() {
+    for (const obj of this.sceneState.movingObjects) {
+      if (obj.instance_index === undefined) continue;
+      
+      const layerId = obj.layer_id;
+      let renderKey = getRenderKey(layerId, 'instanced_rot');
+      let renderData = this.sceneState.layerRenderData.get(renderKey);
+      
+      if (!renderData) {
+        renderKey = getRenderKey(layerId, 'instanced');
+        renderData = this.sceneState.layerRenderData.get(renderKey);
+      }
+      
+      if (!renderData) continue;
+      
+      // Restore from original positions with moving bit cleared
+      const storedPos = this.originalInstancePositions.get(obj.id);
+      if (storedPos) {
+        const packed = storedPos.packedRotVis & ~2; // Clear bit 1 (moving flag)
+        const shapeIdx = obj.shape_index ?? 0;
+        const instanceIndex = obj.instance_index;
+        const byteOffset = instanceIndex * 3 * 4;
+        const floatOffset = instanceIndex * 3;
+        
+        // Calculate LOD structure
+        const totalLODs = renderData.cpuInstanceBuffers?.length ?? 0;
+        const numShapes = totalLODs > 0 ? Math.floor(totalLODs / 3) : 1;
+        
+        const data = new ArrayBuffer(12);
+        const dataView = new DataView(data);
+        dataView.setFloat32(0, storedPos.x, true);
+        dataView.setFloat32(4, storedPos.y, true);
+        dataView.setUint32(8, packed, true);
+        
+        // Restore ALL LOD levels for this shape
+        for (let lod = 0; lod < 3; lod++) {
+          const lodIndex = lod * numShapes + shapeIdx;
+          
+          // Update GPU buffer
+          const gpuBuffer = renderData.lodInstanceBuffers?.[lodIndex];
+          if (gpuBuffer) {
+            this.sceneState.device?.queue.writeBuffer(gpuBuffer, byteOffset, data);
+          }
+          
+          // Update CPU buffer
+          const cpuBuffer = renderData.cpuInstanceBuffers?.[lodIndex];
+          if (cpuBuffer && floatOffset + 2 < cpuBuffer.length) {
+            cpuBuffer[floatOffset] = storedPos.x;
+            cpuBuffer[floatOffset + 1] = storedPos.y;
+            const cpuView = new DataView(cpuBuffer.buffer, cpuBuffer.byteOffset);
+            cpuView.setUint32((floatOffset + 2) * 4, packed, true);
+          }
+        }
+      }
+    }
+    
+    // Clear moving objects list
+    this.sceneState.movingObjects = [];
+    this.originalInstancePositions.clear();
   }
 }

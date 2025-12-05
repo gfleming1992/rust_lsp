@@ -33,7 +33,10 @@ export class Scene {
     this.sceneState = new SceneState();
     this.layerLoader = new LayerLoader(this.sceneState);
     this.objectVisibility = new ObjectVisibility(this.sceneState);
-    this.moveOperations = new MoveOperations(this.sceneState);
+    this.moveOperations = new MoveOperations(
+      this.sceneState,
+      (id: number, logicalLayerId: string) => this.objectVisibility.getActualRenderLayerById(id, logicalLayerId)
+    );
     this.drcOverlay = new DrcOverlay(this.sceneState);
   }
 
@@ -49,6 +52,7 @@ export class Scene {
   public set layerOrder(order: string[]) { this.sceneState.layerOrder = order; }
   public get layerColors() { return this.sceneState.layerColors; }
   public get layerVisible() { return this.sceneState.layerVisible; }
+  public get layerPairs() { return this.sceneState.layerPairs; }
   public get viasVisible() { return this.sceneState.viasVisible; }
   public set viasVisible(v: boolean) { this.sceneState.viasVisible = v; }
   public get movingObjects() { return this.sceneState.movingObjects; }
@@ -90,6 +94,13 @@ export class Scene {
     this.sceneState.toggleLayerVisibility(layerId, visible);
   }
 
+  public setLayerPairs(pairs: Record<string, string>) {
+    this.sceneState.layerPairs.clear();
+    for (const [key, value] of Object.entries(pairs)) {
+      this.sceneState.layerPairs.set(key, value);
+    }
+  }
+
   // ==================== Layer Loading ====================
 
   public loadLayerData(layerJson: LayerJSON) {
@@ -116,6 +127,19 @@ export class Scene {
 
   public clearHighlightObject() {
     this.objectVisibility.clearHighlightObject();
+  }
+  
+  /**
+   * Record that an object's geometry is in a specific layer.
+   * Call this when flipping - the object's logical layer changes but geometry stays in original buffer.
+   */
+  public remapObjectRenderLayer(objectId: number, renderLayerId: string) {
+    this.objectVisibility.remapObjectRenderLayer(objectId, renderLayerId);
+  }
+
+  /** Resolve actual render layer for a given logical layer id */
+  public getActualRenderLayer(range: ObjectRange): string {
+    return this.objectVisibility.getActualRenderLayer(range);
   }
 
   // ==================== Move Operations ====================
@@ -194,6 +218,50 @@ export class Scene {
     return this.moveOperations.hasComponentPolylineData();
   }
 
+  // ==================== Flip Operations ====================
+  
+  /**
+   * Toggle flip state for moving objects (X-axis flip).
+   */
+  public toggleFlip() {
+    this.moveOperations.toggleFlip();
+  }
+  
+  /**
+   * Check if currently in flipped state.
+   */
+  public isFlipped(): boolean {
+    return this.moveOperations.isFlipped();
+  }
+  
+  /**
+   * Get pending flip count.
+   */
+  public getPendingFlipCount(): number {
+    return this.moveOperations.getPendingFlipCount();
+  }
+  
+  /**
+   * Reset flip state (on move cancel).
+   */
+  public resetFlip() {
+    this.moveOperations.resetFlip();
+  }
+  
+  /**
+   * Finalize flip (on move end). Returns true if flipped.
+   */
+  public finalizeFlip(): boolean {
+    return this.moveOperations.finalizeFlip();
+  }
+  
+  /**
+   * Clear flip state after LSP commit.
+   */
+  public clearFlipState() {
+    this.moveOperations.clearFlipState();
+  }
+
   // ==================== DRC Overlay ====================
 
   public loadDrcRegions(regions: DrcRegion[]) {
@@ -220,5 +288,41 @@ export class Scene {
     const regions = this.sceneState.drcRegions;
     const index = this.sceneState.drcCurrentIndex;
     return regions.length > 0 ? regions[index] : null;
+  }
+
+  // ==================== LSP Transform Support ====================
+  
+  /**
+   * Update a single instance's position in the GPU buffer.
+   * Used by the new LSP-based transform system.
+   * @param shapeIdx - Which shape group (LOD entry) this instance belongs to
+   * @param instanceIdx - Index within that shape group's instance buffer
+   */
+  public updateInstancePosition(
+    objectId: number,
+    layerId: string,
+    x: number,
+    y: number,
+    packedRotVis: number,
+    shapeIdx: number,
+    instanceIdx: number
+  ) {
+    this.moveOperations.updateInstancePositionDirect(objectId, layerId, x, y, packedRotVis, shapeIdx, instanceIdx);
+  }
+  
+  /**
+   * Clear moving flags on all instances without restoring original positions.
+   * Called after transform is successfully applied - keeps transformed positions.
+   */
+  public clearMovingFlags() {
+    this.moveOperations.clearMovingFlags();
+  }
+  
+  /**
+   * Restore original positions for all moving objects.
+   * Called when transform is cancelled - reverts all changes.
+   */
+  public restoreOriginalPositions() {
+    this.moveOperations.restoreOriginalPositions();
   }
 }

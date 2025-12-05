@@ -18,7 +18,8 @@ export class LayerLoader {
     const id = layerJson.layerId;
     const name = layerJson.layerName || id;
     const defaultColor = [...(layerJson.defaultColor ?? [0.8, 0.8, 0.8, 1])] as LayerColor;
-    this.sceneState.layerInfoMap.set(id, { id, name, defaultColor });
+    const side = layerJson.layerSide || 'NONE';
+    this.sceneState.layerInfoMap.set(id, { id, name, defaultColor, side });
     
     if (!this.sceneState.layerOrder.includes(id)) {
       this.sceneState.layerOrder.push(id);

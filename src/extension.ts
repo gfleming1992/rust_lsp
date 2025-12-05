@@ -138,7 +138,8 @@ function startLspServer(context: vscode.ExtensionContext) {
     console.log('[Extension] Starting LSP server:', serverPath);
 
     lspServer = spawn(serverPath, [], {
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, LSP_EXTENSION_MODE: '1' }
     });
 
     if (!lspServer.stdout || !lspServer.stdin) {
@@ -293,6 +294,13 @@ async function sendToLspServer(request: { method: string; params: any }, panel: 
                 sendBinaryTessellation(layerId, panel);
             }
         } else if (request.method === 'Load') {
+            // Forward layer pairs to webview for flip operations
+            if (response.result?.layer_pairs) {
+                panel.webview.postMessage({
+                    command: 'layerPairs',
+                    pairs: response.result.layer_pairs
+                });
+            }
             // After load, automatically get layers
             sendToLspServer({ method: 'GetLayers', params: null }, panel);
         } else if (request.method === 'Delete' && response.result?.related_objects) {

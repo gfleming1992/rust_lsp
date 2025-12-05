@@ -22,7 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 5173;
-const DEV_XML_PATH = path.join(__dirname, 'tests', 'NEX40400_PROBECARD_PCB.xml');
+const DEV_XML_PATH = path.join(__dirname, 'tests', 'tinytapeout-demo.xml');
 
 let lspServer = null;
 let lspStdin = null;
@@ -136,7 +136,8 @@ function startLspServer() {
   console.log('[DevServer] Starting LSP server:', serverPath);
   
   lspServer = spawn(serverPath, [], {
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, LSP_EXTENSION_MODE: '1' }
   });
   
   lspStdin = lspServer.stdin;
@@ -382,6 +383,17 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({
             command: 'memoryResult',
             memoryBytes: response.result.memory_bytes
+          }));
+        }
+      });
+      
+    } else if (data.command === 'GetObjectBounds') {
+      console.log(`[DevServer] GetObjectBounds: ${data.objectIds?.length || 0} objects`);
+      sendLspRequest('GetObjectBounds', { object_ids: data.objectIds }, (response) => {
+        if (response.result) {
+          ws.send(JSON.stringify({
+            command: 'objectBoundsResult',
+            objects: response.result
           }));
         }
       });

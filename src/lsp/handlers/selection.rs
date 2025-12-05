@@ -96,14 +96,23 @@ fn triangle_intersects_aabb(
 /// Check if a selection box intersects an object's actual geometry (not just bounding box)
 /// `move_delta` is the (dx, dy) to apply if this object was moved
 /// `rotation_delta` is the rotation angle in radians to apply if this object was rotated
+/// `flip_info` is the (center_x, center_y, is_flipped, original_layer_id) to apply if this object was flipped
 pub fn box_intersects_object(
     min_x: f32, min_y: f32, max_x: f32, max_y: f32,
     range: &ObjectRange, 
     layers: &[LayerJSON], 
     move_delta: Option<(f32, f32)>,
-    rotation_delta: Option<f32>
+    rotation_delta: Option<f32>,
+    flip_info: Option<(f32, f32, bool, &str)>
 ) -> bool {
-    let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
+    // If flipped, look up geometry in the ORIGINAL layer, not the current layer_id
+    let layer_to_query = if let Some((_, _, true, original_layer)) = flip_info {
+        original_layer
+    } else {
+        range.layer_id.as_str()
+    };
+    
+    let layer = match layers.iter().find(|l| l.layer_id == layer_to_query) {
         Some(l) => l,
         None => return true, // Layer not found, assume it intersects
     };
@@ -136,9 +145,24 @@ pub fn box_intersects_object(
             let floats_per_instance = 3;
             let base = (inst_idx as usize) * floats_per_instance;
             if base + 2 < inst_data.len() {
-                // Apply move delta to instance position
-                let inst_x = inst_data[base] + dx;
-                let inst_y = inst_data[base + 1] + dy;
+                // Get original instance position
+                let orig_x = inst_data[base];
+                let orig_y = inst_data[base + 1];
+                
+                // Apply flip first (mirror around center_x)
+                let (flipped_x, flipped_y) = if let Some((center_x, _center_y, is_flipped, _)) = flip_info {
+                    if is_flipped {
+                        (2.0 * center_x - orig_x, orig_y)
+                    } else {
+                        (orig_x, orig_y)
+                    }
+                } else {
+                    (orig_x, orig_y)
+                };
+                
+                // Then apply move delta
+                let inst_x = flipped_x + dx;
+                let inst_y = flipped_y + dy;
                 let packed = inst_data[base + 2];
                 
                 // Extract rotation for instanced_rot (obj_type == 3) and add rotation delta
@@ -269,8 +293,22 @@ pub fn sort_by_priority(objects: &mut [ObjectRange], layers: &[LayerJSON]) {
 
 /// Check if a point hits an object's actual geometry (not just bounding box)
 /// `move_delta` is the (dx, dy) to apply if this object was moved
-pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON], move_delta: Option<(f32, f32)>, rotation_delta: Option<f32>) -> bool {
-    let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
+/// `rotation_delta` is the rotation angle in radians to apply if this object was rotated
+/// `flip_info` is the (center_x, center_y, is_flipped, original_layer_id) to apply if this object was flipped
+pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON], move_delta: Option<(f32, f32)>, rotation_delta: Option<f32>, flip_info: Option<(f32, f32, bool, &str)>) -> bool {
+    let debug = std::env::var("DEBUG_SELECT").is_ok();
+    if debug && range.obj_type == 3 {
+        eprintln!("[DEBUG_SELECT] point_hits_object called for obj_type=3 pin={:?}", range.pin_ref);
+    }
+    
+    // If flipped, look up geometry in the ORIGINAL layer, not the current layer_id
+    let layer_to_query = if let Some((_, _, true, original_layer)) = flip_info {
+        original_layer
+    } else {
+        range.layer_id.as_str()
+    };
+    
+    let layer = match layers.iter().find(|l| l.layer_id == layer_to_query) {
         Some(l) => l,
         None => return true,
     };
@@ -293,8 +331,13 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
     
     // Handle instanced geometry (vias, pads)
     if range.obj_type == 2 || range.obj_type == 3 {
+        if debug && range.pin_ref.is_some() {
+            eprintln!("[DEBUG_SELECT] Checking {} obj_type={} shape_idx={:?} inst_idx={:?} lods.len()={}",
+                range.pin_ref.as_ref().unwrap(), range.obj_type, range.shape_index, range.instance_index, lods.len());
+        }
         let shape_idx = range.shape_index.unwrap_or(0) as usize;
         if shape_idx >= lods.len() {
+            if debug { eprintln!("[DEBUG_SELECT]   shape_idx {} >= lods.len() {}, returning true", shape_idx, lods.len()); }
             return true;
         }
         let lod_entry = &lods[shape_idx];
@@ -303,9 +346,24 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
             let floats_per_instance = 3;
             let base = (inst_idx as usize) * floats_per_instance;
             if base + 2 < inst_data.len() {
-                // Apply move delta to instance position
-                let inst_x = inst_data[base] + dx;
-                let inst_y = inst_data[base + 1] + dy;
+                // Get original instance position
+                let orig_x = inst_data[base];
+                let orig_y = inst_data[base + 1];
+                
+                // Apply flip first (mirror around center_x)
+                let (flipped_x, flipped_y) = if let Some((center_x, _center_y, is_flipped, _)) = flip_info {
+                    if is_flipped {
+                        (2.0 * center_x - orig_x, orig_y)
+                    } else {
+                        (orig_x, orig_y)
+                    }
+                } else {
+                    (orig_x, orig_y)
+                };
+                
+                // Then apply move delta
+                let inst_x = flipped_x + dx;
+                let inst_y = flipped_y + dy;
                 let packed = inst_data[base + 2];
                 
                 // Extract rotation for instanced_rot (obj_type == 3) and add rotation delta
@@ -321,7 +379,19 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
                 let cos_r = rotation.cos();
                 let sin_r = rotation.sin();
                 
+                if debug && range.pin_ref.is_some() {
+                    eprintln!("[DEBUG_SELECT] Testing {} on {}: point=({:.2},{:.2}) inst=({:.2},{:.2}) rot={:.2}deg shape_idx={} inst_idx={} vertex_count={} has_indices={}",
+                        range.pin_ref.as_ref().unwrap(), range.layer_id,
+                        px, py, inst_x, inst_y, rotation.to_degrees(), shape_idx, inst_idx,
+                        lod_entry.vertex_data.len() / 2, lod_entry.index_data.is_some());
+                }
+                
                 if let Some(ref indices) = lod_entry.index_data {
+                    let mut hit = false;
+                    if debug && range.pin_ref.is_some() {
+                        eprintln!("[DEBUG_SELECT]   {} triangles, vertex_data.len()={}", 
+                            indices.len() / 3, lod_entry.vertex_data.len());
+                    }
                     for tri in indices.chunks(3) {
                         if tri.len() < 3 { continue; }
                         let i0 = tri[0] as usize * 2;
@@ -345,10 +415,42 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
                             let x2 = lx2 * cos_r - ly2 * sin_r + inst_x;
                             let y2 = lx2 * sin_r + ly2 * cos_r + inst_y;
                             
+                            if debug && range.pin_ref.is_some() {
+                                eprintln!("[DEBUG_SELECT]   tri: ({:.2},{:.2})-({:.2},{:.2})-({:.2},{:.2}) point=({:.2},{:.2})",
+                                    x0, y0, x1, y1, x2, y2, px, py);
+                            }
+                            
                             if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
-                                return true;
+                                hit = true;
+                                if debug && range.pin_ref.is_some() {
+                                    eprintln!("[DEBUG_SELECT]   HIT! triangle: ({:.2},{:.2})-({:.2},{:.2})-({:.2},{:.2})",
+                                        x0, y0, x1, y1, x2, y2);
+                                }
+                                break;
                             }
                         }
+                    }
+                    if debug && range.pin_ref.is_some() && !hit {
+                        // Print the shape bounds for debugging
+                        let mut min_x = f32::MAX;
+                        let mut max_x = f32::MIN;
+                        let mut min_y = f32::MAX;
+                        let mut max_y = f32::MIN;
+                        for i in 0..(lod_entry.vertex_data.len()/2) {
+                            let lx = lod_entry.vertex_data[i*2];
+                            let ly = lod_entry.vertex_data[i*2+1];
+                            let wx = lx * cos_r - ly * sin_r + inst_x;
+                            let wy = lx * sin_r + ly * cos_r + inst_y;
+                            min_x = min_x.min(wx);
+                            max_x = max_x.max(wx);
+                            min_y = min_y.min(wy);
+                            max_y = max_y.max(wy);
+                        }
+                        eprintln!("[DEBUG_SELECT]   MISS - shape world bounds: ({:.2},{:.2})-({:.2},{:.2})",
+                            min_x, min_y, max_x, max_y);
+                    }
+                    if hit {
+                        return true;
                     }
                 }
             }
@@ -426,7 +528,10 @@ pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32, only_visible: 
             // Get rotation delta if this object was rotated
             let rotation_delta = state.rotated_objects.get(&obj.range.id)
                 .map(|r| r.delta_radians);
-            point_hits_object(x, y, &obj.range, &state.layers, move_delta, rotation_delta)
+            // Get flip info if this object was flipped (includes original layer for geometry lookup)
+            let flip_info = state.flipped_objects.get(&obj.range.id)
+                .map(|f| (f.center_x, f.center_y, f.flip_count % 2 == 1, f.original_layer_id.as_str()));
+            point_hits_object(x, y, &obj.range, &state.layers, move_delta, rotation_delta, flip_info)
         })
         .map(|obj| obj.range.clone())
         .collect();
@@ -489,7 +594,10 @@ pub fn handle_box_select(
                 // Get rotation delta if this object was rotated
                 let rotation_delta = state.rotated_objects.get(&obj.range.id)
                     .map(|r| r.delta_radians);
-                box_intersects_object(p.min_x, p.min_y, p.max_x, p.max_y, &obj.range, &state.layers, move_delta, rotation_delta)
+                // Get flip info if this object was flipped (includes original layer for geometry lookup)
+                let flip_info = state.flipped_objects.get(&obj.range.id)
+                    .map(|f| (f.center_x, f.center_y, f.flip_count % 2 == 1, f.original_layer_id.as_str()));
+                box_intersects_object(p.min_x, p.min_y, p.max_x, p.max_y, &obj.range, &state.layers, move_delta, rotation_delta, flip_info)
             })
             .map(|obj| obj.range.clone())
             .collect();

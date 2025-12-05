@@ -49,6 +49,9 @@ export class Input {
   private onRotate: ((angleDelta: number) => void) | null = null;
   private rotationEnabled = false; // Only true when single component is fully selected
   
+  // Flip callback
+  private onFlip: (() => void) | null = null;
+  
   /** Check if currently in move mode (object following mouse) */
   public getIsMoving(): boolean {
     return this.isMoving;
@@ -156,6 +159,10 @@ export class Input {
 
   public setOnRotate(callback: (angleDelta: number) => void) {
     this.onRotate = callback;
+  }
+
+  public setOnFlip(callback: () => void) {
+    this.onFlip = callback;
   }
 
   /**
@@ -323,6 +330,18 @@ export class Input {
         console.log(`[Input] Rotate ${event.shiftKey ? 'CCW' : 'CW'} pressed`);
         if (this.onRotate) {
           this.onRotate(angleDelta);
+        }
+      } else if (event.key === 'f' || event.key === 'F') {
+        // Flip: F for X-axis flip (top↔bottom)
+        // Only works when rotation is enabled (single component fully selected)
+        if (!this.rotationEnabled) {
+          console.log('[Input] Flip disabled - select a single component first (press H after selecting)');
+          return;
+        }
+        event.preventDefault();
+        console.log('[Input] Flip pressed');
+        if (this.onFlip) {
+          this.onFlip();
         }
       }
     });

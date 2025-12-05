@@ -42,6 +42,12 @@ export class SceneState {
   
   // Rotation operation state (applied to moving objects)
   public globalRotationOffset = 0; // Radians
+  
+  // Flip operation state (applied to moving objects)
+  public pendingFlipCount = 0; // Odd = flipped, even = not flipped
+  
+  // Layer pairs for flip operations (TOP layer ↔ BOTTOM layer)
+  public layerPairs = new Map<string, string>();
 
   // DRC overlay state
   public drcRegions: DrcRegion[] = [];

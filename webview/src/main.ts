@@ -5,6 +5,7 @@ import { Input } from "./Input";
 import { ObjectRange } from "./types";
 import { BinaryParserPool } from "./parsing/BinaryParserPool";
 import { DebugOverlay, DEBUG_SHOW_COORDS } from "./debug/DebugOverlay";
+import { BoundsDebugOverlay } from "./debug/BoundsDebugOverlay";
 import { setupDevConsole, setupVSCodeConsoleForwarding } from "./debug/devConsole";
 import { setupMessageHandler, MessageHandlerContext, UndoAction } from "./messageHandler";
 
@@ -53,9 +54,13 @@ async function init() {
   }
   ui.setDebugOverlay(debugOverlay);
   
+  // Create bounds debug overlay for TS vs Rust comparison
+  const boundsDebugOverlay = new BoundsDebugOverlay(canvasElement, scene, renderer);
+  ui.setBoundsDebugOverlay(boundsDebugOverlay);
+  
   // Shared state for message handling
   const ctx: MessageHandlerContext = {
-    scene, renderer, ui, input: null as any, debugOverlay,
+    scene, renderer, ui, input: null as any, debugOverlay, boundsDebugOverlay,
     workerPool: new BinaryParserPool(),
     isVSCodeWebview, vscode,
     selectedObjects: [],
@@ -65,6 +70,7 @@ async function init() {
     lastNetHighlightAllObjects: [],
     lastSelectX: 0,
     lastSelectY: 0,
+    preFlipRenderLayerById: new Map<number, string>(),
     undoStack: [] as UndoAction[],
     redoStack: [] as UndoAction[],
   };
@@ -97,6 +103,14 @@ async function init() {
   }
 
   function performUndo() {
+    // For transforms, use LSP-based undo
+    if (isVSCodeWebview && vscode) {
+      console.log('[Undo] Sending UndoTransform to LSP');
+      vscode.postMessage({ command: 'UndoTransform' });
+      return;
+    }
+    
+    // Fallback for dev server - use local undo stack
     if (ctx.undoStack.length === 0) {
       console.log('[Undo] Nothing to undo');
       return;
@@ -109,9 +123,6 @@ async function init() {
       for (const obj of action.objects) {
         scene.showObject(obj);
         ctx.deletedObjectIds.delete(obj.id);
-        if (isVSCodeWebview && vscode) {
-          vscode.postMessage({ command: 'Undo', object: obj });
-        }
       }
     } else if (action.type === 'move') {
       console.log(`[Undo] Reversing move of ${action.objects.length} object(s)`);
@@ -139,14 +150,6 @@ async function init() {
           obj.component_center[0] -= action.deltaX;
           obj.component_center[1] -= action.deltaY;
         }
-      }
-      
-      if (isVSCodeWebview && vscode) {
-        vscode.postMessage({ 
-          command: 'UndoMove', 
-          objectIds: action.objects.map(o => o.id),
-          deltaX: action.deltaX, deltaY: action.deltaY
-        });
       }
     } else if (action.type === 'rotate') {
       console.log(`[Undo] Reversing rotation of ${action.objects.length} object(s)`);
@@ -255,6 +258,14 @@ async function init() {
   }
 
   function performRedo() {
+    // For transforms, use LSP-based redo
+    if (isVSCodeWebview && vscode) {
+      console.log('[Redo] Sending RedoTransform to LSP');
+      vscode.postMessage({ command: 'RedoTransform' });
+      return;
+    }
+    
+    // Fallback for dev server - use local redo stack
     if (ctx.redoStack.length === 0) {
       console.log('[Redo] Nothing to redo');
       return;
@@ -267,9 +278,6 @@ async function init() {
       for (const obj of action.objects) {
         scene.hideObject(obj);
         ctx.deletedObjectIds.add(obj.id);
-        if (isVSCodeWebview && vscode) {
-          vscode.postMessage({ command: 'Redo', object: obj });
-        }
       }
     } else if (action.type === 'move') {
       console.log(`[Redo] Re-applying move of ${action.objects.length} object(s)`);
@@ -522,144 +530,87 @@ async function init() {
     ui.clearDrcHighlight();
   });
 
-  // ==================== Move Operations ====================
+  // ==================== Move Operations (LSP-based transforms) ====================
+  
+  // Track if we're in an active transform session with LSP
+  let transformActive = false;
   
   input.setGetSelectedObjects(() => ctx.selectedObjects);
   
   input.setOnMoveStart(() => {
     if (ctx.selectedObjects.length === 0) return;
-    console.log(`[Move] Starting move for ${ctx.selectedObjects.length} objects`);
-    scene.startMove(ctx.selectedObjects);
+    
+    console.log(`[Transform] Starting transform for ${ctx.selectedObjects.length} objects`);
+    
+    // Send StartTransform to LSP
+    if (isVSCodeWebview && vscode) {
+      const objectIds = ctx.selectedObjects.map(obj => obj.id);
+      vscode.postMessage({ command: 'StartTransform', objectIds });
+      transformActive = true;
+    } else {
+      // Fallback for dev server - use local scene transform
+      scene.startMove(ctx.selectedObjects);
+    }
   });
   
   input.setOnMoveUpdate((deltaX: number, deltaY: number) => {
-    scene.updateMove(deltaX, deltaY);
+    if (isVSCodeWebview && vscode && transformActive) {
+      // Send position update to LSP
+      vscode.postMessage({ 
+        command: 'TransformPreview', 
+        deltaX, 
+        deltaY 
+      });
+    } else {
+      // Fallback for dev server
+      scene.updateMove(deltaX, deltaY);
+    }
   });
   
   input.setOnMoveCancel(() => {
-    scene.cancelMove();
-    console.log('[Move] Move cancelled');
+    console.log('[Transform] Transform cancelled');
+    
+    if (isVSCodeWebview && vscode && transformActive) {
+      vscode.postMessage({ command: 'CancelTransform' });
+      transformActive = false;
+    } else {
+      scene.cancelMove();
+      scene.resetFlip();
+    }
   });
   
   input.setOnMoveEnd((deltaX: number, deltaY: number) => {
-    const result = scene.endMove();
-    const hasMoved = Math.abs(result.deltaX) > 0.0001 || Math.abs(result.deltaY) > 0.0001;
-    const hasRotated = Math.abs(result.rotationDelta) > 0.0001;
-    
-    if (!hasMoved && !hasRotated) {
-      console.log('[Move] Move ended with no significant transformation');
-      return;
-    }
-    
-    console.log(`[Move] Move ended: delta=(${result.deltaX}, ${result.deltaY}), rotation=${(result.rotationDelta * 180 / Math.PI).toFixed(1)}°`);
-    const objectIds = ctx.selectedObjects.map(obj => obj.id);
-    
-    // IMPORTANT: Capture original bounds BEFORE updating them
-    // For move_rotate, we need true original bounds (before move AND rotation)
-    const originalBoundsMap = new Map<number, [number, number, number, number]>();
-    for (const obj of ctx.selectedObjects) {
-      originalBoundsMap.set(obj.id, [...obj.bounds] as [number, number, number, number]);
-    }
-    
-    // Update local bounds for moved objects
-    if (hasMoved) {
-      for (const obj of ctx.selectedObjects) {
-        obj.bounds[0] += result.deltaX;
-        obj.bounds[1] += result.deltaY;
-        obj.bounds[2] += result.deltaX;
-        obj.bounds[3] += result.deltaY;
-        // Also update component_center so subsequent rotations use the new center
-        if (obj.component_center) {
-          obj.component_center[0] += result.deltaX;
-          obj.component_center[1] += result.deltaY;
-        }
-      }
-    }
-    
-    // Update bounds for rotation (objects orbit around component center)
-    if (hasRotated && result.componentCenter) {
-      for (const obj of ctx.selectedObjects) {
-        const rotOffset = result.perObjectOffsets.get(obj.id);
-        if (rotOffset) {
-          obj.bounds[0] += rotOffset.dx;
-          obj.bounds[1] += rotOffset.dy;
-          obj.bounds[2] += rotOffset.dx;
-          obj.bounds[3] += rotOffset.dy;
-        }
-      }
-    }
-    
-    // Create undo entry - use combined type if both move and rotate happened
-    if (hasMoved && hasRotated && result.componentCenter) {
-      // Combined move+rotate: store TRUE original bounds (before any transformation)
-      const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
-        id, dx: offset.dx, dy: offset.dy
-      }));
-      const objectsForUndo = ctx.selectedObjects.map(obj => ({
-        ...obj,
-        bounds: originalBoundsMap.get(obj.id) || [...obj.bounds] as [number, number, number, number]
-      }));
-      ctx.undoStack.push({ 
-        type: 'move_rotate', 
-        objects: objectsForUndo, 
-        deltaX: result.deltaX, 
-        deltaY: result.deltaY,
-        rotationDelta: result.rotationDelta,
-        componentCenter: result.componentCenter,
-        perObjectOffsets
+    if (isVSCodeWebview && vscode && transformActive) {
+      // Send final position update and apply
+      vscode.postMessage({ 
+        command: 'TransformPreview', 
+        deltaX, 
+        deltaY 
       });
-    } else if (hasMoved) {
-      const objectsForUndo = ctx.selectedObjects.map(obj => ({
-        ...obj,
-        bounds: [
-          obj.bounds[0] - result.deltaX,
-          obj.bounds[1] - result.deltaY,
-          obj.bounds[2] - result.deltaX,
-          obj.bounds[3] - result.deltaY
-        ] as [number, number, number, number]
-      }));
-      ctx.undoStack.push({ type: 'move', objects: objectsForUndo, deltaX: result.deltaX, deltaY: result.deltaY });
-    } else if (hasRotated && result.componentCenter) {
-      const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
-        id, dx: offset.dx, dy: offset.dy
-      }));
-      const objectsForUndo = ctx.selectedObjects.map(obj => ({ ...obj }));
-      ctx.undoStack.push({ 
-        type: 'rotate', 
-        objects: objectsForUndo, 
-        rotationDelta: result.rotationDelta,
-        componentCenter: result.componentCenter,
-        perObjectOffsets
-      });
-    }
-    
-    if (ctx.undoStack.length > MAX_UNDO_HISTORY) ctx.undoStack.shift();
-    ctx.redoStack.length = 0;
-    
-    // Send to LSP server
-    if (isVSCodeWebview && vscode) {
-      if (hasMoved) {
-        vscode.postMessage({ command: 'MoveObjects', objectIds, deltaX: result.deltaX, deltaY: result.deltaY });
+      // Small delay to ensure preview is processed, then apply
+      setTimeout(() => {
+        vscode.postMessage({ command: 'ApplyTransform' });
+        transformActive = false;
+      }, 10);
+      
+      console.log(`[Transform] Applied: delta=(${deltaX.toFixed(3)}, ${deltaY.toFixed(3)})`);
+    } else {
+      // Fallback: use old local transform logic for dev server
+      const result = scene.endMove();
+      const hasMoved = Math.abs(result.deltaX) > 0.0001 || Math.abs(result.deltaY) > 0.0001;
+      const hasRotated = Math.abs(result.rotationDelta) > 0.0001;
+      
+      if (!hasMoved && !hasRotated) {
+        console.log('[Move] Move ended with no significant transformation');
+        return;
       }
-      if (hasRotated && result.componentCenter) {
-        // Convert perObjectOffsets Map to array for JSON serialization
-        const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
-          id, dx: offset.dx, dy: offset.dy
-        }));
-        vscode.postMessage({ 
-          command: 'RotateObjects', 
-          objectIds, 
-          rotationDelta: result.rotationDelta,
-          componentCenter: result.componentCenter,
-          perObjectOffsets
-        });
-      }
+      
+      console.log(`[Move] Move ended: delta=(${result.deltaX}, ${result.deltaY})`);
     }
   });
   
-  // Rotation during move mode - only works for single component selection
+  // Rotation during move mode - sends to LSP
   input.setOnRotate((angleDelta: number) => {
-    // If we have selected objects, rotate them
     if (ctx.selectedObjects.length === 0) {
       console.log('[Rotate] No objects selected');
       return;
@@ -679,43 +630,103 @@ async function init() {
       }
     }
     
-    // Check if objects have precomputed polar coordinates
-    const hasPolarCoords = ctx.selectedObjects.some(o => o.polar_radius !== undefined);
-    if (!hasPolarCoords) {
-      console.log('[Rotate] Selected component does not have polar coordinates - rotation disabled');
+    const rotateDegrees = (angleDelta * 180 / Math.PI);
+    console.log(`[Rotate] Rotating ${rotateDegrees.toFixed(0)}° for component ${firstComponentRef}`);
+    
+    if (isVSCodeWebview && vscode) {
+      // If not in transform session, start one
+      if (!transformActive) {
+        const objectIds = ctx.selectedObjects.map(obj => obj.id);
+        vscode.postMessage({ command: 'StartTransform', objectIds });
+        transformActive = true;
+        
+        // Send rotation after a small delay to ensure StartTransform is processed
+        setTimeout(() => {
+          vscode.postMessage({ command: 'TransformPreview', rotateDegrees });
+        }, 10);
+      } else {
+        // Already in transform session, just send rotation
+        vscode.postMessage({ command: 'TransformPreview', rotateDegrees });
+      }
+      
+      // If this was a "rotate in place" (R pressed without dragging), finalize immediately
+      if (!input.getIsMoving()) {
+        setTimeout(() => {
+          vscode.postMessage({ command: 'ApplyTransform' });
+          transformActive = false;
+        }, 20);
+      }
+    } else {
+      // Fallback for dev server - use old local logic
+      if (scene.movingObjects.length === 0) {
+        scene.startMove(ctx.selectedObjects);
+        scene.setupComponentRotation(ctx.selectedObjects);
+      }
+      scene.addRotation(angleDelta);
+      
+      if (!input.getIsMoving()) {
+        input.triggerMoveEnd(0, 0);
+      }
+    }
+  });
+
+  // Flip during move mode - sends to LSP
+  input.setOnFlip(() => {
+    if (ctx.selectedObjects.length === 0) {
+      console.log('[Flip] No objects selected');
       return;
     }
     
-    // Track if this is a "rotate in place" (not during drag)
-    const wasAlreadyMoving = input.getIsMoving();
+    // Validate: all selected objects must belong to the same component
+    const firstComponentRef = ctx.selectedObjects[0].component_ref;
+    if (!firstComponentRef) {
+      console.log('[Flip] Selection does not belong to a component - flip disabled');
+      return;
+    }
     
-    // If not already in move mode, start it and set up component rotation
-    if (scene.movingObjects.length === 0) {
-      scene.startMove(ctx.selectedObjects);
-      const success = scene.setupComponentRotation(ctx.selectedObjects);
-      if (!success) {
-        console.log('[Rotate] Failed to set up component rotation');
-        scene.cancelMove();
-        return;
-      }
-    } else if (!scene.hasComponentRotation()) {
-      // Already moving but no component rotation set up - try to set it up
-      const success = scene.setupComponentRotation(ctx.selectedObjects);
-      if (!success) {
-        console.log('[Rotate] Failed to set up component rotation for moving objects');
+    for (const obj of ctx.selectedObjects) {
+      if (obj.component_ref !== firstComponentRef) {
+        console.log('[Flip] Selection contains objects from different components - flip disabled');
         return;
       }
     }
     
-    scene.addRotation(angleDelta);
-    console.log(`[Rotate] Added ${(angleDelta * 180 / Math.PI).toFixed(0)}° rotation for component ${firstComponentRef}`);
+    console.log(`[Flip] Flipping component ${firstComponentRef}`);
     
-    // If this was a "rotate in place" (R pressed without dragging), finalize immediately
-    // This creates the undo entry and sends to LSP server
-    if (!wasAlreadyMoving) {
-      console.log('[Rotate] Finalizing rotate-in-place with deltaX=0, deltaY=0');
-      // Trigger the same logic as onMoveEnd with zero delta
-      input.triggerMoveEnd(0, 0);
+    if (isVSCodeWebview && vscode) {
+      // If not in transform session, start one
+      if (!transformActive) {
+        const objectIds = ctx.selectedObjects.map(obj => obj.id);
+        vscode.postMessage({ command: 'StartTransform', objectIds });
+        transformActive = true;
+        
+        // Send flip after a small delay to ensure StartTransform is processed
+        setTimeout(() => {
+          vscode.postMessage({ command: 'TransformPreview', flip: true });
+        }, 10);
+      } else {
+        // Already in transform session, just send flip
+        vscode.postMessage({ command: 'TransformPreview', flip: true });
+      }
+      
+      // If this was a "flip in place" (F pressed without dragging), finalize immediately
+      if (!input.getIsMoving()) {
+        setTimeout(() => {
+          vscode.postMessage({ command: 'ApplyTransform' });
+          transformActive = false;
+        }, 20);
+      }
+    } else {
+      // Fallback for dev server - use old local logic
+      if (scene.movingObjects.length === 0) {
+        scene.startMove(ctx.selectedObjects);
+        scene.setupComponentRotation(ctx.selectedObjects);
+      }
+      scene.toggleFlip();
+      
+      if (!input.getIsMoving()) {
+        input.triggerMoveEnd(0, 0);
+      }
     }
   });
 
@@ -807,6 +818,10 @@ async function init() {
     renderer.render();
     if (debugOverlay && wasNeedsDraw) {
       debugOverlay.render();
+    }
+    // Always render bounds overlay (it shows status at bottom)
+    if (boundsDebugOverlay) {
+      boundsDebugOverlay.render();
     }
     ui.updateStats();
     ui.updateHighlightPosition();

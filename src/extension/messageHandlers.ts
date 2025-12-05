@@ -74,12 +74,24 @@ export async function handleWebviewMessage(
       await sendToLspServer({ method: 'Redo', params: { object: message.object } }, panel);
       break;
 
+    case 'UndoTransform':
+      await handleUndoTransform(message, panel, sendToLspServer);
+      break;
+
+    case 'RedoTransform':
+      await handleRedoTransform(message, panel, sendToLspServer);
+      break;
+
     case 'MoveObjects':
       await handleMoveObjects(message, panel, sendToLspServer);
       break;
 
     case 'RotateObjects':
       await handleRotateObjects(message, panel, sendToLspServer);
+      break;
+
+    case 'FlipObjects':
+      await handleFlipObjects(message, panel, sendToLspServer);
       break;
 
     case 'UndoMove':
@@ -118,12 +130,33 @@ export async function handleWebviewMessage(
       await handleQueryNetAtPoint(message, panel, sendToLspServer);
       break;
 
+    case 'GetObjectBounds':
+      await handleGetObjectBounds(message, panel, sendToLspServer);
+      break;
+
     case 'GetMemory':
       await handleGetMemory(panel, sendToLspServer);
       break;
 
     case 'RunDRCWithRegions':
       await handleRunDRC(message, panel, sendToLspServer);
+      break;
+
+    // New unified transform API
+    case 'StartTransform':
+      await handleStartTransform(message, panel, sendToLspServer);
+      break;
+
+    case 'TransformPreview':
+      await handleTransformPreview(message, panel, sendToLspServer);
+      break;
+
+    case 'ApplyTransform':
+      await handleApplyTransform(message, panel, sendToLspServer);
+      break;
+
+    case 'CancelTransform':
+      await handleCancelTransform(message, panel, sendToLspServer);
       break;
   }
 }
@@ -203,6 +236,31 @@ async function handleRotateObjects(message: any, panel: vscode.WebviewPanel, sen
   }
 }
 
+async function handleFlipObjects(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] Received FlipObjects command:', message.objectIds?.length, 'objects, flipCount:', message.flipCount);
+  const response = await sendToLspServer({ 
+    method: 'FlipObjects', 
+    params: { 
+      object_ids: message.objectIds, 
+      component_center: message.componentCenter,
+      flip_count: message.flipCount
+    } 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] FlipObjects success:', response.result.flipped_count, 'objects flipped');
+    panel.webview.postMessage({ 
+      command: 'flipComplete', 
+      flippedCount: response.result.flipped_count,
+      layerRemapping: response.result.layer_remapping,
+      objectIds: message.objectIds  // Include the object IDs that were flipped
+    });
+  } else if (response?.error) {
+    console.error('[Extension] FlipObjects error:', response.error);
+    panel.webview.postMessage({ command: 'flipError', error: response.error.message });
+  }
+}
+
 async function handleBoxSelect(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
   const response = await sendToLspServer({ 
     method: 'BoxSelect', 
@@ -277,6 +335,20 @@ async function handleQueryNetAtPoint(message: any, panel: vscode.WebviewPanel, s
   }
 }
 
+async function handleGetObjectBounds(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  const response = await sendToLspServer({ 
+    method: 'GetObjectBounds', 
+    params: { object_ids: message.objectIds } 
+  }, panel);
+  
+  if (response?.result) {
+    panel.webview.postMessage({
+      command: 'objectBoundsResult',
+      objects: response.result
+    });
+  }
+}
+
 async function handleGetMemory(panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
   const response = await sendToLspServer({ method: 'GetMemory', params: null }, panel);
   
@@ -309,5 +381,135 @@ async function handleRunDRC(message: any, panel: vscode.WebviewPanel, sendToLspS
       regions: [],
       error: response.error.message
     });
+  }
+}
+
+// ==================== Transform Handlers ====================
+
+async function handleStartTransform(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] StartTransform:', message.objectIds?.length, 'objects');
+  const response = await sendToLspServer({ 
+    method: 'StartTransform', 
+    params: { object_ids: message.objectIds } 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] StartTransform success:', response.result);
+    panel.webview.postMessage({
+      command: 'transformStarted',
+      center: response.result.center,
+      objectCount: response.result.object_count
+    });
+  } else if (response?.error) {
+    console.error('[Extension] StartTransform error:', response.error);
+    panel.webview.postMessage({
+      command: 'transformError',
+      error: response.error.message
+    });
+  }
+}
+
+async function handleTransformPreview(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  // Build params - only include fields that changed
+  const params: any = {};
+  if (message.rotateDegrees !== undefined) params.rotate_degrees = message.rotateDegrees;
+  if (message.flip !== undefined) params.flip = message.flip;
+  if (message.deltaX !== undefined) params.delta_x = message.deltaX;
+  if (message.deltaY !== undefined) params.delta_y = message.deltaY;
+
+  const response = await sendToLspServer({ 
+    method: 'TransformPreview', 
+    params 
+  }, panel);
+  
+  if (response?.result) {
+    panel.webview.postMessage({
+      command: 'transformPreviewResult',
+      instances: response.result.instances,
+      rotationDegrees: response.result.rotation_degrees,
+      isFlipped: response.result.is_flipped,
+      deltaX: response.result.delta_x,
+      deltaY: response.result.delta_y
+    });
+  } else if (response?.error) {
+    console.error('[Extension] TransformPreview error:', response.error);
+  }
+}
+
+async function handleApplyTransform(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] ApplyTransform');
+  const response = await sendToLspServer({ 
+    method: 'ApplyTransform', 
+    params: {} 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] ApplyTransform success:', response.result.transformed_count, 'objects');
+    panel.webview.postMessage({
+      command: 'transformApplied',
+      transformedCount: response.result.transformed_count
+    });
+  } else if (response?.error) {
+    console.error('[Extension] ApplyTransform error:', response.error);
+    panel.webview.postMessage({
+      command: 'transformError',
+      error: response.error.message
+    });
+  }
+}
+
+async function handleCancelTransform(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] CancelTransform');
+  const response = await sendToLspServer({ 
+    method: 'CancelTransform', 
+    params: {} 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] CancelTransform success');
+    panel.webview.postMessage({
+      command: 'transformCancelled',
+      instances: response.result.instances // Original positions to restore
+    });
+  } else if (response?.error) {
+    console.error('[Extension] CancelTransform error:', response.error);
+  }
+}
+
+async function handleUndoTransform(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] UndoTransform');
+  const response = await sendToLspServer({ 
+    method: 'UndoTransform', 
+    params: {} 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] UndoTransform success:', response.result.instances?.length || 0, 'objects');
+    panel.webview.postMessage({
+      command: 'undoTransformResult',
+      instances: response.result.instances,
+      message: response.result.message
+    });
+  } else if (response?.error) {
+    console.error('[Extension] UndoTransform error:', response.error);
+  }
+}
+
+async function handleRedoTransform(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] RedoTransform');
+  const response = await sendToLspServer({ 
+    method: 'RedoTransform', 
+    params: {} 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] RedoTransform success:', response.result.instances?.length || 0, 'objects');
+    panel.webview.postMessage({
+      command: 'redoTransformResult',
+      instances: response.result.instances,
+      message: response.result.message
+    });
+  } else if (response?.error) {
+    console.error('[Extension] RedoTransform error:', response.error);
   }
 }

@@ -5,7 +5,7 @@
 
 use rust_extension::lsp::{Request, Response, ServerState, DrcAsyncResult, error_codes};
 use rust_extension::lsp::handlers;
-use rust_extension::lsp::util::log_to_file;
+use rust_extension::lsp::util::{log_to_file, set_cli_mode};
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Instant;
@@ -23,6 +23,13 @@ fn log_message(direction: &str, msg: &str) {
 }
 
 fn main() {
+    // Detect CLI mode: if LSP_EXTENSION_MODE env var is NOT set, we're running from CLI pipe
+    // The extension/dev-server sets this env var, CLI debugging does not
+    // In CLI mode, skip file logging to preserve debug logs during AI debugging
+    if std::env::var("LSP_EXTENSION_MODE").is_err() {
+        set_cli_mode(true);
+    }
+    
     eprintln!("[LSP Server] Starting IPC-2581 LSP server...");
     let mut state = ServerState::new();
     let stdin = io::stdin();
@@ -161,6 +168,15 @@ fn dispatch_request(
         "RotateObjects" => serde_json::to_string(&handlers::handle_rotate_objects(state, request.id, request.params)).unwrap(),
         "UndoRotate" => serde_json::to_string(&handlers::handle_undo_rotate(state, request.id, request.params)).unwrap(),
         "RedoRotate" => serde_json::to_string(&handlers::handle_redo_rotate(state, request.id, request.params)).unwrap(),
+        "FlipObjects" => serde_json::to_string(&handlers::handle_flip_objects(state, request.id, request.params)).unwrap(),
+        
+        // Transform operations (new unified API)
+        "StartTransform" => serde_json::to_string(&handlers::handle_start_transform(state, request.id, request.params)).unwrap(),
+        "TransformPreview" => serde_json::to_string(&handlers::handle_transform_preview(state, request.id, request.params)).unwrap(),
+        "ApplyTransform" => serde_json::to_string(&handlers::handle_apply_transform(state, request.id, request.params)).unwrap(),
+        "CancelTransform" => serde_json::to_string(&handlers::handle_cancel_transform(state, request.id, request.params)).unwrap(),
+        "UndoTransform" => serde_json::to_string(&handlers::handle_undo_transform(state, request.id, request.params)).unwrap(),
+        "RedoTransform" => serde_json::to_string(&handlers::handle_redo_transform(state, request.id, request.params)).unwrap(),
         
         // DRC operations
         "RunDRC" => serde_json::to_string(&handlers::handle_run_drc(state, request.id, request.params)).unwrap(),
@@ -170,6 +186,7 @@ fn dispatch_request(
         
         // Query operations
         "QueryNetAtPoint" => serde_json::to_string(&handlers::handle_query_net_at_point(state, request.id, request.params)).unwrap(),
+        "GetObjectBounds" => serde_json::to_string(&handlers::handle_get_object_bounds(state, request.id, request.params)).unwrap(),
         "GetMemory" => serde_json::to_string(&handlers::handle_get_memory(request.id)).unwrap(),
         
         // Unknown method

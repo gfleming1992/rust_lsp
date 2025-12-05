@@ -14,6 +14,19 @@ use std::mem::MaybeUninit;
 /// Track if we've already written to the log this session (to truncate on first write)
 static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Track if we're running in CLI mode (piped input) vs extension/dev-server mode
+static CLI_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Set CLI mode - call this at startup if running from command line pipe
+pub fn set_cli_mode(enabled: bool) {
+    CLI_MODE.store(enabled, Ordering::SeqCst);
+}
+
+/// Check if running in CLI mode
+pub fn is_cli_mode() -> bool {
+    CLI_MODE.load(Ordering::SeqCst)
+}
+
 /// Parse JSON-RPC params into a typed struct, returning an error Response on failure
 pub fn parse_params<T: DeserializeOwned>(
     id: Option<serde_json::Value>,
@@ -100,7 +113,13 @@ pub fn get_process_memory_bytes() -> Option<u64> {
 }
 
 /// Helper to log to file for debugging (truncates on first write each session)
+/// Skips file logging in CLI mode to preserve debug logs during AI debugging sessions.
 pub fn log_to_file(msg: &str) {
+    // Skip file logging in CLI mode (AI debugging via piped input)
+    if is_cli_mode() {
+        return;
+    }
+    
     // Always use CARGO_MANIFEST_DIR to ensure logs go to project root
     let log_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("logs");
     
@@ -130,6 +149,8 @@ pub fn log_to_file(msg: &str) {
 }
 
 /// Check if a point is inside a triangle using barycentric coordinates
+/// Uses a small epsilon tolerance to handle floating-point precision issues,
+/// especially after rotation transformations.
 #[allow(clippy::too_many_arguments)]
 pub fn point_in_triangle(
     px: f32, py: f32, 
@@ -137,11 +158,12 @@ pub fn point_in_triangle(
     x1: f32, y1: f32, 
     x2: f32, y2: f32
 ) -> bool {
+    const EPSILON: f32 = 0.001; // Tolerance for floating-point precision
     let area = 0.5 * (-y1 * x2 + y0 * (-x1 + x2) + x0 * (y1 - y2) + x1 * y2);
     if area.abs() < 1e-10 {
         return false; // Degenerate triangle
     }
     let s = (y0 * x2 - x0 * y2 + (y2 - y0) * px + (x0 - x2) * py) / (2.0 * area);
     let t = (x0 * y1 - y0 * x1 + (y0 - y1) * px + (x1 - x0) * py) / (2.0 * area);
-    s >= 0.0 && t >= 0.0 && (s + t) <= 1.0
+    s >= -EPSILON && t >= -EPSILON && (s + t) <= 1.0 + EPSILON
 }

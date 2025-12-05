@@ -4,6 +4,7 @@ export interface LayerInfo {
   id: string;
   name: string;
   defaultColor: LayerColor;
+  side?: string;  // TOP, BOTTOM, INTERNAL, NONE, ALL
 }
 
 // Geometry data for a specific shader type at a specific LOD level
@@ -33,6 +34,8 @@ export interface ShaderGeometry {
 export interface LayerJSON {
   layerId: string;
   layerName: string;
+  layerFunction?: string;  // CONDUCTOR, SOLDERMASK, SILKSCREEN, etc.
+  layerSide?: string;       // TOP, BOTTOM, INTERNAL, NONE, ALL
   defaultColor: LayerColor;
   geometry: ShaderGeometry;  // Organized by shader type, then by LOD
 }

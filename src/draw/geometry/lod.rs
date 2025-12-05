@@ -155,6 +155,10 @@ pub struct LayerJSON {
     #[serde(rename = "layerFunction")]
     pub layer_function: String,
     
+    /// Layer side from IPC-2581 (TOP, BOTTOM, INTERNAL, NONE, ALL)
+    #[serde(rename = "layerSide")]
+    pub layer_side: String,
+    
     #[serde(rename = "defaultColor")]
     pub default_color: [f32; 4],
     

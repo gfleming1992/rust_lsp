@@ -2,6 +2,7 @@ import { Scene } from "./Scene";
 import { Renderer } from "./Renderer";
 import { LayerColor, DrcRegion } from "./types";
 import { DebugOverlay } from "./debug/DebugOverlay";
+import { BoundsDebugOverlay } from "./debug/BoundsDebugOverlay";
 import { DrcPanel } from "./ui/DrcPanel";
 import { showColorPicker } from "./ui/ColorPicker";
 import { setupResizeHandle } from "./ui/resizeHandle";
@@ -10,6 +11,7 @@ export class UI {
   private scene: Scene;
   private renderer: Renderer;
   private debugOverlay: DebugOverlay | null = null;
+  private boundsDebugOverlay: BoundsDebugOverlay | null = null;
   
   private layersEl: HTMLDivElement | null = null;
   private coordOverlayEl: HTMLDivElement | null = null;
@@ -486,7 +488,92 @@ export class UI {
     label.appendChild(document.createTextNode('Show Pad Coordinates'));
     container.appendChild(label);
 
+    // Add bounds debug overlay checkboxes
+    this.addBoundsDebugCheckboxes(container);
+
     fpsEl.parentElement?.insertBefore(container, fpsEl.nextSibling);
+  }
+
+  private addBoundsDebugCheckboxes(container: HTMLElement) {
+    // TypeScript bounds checkbox (blue)
+    const tsLabel = document.createElement('label');
+    tsLabel.style.display = 'flex';
+    tsLabel.style.alignItems = 'center';
+    tsLabel.style.gap = '6px';
+    tsLabel.style.cursor = 'pointer';
+    tsLabel.style.fontSize = '11px';
+    tsLabel.style.color = '#6699ff';
+    tsLabel.style.marginTop = '4px';
+
+    const tsCheckbox = document.createElement('input');
+    tsCheckbox.type = 'checkbox';
+    tsCheckbox.checked = false;
+    tsCheckbox.style.margin = '0';
+    tsCheckbox.style.cursor = 'pointer';
+
+    tsCheckbox.addEventListener('change', () => {
+      if (this.boundsDebugOverlay) {
+        this.boundsDebugOverlay.setTsVisible(tsCheckbox.checked);
+        this.scene.state.needsDraw = true;
+      }
+    });
+
+    tsLabel.appendChild(tsCheckbox);
+    tsLabel.appendChild(document.createTextNode('Show TS Bounds (blue)'));
+    container.appendChild(tsLabel);
+
+    // Rust/LSP bounds checkbox (red)
+    const rustLabel = document.createElement('label');
+    rustLabel.style.display = 'flex';
+    rustLabel.style.alignItems = 'center';
+    rustLabel.style.gap = '6px';
+    rustLabel.style.cursor = 'pointer';
+    rustLabel.style.fontSize = '11px';
+    rustLabel.style.color = '#ff6666';
+    rustLabel.style.marginTop = '4px';
+
+    const rustCheckbox = document.createElement('input');
+    rustCheckbox.type = 'checkbox';
+    rustCheckbox.checked = false;
+    rustCheckbox.style.margin = '0';
+    rustCheckbox.style.cursor = 'pointer';
+
+    rustCheckbox.addEventListener('change', () => {
+      if (this.boundsDebugOverlay) {
+        this.boundsDebugOverlay.setRustVisible(rustCheckbox.checked);
+        this.scene.state.needsDraw = true;
+      }
+    });
+
+    rustLabel.appendChild(rustCheckbox);
+    rustLabel.appendChild(document.createTextNode('Show Rust Bounds (red)'));
+    container.appendChild(rustLabel);
+
+    // Log discrepancies button
+    const logBtn = document.createElement('button');
+    logBtn.textContent = 'Log Discrepancies';
+    logBtn.style.marginTop = '6px';
+    logBtn.style.padding = '3px 8px';
+    logBtn.style.fontSize = '10px';
+    logBtn.style.backgroundColor = '#444';
+    logBtn.style.border = '1px solid #666';
+    logBtn.style.borderRadius = '3px';
+    logBtn.style.color = '#ccc';
+    logBtn.style.cursor = 'pointer';
+    logBtn.addEventListener('click', () => {
+      if (this.boundsDebugOverlay) {
+        this.boundsDebugOverlay.logDiscrepancies();
+      }
+    });
+    container.appendChild(logBtn);
+  }
+
+  public setBoundsDebugOverlay(overlay: BoundsDebugOverlay) {
+    this.boundsDebugOverlay = overlay;
+  }
+
+  public getBoundsDebugOverlay(): BoundsDebugOverlay | null {
+    return this.boundsDebugOverlay;
   }
 
   /**

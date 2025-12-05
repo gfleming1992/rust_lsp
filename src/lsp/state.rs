@@ -3,6 +3,7 @@
 use crate::draw::geometry::{LayerJSON, ObjectRange, PadStackDef, SelectableObject};
 use crate::draw::drc::{DrcViolation, DrcRegion, DesignRules};
 use crate::parse_xml::XmlNode;
+use crate::lsp::handlers::transform::TransformSession;
 use indexmap::IndexMap;
 use rstar::RTree;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +29,36 @@ pub struct ObjectRotation {
     pub delta_radians: f32,  // Accumulated rotation in radians
 }
 
+/// Represents a flip operation for an object
+#[derive(Clone, Debug)]
+pub struct ObjectFlip {
+    pub original_layer_id: String,
+    pub flipped_layer_id: String,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub flip_count: u32,  // Odd = flipped, even = not flipped
+}
+
+/// A single transform action that can be undone/redone
+#[derive(Clone, Debug)]
+pub struct TransformAction {
+    /// Object IDs that were transformed
+    pub object_ids: Vec<u64>,
+    /// Translation delta applied
+    pub delta_x: f32,
+    pub delta_y: f32,
+    /// Rotation in degrees applied
+    pub rotate_degrees: f32,
+    /// Whether flip was applied
+    pub flipped: bool,
+    /// Center point of rotation (needed for undo)
+    pub center: (f32, f32),
+    /// Original positions before transform (object_id -> (x, y, packed_rot_vis))
+    pub original_positions: HashMap<u64, (f32, f32, u32)>,
+    /// Final positions after transform (object_id -> (x, y, packed_rot_vis))  
+    pub final_positions: HashMap<u64, (f32, f32, u32)>,
+}
+
 /// In-memory state: DOM, layers, and layer colors
 pub struct ServerState {
     pub xml_file_path: Option<String>,
@@ -40,12 +71,17 @@ pub struct ServerState {
     pub deleted_objects: HashMap<u64, ObjectRange>,
     pub moved_objects: HashMap<u64, ObjectMove>,  // Track moved objects by ID
     pub rotated_objects: HashMap<u64, ObjectRotation>,  // Track rotated objects by ID
+    pub flipped_objects: HashMap<u64, ObjectFlip>,  // Track flipped objects by ID
+    pub layer_pairs: HashMap<String, String>,  // TOP layer ↔ BOTTOM layer mapping
     pub hidden_layers: HashSet<String>,
     pub all_object_ranges: Vec<ObjectRange>,
     pub design_rules: DesignRules,
     pub drc_violations: Vec<DrcViolation>,
     pub drc_regions: Vec<DrcRegion>,
     pub modified_regions: Vec<ModifiedRegion>,
+    pub transform_session: Option<TransformSession>,  // Active transform session
+    pub undo_stack: Vec<TransformAction>,  // Undo stack for transform operations
+    pub redo_stack: Vec<TransformAction>,  // Redo stack for transform operations
 }
 
 impl ServerState {
@@ -61,12 +97,17 @@ impl ServerState {
             deleted_objects: HashMap::new(),
             moved_objects: HashMap::new(),
             rotated_objects: HashMap::new(),
+            flipped_objects: HashMap::new(),
+            layer_pairs: HashMap::new(),
             hidden_layers: HashSet::new(),
             all_object_ranges: Vec::new(),
             design_rules: DesignRules::default(),
             drc_violations: Vec::new(),
             drc_regions: Vec::new(),
             modified_regions: Vec::new(),
+            transform_session: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
     

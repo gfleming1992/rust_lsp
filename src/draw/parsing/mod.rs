@@ -27,7 +27,7 @@ use std::collections::HashSet;
 
 // Re-export key parsing functions
 pub use colors::get_layer_color;
-pub use descriptors::{parse_line_descriptors, parse_layer_functions};
+pub use descriptors::{parse_line_descriptors, parse_layer_functions, parse_layer_metadata, build_layer_pairs, LayerMeta};
 pub use primitives::{parse_standard_primitives, parse_padstack_definitions};
 
 /// Extract all LayerFeatures from XML root and generate LayerJSON for each
@@ -47,14 +47,14 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
     let padstack_defs = primitives::parse_padstack_definitions(root);
     
     // Parse layer functions from Layer elements (SIGNAL, CONDUCTOR, PLANE, etc.)
-    let layer_functions = descriptors::parse_layer_functions(root);
+    let layer_metadata = descriptors::parse_layer_metadata(root);
     
     if std::env::var("PROFILE_TIMING").is_ok() {
         eprintln!("\n=== Detailed Timing Profile ===");
         eprintln!("Line descriptor parsing: {:.2}ms", parse_time.as_secs_f64() * 1000.0);
         eprintln!("Parsed {} standard primitives", primitives.len());
         eprintln!("Parsed {} padstack definitions", padstack_defs.len());
-        eprintln!("Parsed {} layer functions", layer_functions.len());
+        eprintln!("Parsed {} layer metadata entries", layer_metadata.len());
     }
 
     // Find Ecad node which contains all the CAD data
@@ -106,17 +106,18 @@ pub fn extract_and_generate_layers(root: &XmlNode) -> Result<(Vec<LayerJSON>, Ve
             // Generate default color based on layer type
             let color = colors::get_layer_color(&layer_ref);
             
-            // Look up layer function (default to empty string if not found)
-            let layer_function = layer_functions.get(&layer_ref)
-                .or_else(|| layer_functions.get(&layer_name))
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            // Look up layer metadata (function and side)
+            let (layer_function, layer_side) = layer_metadata.get(&layer_ref)
+                .or_else(|| layer_metadata.get(&layer_name))
+                .map(|m| (m.function.as_str(), m.side.as_str()))
+                .unwrap_or(("", "NONE"));
             
             let (layer_json, object_ranges) = generate_layer_json(
                 &layer_ref,
                 idx as u32,
                 &layer_name,
                 layer_function,
+                layer_side,
                 color,
                 &geometries,
                 &mut local_culling_stats,

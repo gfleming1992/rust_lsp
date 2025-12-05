@@ -204,7 +204,7 @@ pub fn handle_move_objects(
 }
 
 /// Rebuild the spatial index from all_object_ranges
-fn rebuild_spatial_index(state: &mut ServerState) {
+pub fn rebuild_spatial_index(state: &mut ServerState) {
     use crate::draw::geometry::SelectableObject;
     use rstar::RTree;
     
@@ -528,5 +528,127 @@ pub fn handle_redo_move(
     
     Response::success(id, serde_json::json!({
         "status": "ok"
+    }))
+}
+
+/// Handle FlipObjects request - records a flip operation for component objects
+/// Flips geometry around component center and swaps TOP↔BOTTOM layers
+pub fn handle_flip_objects(
+    state: &mut ServerState,
+    id: Option<serde_json::Value>,
+    params: Option<serde_json::Value>
+) -> Response {
+    use crate::lsp::state::ObjectFlip;
+    
+    #[derive(Deserialize)]
+    struct ComponentCenter {
+        x: f32,
+        y: f32,
+    }
+    
+    #[derive(Deserialize)]
+    struct Params {
+        object_ids: Vec<u64>,
+        component_center: ComponentCenter,
+        flip_count: u32,  // 1 = flip once, 2 = flip twice (back to original), etc.
+    }
+    
+    let p: Params = match parse_params(id.clone(), params, "{object_ids, component_center, flip_count}") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    
+    let is_flipped = p.flip_count % 2 == 1;
+    eprintln!("[LSP Server] FlipObjects: {} objects, center=({:.3}, {:.3}), flip_count={}, flipped={}", 
+        p.object_ids.len(), p.component_center.x, p.component_center.y, p.flip_count, is_flipped);
+    
+    if !is_flipped {
+        // Even flip count = back to original state, nothing to do for layer swap
+        return Response::success(id, serde_json::json!({
+            "status": "ok",
+            "flipped_count": 0,
+            "layer_remapping": {}
+        }));
+    }
+    
+    // Build layer remapping for the response
+    let mut layer_remapping: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut flipped_count = 0;
+    let mut modified_ranges: Vec<crate::draw::geometry::ObjectRange> = Vec::new();
+    
+    // Process each object - first pass: update bounds and layer_id
+    for obj_id in &p.object_ids {
+        // Find the object range
+        let range_opt = state.all_object_ranges.iter_mut().find(|r| r.id == *obj_id);
+        if range_opt.is_none() {
+            continue;
+        }
+        let range = range_opt.unwrap();
+        
+        // Get paired layer
+        let original_layer = range.layer_id.clone();
+        let paired_layer = state.layer_pairs.get(&original_layer).cloned();
+        
+        if let Some(ref new_layer) = paired_layer {
+            // Flip bounds: newX = 2 * centerX - oldX
+            let old_min_x = range.bounds[0];
+            let old_max_x = range.bounds[2];
+            range.bounds[0] = 2.0 * p.component_center.x - old_max_x;
+            range.bounds[2] = 2.0 * p.component_center.x - old_min_x;
+            
+            // Update layer_id to paired layer
+            let old_layer = range.layer_id.clone();
+            range.layer_id = new_layer.clone();
+            
+            // Track layer remapping
+            layer_remapping.insert(old_layer.clone(), new_layer.clone());
+            
+            // Record flip state
+            state.flipped_objects.insert(*obj_id, ObjectFlip {
+                original_layer_id: old_layer,
+                flipped_layer_id: new_layer.clone(),
+                center_x: p.component_center.x,
+                center_y: p.component_center.y,
+                flip_count: p.flip_count,
+            });
+            
+            // Save for modified region recording
+            modified_ranges.push(range.clone());
+            
+            flipped_count += 1;
+        } else {
+            // No paired layer - just flip geometry without layer change
+            let old_min_x = range.bounds[0];
+            let old_max_x = range.bounds[2];
+            range.bounds[0] = 2.0 * p.component_center.x - old_max_x;
+            range.bounds[2] = 2.0 * p.component_center.x - old_min_x;
+            
+            // Record flip state (same layer)
+            state.flipped_objects.insert(*obj_id, ObjectFlip {
+                original_layer_id: original_layer.clone(),
+                flipped_layer_id: original_layer,
+                center_x: p.component_center.x,
+                center_y: p.component_center.y,
+                flip_count: p.flip_count,
+            });
+            
+            flipped_count += 1;
+        }
+    }
+    
+    // Record modified regions for DRC (after the mutable borrow ends)
+    for range in &modified_ranges {
+        state.record_modified_region(range);
+    }
+    
+    eprintln!("[LSP Server] Flipped {} objects, {} layer remappings", flipped_count, layer_remapping.len());
+    
+    // Rebuild the spatial index
+    rebuild_spatial_index(state);
+    
+    Response::success(id, serde_json::json!({
+        "status": "ok",
+        "flipped_count": flipped_count,
+        "layer_remapping": layer_remapping
     }))
 }
