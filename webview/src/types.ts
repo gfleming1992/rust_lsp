@@ -98,6 +98,11 @@ export interface ObjectRange {
   net_name?: string; // Net name from IPC-2581 for highlighting connected shapes
   component_ref?: string; // Component reference (e.g., "CMP:C1") for highlighting component parts
   pin_ref?: string; // Pin reference (e.g., "PIN:1") for pad identification
+  
+  // Precomputed polar coordinates for component rotation (from Rust)
+  component_center?: [number, number]; // Component bounding box center [cx, cy]
+  polar_radius?: number; // Distance from component center to object center
+  polar_angle?: number; // Angle in radians from component center to object center
 }
 
 // DRC Region from Rust backend (fused violations with triangle data)

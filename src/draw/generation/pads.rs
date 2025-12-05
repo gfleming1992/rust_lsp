@@ -98,6 +98,9 @@ pub fn generate_pad_geometry(
                     net_name: inst.net_name.clone(),
                     component_ref: inst.component_ref.clone(),
                     pin_ref: inst.pin_ref.clone(),
+                    component_center: None, // Calculated in post-processing
+                    polar_radius: None,
+                    polar_angle: None,
                 });
             }
             

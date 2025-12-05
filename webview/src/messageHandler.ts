@@ -32,7 +32,9 @@ export interface MessageHandlerContext {
 
 export type UndoAction = 
   | { type: 'delete'; objects: ObjectRange[] }
-  | { type: 'move'; objects: ObjectRange[]; deltaX: number; deltaY: number };
+  | { type: 'move'; objects: ObjectRange[]; deltaX: number; deltaY: number }
+  | { type: 'rotate'; objects: ObjectRange[]; rotationDelta: number; componentCenter: { x: number; y: number }; perObjectOffsets: { id: number; dx: number; dy: number }[] }
+  | { type: 'move_rotate'; objects: ObjectRange[]; deltaX: number; deltaY: number; rotationDelta: number; componentCenter: { x: number; y: number }; perObjectOffsets: { id: number; dx: number; dy: number }[] };
 
 /** Sets up the window message event listener for extension/dev server communication */
 export function setupMessageHandler(ctx: MessageHandlerContext) {
@@ -232,10 +234,16 @@ function handleSelectionResult(ctx: MessageHandlerContext, ranges: ObjectRange[]
     });
     
     if (isBoxSelect) {
+      // Box select changes selection - disable rotation
+      scene.clearComponentPolylineData();
+      input.setRotationEnabled(false);
       ctx.selectedObjects = visibleRanges;
       scene.highlightMultipleObjects(visibleRanges);
       input.hideTooltip();
     } else if (isCtrlSelect) {
+      // Ctrl-click changes selection - disable rotation
+      scene.clearComponentPolylineData();
+      input.setRotationEnabled(false);
       const newObj = visibleRanges[0];
       const existingIndex = ctx.selectedObjects.findIndex(obj => obj.id === newObj.id);
       
@@ -256,9 +264,13 @@ function handleSelectionResult(ctx: MessageHandlerContext, ranges: ObjectRange[]
       const wasAlreadySelected = ctx.selectedObjects.some(obj => obj.id === selected.id);
       
       if (wasAlreadySelected && ctx.selectedObjects.length > 0) {
+        // Clicking on already-selected object - start move, DON'T disable rotation
         console.log(`[Select] Clicked on already-selected object ${selected.id}, starting move mode`);
         input.startMoveMode(lastSelectX, lastSelectY);
       } else {
+        // New selection - disable rotation
+        scene.clearComponentPolylineData();
+        input.setRotationEnabled(false);
         ctx.selectedObjects = [selected];
         scene.highlightObject(selected);
       }
@@ -269,6 +281,9 @@ function handleSelectionResult(ctx: MessageHandlerContext, ranges: ObjectRange[]
     input.setHasComponentSelection(ctx.selectedObjects.some(obj => obj.component_ref));
     input.setHasNetSelection(ctx.selectedObjects.some(obj => obj.net_name && obj.net_name !== 'No Net'));
   } else if (!isCtrlSelect) {
+    // No visible ranges - clear selection and disable rotation
+    scene.clearComponentPolylineData();
+    input.setRotationEnabled(false);
     ctx.selectedObjects = [];
     ctx.lastNetHighlightAllObjects = [];
     scene.clearHighlightObject();
@@ -281,6 +296,10 @@ function handleSelectionResult(ctx: MessageHandlerContext, ranges: ObjectRange[]
 
 function handleHighlightNetsResult(ctx: MessageHandlerContext, objects: ObjectRange[], netNames: string[]) {
   const { scene, input, deletedObjectIds } = ctx;
+  
+  // Net highlight - disable rotation (not component-based)
+  scene.clearComponentPolylineData();
+  input.setRotationEnabled(false);
   
   console.log(`[HighlightNets] Received ${objects.length} objects with nets: ${netNames.join(', ')}`);
   
@@ -320,6 +339,28 @@ function handleHighlightComponentsResult(ctx: MessageHandlerContext, objects: Ob
     input.setHasSelection(true);
     input.setHasComponentSelection(visibleObjects.some(obj => obj.component_ref));
     input.setHasNetSelection(visibleObjects.some(obj => obj.net_name && obj.net_name !== 'No Net'));
+    
+    // Enable rotation only for SINGLE component selection
+    // All visible objects must belong to the same component
+    const uniqueComponentRefs = new Set(visibleObjects.map(o => o.component_ref).filter(Boolean));
+    const isSingleComponent = uniqueComponentRefs.size === 1 && componentRefs.length === 1;
+    
+    if (isSingleComponent) {
+      const componentRef = componentRefs[0];
+      console.log(`[HighlightComponents] Single component selected: ${componentRef} - enabling rotation`);
+      
+      // Compute local coordinates for polylines and store in scene
+      scene.computeComponentPolylineLocalCoords(visibleObjects);
+      input.setRotationEnabled(true);
+    } else {
+      console.log(`[HighlightComponents] Multiple components (${uniqueComponentRefs.size}) - rotation disabled`);
+      scene.clearComponentPolylineData();
+      input.setRotationEnabled(false);
+    }
+  } else {
+    // No visible objects - disable rotation
+    scene.clearComponentPolylineData();
+    input.setRotationEnabled(false);
   }
 }
 

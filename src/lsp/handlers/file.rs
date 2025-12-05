@@ -47,7 +47,7 @@ pub fn handle_load(
 
     // Extract and generate layer geometries
     let start_gen = Instant::now();
-    let (layers, object_ranges) = match extract_and_generate_layers(&root) {
+    let (layers, mut object_ranges) = match extract_and_generate_layers(&root) {
         Ok((layers, ranges)) => (layers, ranges),
         Err(e) => {
             return Response::error(id, 1, format!("Failed to generate layers: {}", e));
@@ -62,6 +62,10 @@ pub fn handle_load(
     let vias = object_ranges.iter().filter(|o| o.obj_type == 2).count();
     eprintln!("[LSP Server] Object stats: {} total, {} pads, {} vias, {} with net, {} with component",
         object_ranges.len(), pads, vias, objects_with_net, objects_with_component);
+    
+    // Calculate component polar coordinates for rotation support
+    use crate::draw::geometry::calculate_component_polar_coords;
+    calculate_component_polar_coords(&mut object_ranges);
     
     // Keep a copy of object_ranges for DRC
     let all_object_ranges = object_ranges.clone();

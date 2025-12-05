@@ -78,6 +78,10 @@ export async function handleWebviewMessage(
       await handleMoveObjects(message, panel, sendToLspServer);
       break;
 
+    case 'RotateObjects':
+      await handleRotateObjects(message, panel, sendToLspServer);
+      break;
+
     case 'UndoMove':
       console.log('[Extension] Received UndoMove command');
       await sendToLspServer({ 
@@ -175,6 +179,27 @@ async function handleMoveObjects(message: any, panel: vscode.WebviewPanel, sendT
   } else if (response?.error) {
     console.error('[Extension] MoveObjects error:', response.error);
     panel.webview.postMessage({ command: 'moveError', error: response.error.message });
+  }
+}
+
+async function handleRotateObjects(message: any, panel: vscode.WebviewPanel, sendToLspServer: SendToLspServer) {
+  console.log('[Extension] Received RotateObjects command:', message.objectIds?.length, 'objects, delta:', message.rotationDelta);
+  const response = await sendToLspServer({ 
+    method: 'RotateObjects', 
+    params: { 
+      object_ids: message.objectIds, 
+      rotation_delta: message.rotationDelta,
+      component_center: message.componentCenter,
+      per_object_offsets: message.perObjectOffsets
+    } 
+  }, panel);
+  
+  if (response?.result) {
+    console.log('[Extension] RotateObjects success:', response.result.rotated_count, 'objects rotated');
+    panel.webview.postMessage({ command: 'rotateComplete', rotatedCount: response.result.rotated_count });
+  } else if (response?.error) {
+    console.error('[Extension] RotateObjects error:', response.error);
+    panel.webview.postMessage({ command: 'rotateError', error: response.error.message });
   }
 }
 

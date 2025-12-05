@@ -39,6 +39,9 @@ export class SceneState {
   public movingObjects: ObjectRange[] = [];
   public globalMoveOffsetX = 0;
   public globalMoveOffsetY = 0;
+  
+  // Rotation operation state (applied to moving objects)
+  public globalRotationOffset = 0; // Radians
 
   // DRC overlay state
   public drcRegions: DrcRegion[] = [];

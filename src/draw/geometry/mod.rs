@@ -32,6 +32,7 @@ pub use types::{
 pub use spatial::{
     ObjectRange,
     SelectableObject,
+    calculate_component_polar_coords,
 };
 
 pub use lod::{

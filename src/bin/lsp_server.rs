@@ -125,6 +125,9 @@ fn dispatch_request(
         "MoveObjects" => serde_json::to_string(&handlers::handle_move_objects(state, request.id, request.params)).unwrap(),
         "UndoMove" => serde_json::to_string(&handlers::handle_undo_move(state, request.id, request.params)).unwrap(),
         "RedoMove" => serde_json::to_string(&handlers::handle_redo_move(state, request.id, request.params)).unwrap(),
+        "RotateObjects" => serde_json::to_string(&handlers::handle_rotate_objects(state, request.id, request.params)).unwrap(),
+        "UndoRotate" => serde_json::to_string(&handlers::handle_undo_rotate(state, request.id, request.params)).unwrap(),
+        "RedoRotate" => serde_json::to_string(&handlers::handle_redo_rotate(state, request.id, request.params)).unwrap(),
         
         // DRC operations
         "RunDRC" => serde_json::to_string(&handlers::handle_run_drc(state, request.id, request.params)).unwrap(),

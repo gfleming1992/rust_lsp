@@ -59,6 +59,9 @@ pub fn generate_polygon_geometry(
             net_name: polygon.net_name.clone(),
             component_ref: polygon.component_ref.clone(),
             pin_ref: None,
+            component_center: None,
+            polar_radius: None,
+            polar_angle: None,
         });
 
         // Offset indices by current vertex count

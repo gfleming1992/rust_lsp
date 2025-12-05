@@ -45,6 +45,15 @@ export class Input {
   private onMoveCancel: (() => void) | null = null;
   private getSelectedObjects: (() => ObjectRange[]) | null = null;
   
+  // Rotation callback
+  private onRotate: ((angleDelta: number) => void) | null = null;
+  private rotationEnabled = false; // Only true when single component is fully selected
+  
+  /** Check if currently in move mode (object following mouse) */
+  public getIsMoving(): boolean {
+    return this.isMoving;
+  }
+  
   // Hover tooltip tracking
   private hoverTimer: number | null = null;
   private hoverDelayMs = 500; // 0.5 second delay
@@ -145,6 +154,24 @@ export class Input {
     this.getSelectedObjects = callback;
   }
 
+  public setOnRotate(callback: (angleDelta: number) => void) {
+    this.onRotate = callback;
+  }
+
+  /**
+   * Enable or disable rotation. Rotation is only enabled when:
+   * - A single component is selected (via HighlightSelectedComponents)
+   * - No other non-component objects are in the selection
+   */
+  public setRotationEnabled(enabled: boolean) {
+    this.rotationEnabled = enabled;
+    console.log(`[Input] Rotation ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  public isRotationEnabled(): boolean {
+    return this.rotationEnabled;
+  }
+
   // Called by main.ts when user clicks on an already-selected object
   // This immediately starts move mode (object follows mouse until next click)
   public startMoveMode(worldX: number, worldY: number) {
@@ -168,6 +195,13 @@ export class Input {
       if (this.onMoveCancel) {
         this.onMoveCancel();
       }
+    }
+  }
+  
+  /** Trigger move end callback directly (used for rotate-in-place finalization) */
+  public triggerMoveEnd(deltaX: number, deltaY: number) {
+    if (this.onMoveEnd) {
+      this.onMoveEnd(deltaX, deltaY);
     }
   }
 
@@ -276,6 +310,19 @@ export class Input {
         console.log('[Input] Redo pressed');
         if (this.onRedo) {
           this.onRedo();
+        }
+      } else if (event.key === 'r' || event.key === 'R') {
+        // Rotate: R for 90° clockwise, Shift+R for 90° counter-clockwise
+        // Only works when rotation is enabled (single component fully selected)
+        if (!this.rotationEnabled) {
+          console.log('[Input] Rotation disabled - select a single component first (press H after selecting)');
+          return;
+        }
+        event.preventDefault();
+        const angleDelta = event.shiftKey ? -Math.PI / 2 : Math.PI / 2; // ±90°
+        console.log(`[Input] Rotate ${event.shiftKey ? 'CCW' : 'CW'} pressed`);
+        if (this.onRotate) {
+          this.onRotate(angleDelta);
         }
       }
     });

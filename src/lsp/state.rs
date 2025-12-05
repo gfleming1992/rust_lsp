@@ -22,6 +22,12 @@ pub struct ObjectMove {
     pub delta_y: f32,
 }
 
+/// Represents a rotation operation for an object
+#[derive(Clone, Debug)]
+pub struct ObjectRotation {
+    pub delta_radians: f32,  // Accumulated rotation in radians
+}
+
 /// In-memory state: DOM, layers, and layer colors
 pub struct ServerState {
     pub xml_file_path: Option<String>,
@@ -33,6 +39,7 @@ pub struct ServerState {
     pub padstack_defs: IndexMap<String, PadStackDef>,
     pub deleted_objects: HashMap<u64, ObjectRange>,
     pub moved_objects: HashMap<u64, ObjectMove>,  // Track moved objects by ID
+    pub rotated_objects: HashMap<u64, ObjectRotation>,  // Track rotated objects by ID
     pub hidden_layers: HashSet<String>,
     pub all_object_ranges: Vec<ObjectRange>,
     pub design_rules: DesignRules,
@@ -53,6 +60,7 @@ impl ServerState {
             padstack_defs: IndexMap::new(),
             deleted_objects: HashMap::new(),
             moved_objects: HashMap::new(),
+            rotated_objects: HashMap::new(),
             hidden_layers: HashSet::new(),
             all_object_ranges: Vec::new(),
             design_rules: DesignRules::default(),

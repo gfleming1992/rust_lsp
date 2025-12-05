@@ -124,12 +124,28 @@ export class Scene {
     return this.moveOperations.getMoveOffset();
   }
 
+  public getRotationOffset() {
+    return this.moveOperations.getRotationOffset();
+  }
+
   public startMove(objects: ObjectRange[]) {
     this.moveOperations.startMove(objects);
+  }
+  
+  public setupComponentRotation(objects: ObjectRange[]): boolean {
+    return this.moveOperations.setupComponentRotation(objects);
+  }
+  
+  public hasComponentRotation(): boolean {
+    return this.moveOperations.hasComponentRotation();
   }
 
   public updateMove(deltaX: number, deltaY: number) {
     this.moveOperations.updateMove(deltaX, deltaY);
+  }
+
+  public addRotation(angleDelta: number) {
+    this.moveOperations.addRotation(angleDelta);
   }
 
   public endMove() {
@@ -142,6 +158,40 @@ export class Scene {
 
   public applyMoveOffset(objects: ObjectRange[], deltaX: number, deltaY: number) {
     this.moveOperations.applyMoveOffset(objects, deltaX, deltaY);
+  }
+
+  public applyRotation(
+    objects: ObjectRange[], 
+    rotationDelta: number, 
+    componentCenter?: { x: number; y: number },
+    preCalculatedOffsets?: Map<number, { dx: number; dy: number }>
+  ) {
+    this.moveOperations.applyRotation(objects, rotationDelta, componentCenter, preCalculatedOffsets);
+  }
+
+  // ==================== Component Polyline Rotation ====================
+  
+  /**
+   * Compute and store local coordinates for polylines in a component.
+   * This enables polyline rotation by transforming vertices client-side.
+   */
+  public computeComponentPolylineLocalCoords(objects: ObjectRange[]) {
+    this.moveOperations.computeComponentPolylineLocalCoords(objects);
+  }
+  
+  /**
+   * Clear stored component polyline data.
+   * Called when selection changes or rotation is disabled.
+   */
+  public clearComponentPolylineData() {
+    this.moveOperations.clearComponentPolylineData();
+  }
+  
+  /**
+   * Check if component polyline data is loaded for rotation.
+   */
+  public hasComponentPolylineData(): boolean {
+    return this.moveOperations.hasComponentPolylineData();
   }
 
   // ==================== DRC Overlay ====================

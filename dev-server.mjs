@@ -339,6 +339,37 @@ wss.on('connection', (ws) => {
         }
       });
       
+    } else if (data.command === 'MoveObjects') {
+      console.log(`[DevServer] MoveObjects: ${data.objectIds?.length || 0} objects, delta: (${data.deltaX}, ${data.deltaY})`);
+      sendLspRequest('MoveObjects', { 
+        object_ids: data.objectIds, 
+        delta_x: data.deltaX, 
+        delta_y: data.deltaY 
+      }, (response) => {
+        if (response.error) {
+          console.error('[DevServer] MoveObjects error:', response.error);
+          ws.send(JSON.stringify({ command: 'moveError', error: response.error.message }));
+        } else if (response.result) {
+          console.log(`[DevServer] MoveObjects success: ${response.result.moved_count} objects moved`);
+          ws.send(JSON.stringify({ command: 'moveComplete', movedCount: response.result.moved_count }));
+        }
+      });
+      
+    } else if (data.command === 'RotateObjects') {
+      console.log(`[DevServer] RotateObjects: ${data.objectIds?.length || 0} objects, delta: ${data.rotationDelta}`);
+      sendLspRequest('RotateObjects', { 
+        object_ids: data.objectIds, 
+        rotation_delta: data.rotationDelta 
+      }, (response) => {
+        if (response.error) {
+          console.error('[DevServer] RotateObjects error:', response.error);
+          ws.send(JSON.stringify({ command: 'rotateError', error: response.error.message }));
+        } else if (response.result) {
+          console.log(`[DevServer] RotateObjects success: ${response.result.rotated_count} objects rotated`);
+          ws.send(JSON.stringify({ command: 'rotateComplete', rotatedCount: response.result.rotated_count }));
+        }
+      });
+      
     } else if (data.command === 'Delete') {
       console.log(`[DevServer] Delete object:`, data.object);
       // TODO: Implement backend delete

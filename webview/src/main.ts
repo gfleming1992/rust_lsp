@@ -124,6 +124,10 @@ async function init() {
           obj.bounds[1] -= action.deltaY;
           obj.bounds[2] -= action.deltaX;
           obj.bounds[3] -= action.deltaY;
+          if (obj.component_center) {
+            obj.component_center[0] -= action.deltaX;
+            obj.component_center[1] -= action.deltaY;
+          }
         }
       }
       for (const obj of action.objects) {
@@ -131,6 +135,10 @@ async function init() {
         obj.bounds[1] -= action.deltaY;
         obj.bounds[2] -= action.deltaX;
         obj.bounds[3] -= action.deltaY;
+        if (obj.component_center) {
+          obj.component_center[0] -= action.deltaX;
+          obj.component_center[1] -= action.deltaY;
+        }
       }
       
       if (isVSCodeWebview && vscode) {
@@ -138,6 +146,106 @@ async function init() {
           command: 'UndoMove', 
           objectIds: action.objects.map(o => o.id),
           deltaX: action.deltaX, deltaY: action.deltaY
+        });
+      }
+    } else if (action.type === 'rotate') {
+      console.log(`[Undo] Reversing rotation of ${action.objects.length} object(s)`);
+      
+      // Use the NEGATED stored perObjectOffsets for undo
+      const reverseRotation = -action.rotationDelta;
+      const reversePerObjectOffsets = new Map<number, { dx: number; dy: number }>();
+      const reversePerObjectOffsetsArray: { id: number; dx: number; dy: number }[] = [];
+      for (const o of action.perObjectOffsets) {
+        reversePerObjectOffsets.set(o.id, { dx: -o.dx, dy: -o.dy });
+        reversePerObjectOffsetsArray.push({ id: o.id, dx: -o.dx, dy: -o.dy });
+      }
+      
+      // Update bounds in the stored action using negated offsets
+      for (const obj of action.objects) {
+        const offset = reversePerObjectOffsets.get(obj.id);
+        if (offset) {
+          const halfW = (obj.bounds[2] - obj.bounds[0]) / 2;
+          const halfH = (obj.bounds[3] - obj.bounds[1]) / 2;
+          const centerX = (obj.bounds[0] + obj.bounds[2]) / 2 + offset.dx;
+          const centerY = (obj.bounds[1] + obj.bounds[3]) / 2 + offset.dy;
+          obj.bounds[0] = centerX - halfW;
+          obj.bounds[1] = centerY - halfH;
+          obj.bounds[2] = centerX + halfW;
+          obj.bounds[3] = centerY + halfH;
+        }
+      }
+      
+      // Pass pre-calculated offsets to avoid double-calculation
+      scene.applyRotation(action.objects, reverseRotation, action.componentCenter, reversePerObjectOffsets);
+      
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ 
+          command: 'RotateObjects', 
+          objectIds: action.objects.map(o => o.id),
+          rotationDelta: reverseRotation,
+          componentCenter: action.componentCenter,
+          perObjectOffsets: reversePerObjectOffsetsArray
+        });
+      }
+    } else if (action.type === 'move_rotate') {
+      console.log(`[Undo] Reversing combined move+rotate of ${action.objects.length} object(s)`);
+      console.log(`[Undo] action.deltaX=${action.deltaX.toFixed(4)}, action.deltaY=${action.deltaY.toFixed(4)}`);
+      console.log(`[Undo] action.rotationDelta=${action.rotationDelta.toFixed(6)} rad (${(action.rotationDelta * 180 / Math.PI).toFixed(2)}°)`);
+      console.log(`[Undo] action.componentCenter=(${action.componentCenter.x.toFixed(4)}, ${action.componentCenter.y.toFixed(4)})`);
+      
+      // Log bounds of first few objects before undo
+      for (let i = 0; i < Math.min(3, action.objects.length); i++) {
+        const obj = action.objects[i];
+        console.log(`[Undo] Before: obj[${i}] id=${obj.id} type=${obj.obj_type} bounds=[${obj.bounds.map(b => b.toFixed(4)).join(', ')}]`);
+      }
+      
+      // For combined move+rotate, we need to reverse in REVERSE order:
+      // Original: move first, then rotate around ORIGINAL center
+      // Undo: reverse move first, then reverse rotation around ORIGINAL center
+      
+      // 1. First reverse the move
+      console.log(`[Undo] Step 1: applyMoveOffset(${(-action.deltaX).toFixed(4)}, ${(-action.deltaY).toFixed(4)})`);
+      scene.applyMoveOffset(action.objects, -action.deltaX, -action.deltaY);
+      
+      // 2. Then reverse the rotation around the ORIGINAL center
+      // IMPORTANT: Use the NEGATED stored perObjectOffsets for pads, not recalculated ones!
+      // After step 1, pads are at rotated-only positions, not original positions.
+      // The stored offsets were calculated during the original operation, so negating them gives correct reverse.
+      const reverseRotation = -action.rotationDelta;
+      const reversePerObjectOffsets = new Map<number, { dx: number; dy: number }>();
+      for (const o of action.perObjectOffsets) {
+        reversePerObjectOffsets.set(o.id, { dx: -o.dx, dy: -o.dy });
+      }
+      console.log(`[Undo] Step 2: applyRotation(${reverseRotation.toFixed(6)} rad, center=(${action.componentCenter.x.toFixed(4)}, ${action.componentCenter.y.toFixed(4)}), using stored offsets)`);
+      scene.applyRotation(action.objects, reverseRotation, action.componentCenter, reversePerObjectOffsets);
+      
+      // Update component_center in ctx.selectedObjects so subsequent rotations use correct center
+      const movedIds = new Set(action.objects.map(o => o.id));
+      for (const obj of ctx.selectedObjects) {
+        if (movedIds.has(obj.id) && obj.component_center) {
+          obj.component_center[0] -= action.deltaX;
+          obj.component_center[1] -= action.deltaY;
+        }
+      }
+      
+      // Note: We do NOT update action.objects bounds - they should stay at original
+      // so that redo can correctly re-apply the move+rotate from original state
+      
+      if (isVSCodeWebview && vscode) {
+        // Send reverse move first
+        vscode.postMessage({ 
+          command: 'UndoMove', 
+          objectIds: action.objects.map(o => o.id),
+          deltaX: action.deltaX, deltaY: action.deltaY
+        });
+        // Send reverse rotation (around original center)
+        const reversePerObjectOffsetsArray = action.perObjectOffsets.map(o => ({ id: o.id, dx: -o.dx, dy: -o.dy }));
+        vscode.postMessage({ 
+          command: 'RotateObjects', 
+          objectIds: action.objects.map(o => o.id),
+          rotationDelta: reverseRotation,
+          componentCenter: action.componentCenter,
+          perObjectOffsets: reversePerObjectOffsetsArray
         });
       }
     }
@@ -174,6 +282,10 @@ async function init() {
           obj.bounds[1] += action.deltaY;
           obj.bounds[2] += action.deltaX;
           obj.bounds[3] += action.deltaY;
+          if (obj.component_center) {
+            obj.component_center[0] += action.deltaX;
+            obj.component_center[1] += action.deltaY;
+          }
         }
       }
       for (const obj of action.objects) {
@@ -181,6 +293,10 @@ async function init() {
         obj.bounds[1] += action.deltaY;
         obj.bounds[2] += action.deltaX;
         obj.bounds[3] += action.deltaY;
+        if (obj.component_center) {
+          obj.component_center[0] += action.deltaX;
+          obj.component_center[1] += action.deltaY;
+        }
       }
       
       if (isVSCodeWebview && vscode) {
@@ -188,6 +304,99 @@ async function init() {
           command: 'RedoMove', 
           objectIds: action.objects.map(o => o.id),
           deltaX: action.deltaX, deltaY: action.deltaY
+        });
+      }
+    } else if (action.type === 'rotate') {
+      console.log(`[Redo] Re-applying rotation of ${action.objects.length} object(s)`);
+      
+      // Use stored perObjectOffsets for redo
+      const preCalcOffsets = new Map<number, { dx: number; dy: number }>();
+      for (const o of action.perObjectOffsets) {
+        preCalcOffsets.set(o.id, { dx: o.dx, dy: o.dy });
+      }
+      
+      // Update bounds in the stored action using stored offsets
+      for (const obj of action.objects) {
+        const offset = preCalcOffsets.get(obj.id);
+        if (offset) {
+          const halfW = (obj.bounds[2] - obj.bounds[0]) / 2;
+          const halfH = (obj.bounds[3] - obj.bounds[1]) / 2;
+          const centerX = (obj.bounds[0] + obj.bounds[2]) / 2 + offset.dx;
+          const centerY = (obj.bounds[1] + obj.bounds[3]) / 2 + offset.dy;
+          obj.bounds[0] = centerX - halfW;
+          obj.bounds[1] = centerY - halfH;
+          obj.bounds[2] = centerX + halfW;
+          obj.bounds[3] = centerY + halfH;
+        }
+      }
+      
+      // Pass pre-calculated offsets to avoid double-calculation
+      scene.applyRotation(action.objects, action.rotationDelta, action.componentCenter, preCalcOffsets);
+      
+      if (isVSCodeWebview && vscode) {
+        vscode.postMessage({ 
+          command: 'RotateObjects', 
+          objectIds: action.objects.map(o => o.id),
+          rotationDelta: action.rotationDelta,
+          componentCenter: action.componentCenter,
+          perObjectOffsets: action.perObjectOffsets
+        });
+      }
+    } else if (action.type === 'move_rotate') {
+      console.log(`[Redo] Re-applying combined move+rotate of ${action.objects.length} object(s)`);
+      
+      // Re-apply move first
+      scene.applyMoveOffset(action.objects, action.deltaX, action.deltaY);
+      
+      // Update bounds for move
+      for (const obj of action.objects) {
+        obj.bounds[0] += action.deltaX;
+        obj.bounds[1] += action.deltaY;
+        obj.bounds[2] += action.deltaX;
+        obj.bounds[3] += action.deltaY;
+      }
+      
+      // Update component_center in ctx.selectedObjects so subsequent rotations use correct center
+      const movedIds = new Set(action.objects.map(o => o.id));
+      for (const obj of ctx.selectedObjects) {
+        if (movedIds.has(obj.id) && obj.component_center) {
+          obj.component_center[0] += action.deltaX;
+          obj.component_center[1] += action.deltaY;
+        }
+      }
+      
+      // Re-apply rotation with stored offsets
+      const preCalcOffsets = new Map<number, { dx: number; dy: number }>();
+      for (const o of action.perObjectOffsets) {
+        preCalcOffsets.set(o.id, { dx: o.dx, dy: o.dy });
+      }
+      scene.applyRotation(action.objects, action.rotationDelta, action.componentCenter, preCalcOffsets);
+      
+      // Update bounds for rotation offsets
+      for (const offset of action.perObjectOffsets) {
+        const obj = action.objects.find(o => o.id === offset.id);
+        if (obj) {
+          obj.bounds[0] += offset.dx;
+          obj.bounds[1] += offset.dy;
+          obj.bounds[2] += offset.dx;
+          obj.bounds[3] += offset.dy;
+        }
+      }
+      
+      if (isVSCodeWebview && vscode) {
+        // Send move
+        vscode.postMessage({ 
+          command: 'RedoMove', 
+          objectIds: action.objects.map(o => o.id),
+          deltaX: action.deltaX, deltaY: action.deltaY
+        });
+        // Send rotation
+        vscode.postMessage({ 
+          command: 'RotateObjects', 
+          objectIds: action.objects.map(o => o.id),
+          rotationDelta: action.rotationDelta,
+          componentCenter: action.componentCenter,
+          perObjectOffsets: action.perObjectOffsets
         });
       }
     }
@@ -298,6 +507,10 @@ async function init() {
       ui.clearHighlight();
       input.setHasSelection(false);
       input.setHasComponentSelection(false);
+      
+      // Disable rotation when selection is cleared
+      scene.clearComponentPolylineData();
+      input.setRotationEnabled(false);
     }
     // Also clear DRC highlight
     ui.clearDrcHighlight();
@@ -324,36 +537,179 @@ async function init() {
   
   input.setOnMoveEnd((deltaX: number, deltaY: number) => {
     const result = scene.endMove();
-    if (Math.abs(result.deltaX) < 0.0001 && Math.abs(result.deltaY) < 0.0001) {
-      console.log('[Move] Move ended with no significant movement');
+    const hasMoved = Math.abs(result.deltaX) > 0.0001 || Math.abs(result.deltaY) > 0.0001;
+    const hasRotated = Math.abs(result.rotationDelta) > 0.0001;
+    
+    if (!hasMoved && !hasRotated) {
+      console.log('[Move] Move ended with no significant transformation');
       return;
     }
     
-    console.log(`[Move] Move ended: delta=(${result.deltaX}, ${result.deltaY})`);
+    console.log(`[Move] Move ended: delta=(${result.deltaX}, ${result.deltaY}), rotation=${(result.rotationDelta * 180 / Math.PI).toFixed(1)}°`);
     const objectIds = ctx.selectedObjects.map(obj => obj.id);
     
+    // IMPORTANT: Capture original bounds BEFORE updating them
+    // For move_rotate, we need true original bounds (before move AND rotation)
+    const originalBoundsMap = new Map<number, [number, number, number, number]>();
     for (const obj of ctx.selectedObjects) {
-      obj.bounds[0] += result.deltaX;
-      obj.bounds[1] += result.deltaY;
-      obj.bounds[2] += result.deltaX;
-      obj.bounds[3] += result.deltaY;
+      originalBoundsMap.set(obj.id, [...obj.bounds] as [number, number, number, number]);
     }
     
-    const objectsForUndo = ctx.selectedObjects.map(obj => ({
-      ...obj,
-      bounds: [
-        obj.bounds[0] - result.deltaX,
-        obj.bounds[1] - result.deltaY,
-        obj.bounds[2] - result.deltaX,
-        obj.bounds[3] - result.deltaY
-      ] as [number, number, number, number]
-    }));
-    ctx.undoStack.push({ type: 'move', objects: objectsForUndo, deltaX: result.deltaX, deltaY: result.deltaY });
+    // Update local bounds for moved objects
+    if (hasMoved) {
+      for (const obj of ctx.selectedObjects) {
+        obj.bounds[0] += result.deltaX;
+        obj.bounds[1] += result.deltaY;
+        obj.bounds[2] += result.deltaX;
+        obj.bounds[3] += result.deltaY;
+        // Also update component_center so subsequent rotations use the new center
+        if (obj.component_center) {
+          obj.component_center[0] += result.deltaX;
+          obj.component_center[1] += result.deltaY;
+        }
+      }
+    }
+    
+    // Update bounds for rotation (objects orbit around component center)
+    if (hasRotated && result.componentCenter) {
+      for (const obj of ctx.selectedObjects) {
+        const rotOffset = result.perObjectOffsets.get(obj.id);
+        if (rotOffset) {
+          obj.bounds[0] += rotOffset.dx;
+          obj.bounds[1] += rotOffset.dy;
+          obj.bounds[2] += rotOffset.dx;
+          obj.bounds[3] += rotOffset.dy;
+        }
+      }
+    }
+    
+    // Create undo entry - use combined type if both move and rotate happened
+    if (hasMoved && hasRotated && result.componentCenter) {
+      // Combined move+rotate: store TRUE original bounds (before any transformation)
+      const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
+        id, dx: offset.dx, dy: offset.dy
+      }));
+      const objectsForUndo = ctx.selectedObjects.map(obj => ({
+        ...obj,
+        bounds: originalBoundsMap.get(obj.id) || [...obj.bounds] as [number, number, number, number]
+      }));
+      ctx.undoStack.push({ 
+        type: 'move_rotate', 
+        objects: objectsForUndo, 
+        deltaX: result.deltaX, 
+        deltaY: result.deltaY,
+        rotationDelta: result.rotationDelta,
+        componentCenter: result.componentCenter,
+        perObjectOffsets
+      });
+    } else if (hasMoved) {
+      const objectsForUndo = ctx.selectedObjects.map(obj => ({
+        ...obj,
+        bounds: [
+          obj.bounds[0] - result.deltaX,
+          obj.bounds[1] - result.deltaY,
+          obj.bounds[2] - result.deltaX,
+          obj.bounds[3] - result.deltaY
+        ] as [number, number, number, number]
+      }));
+      ctx.undoStack.push({ type: 'move', objects: objectsForUndo, deltaX: result.deltaX, deltaY: result.deltaY });
+    } else if (hasRotated && result.componentCenter) {
+      const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
+        id, dx: offset.dx, dy: offset.dy
+      }));
+      const objectsForUndo = ctx.selectedObjects.map(obj => ({ ...obj }));
+      ctx.undoStack.push({ 
+        type: 'rotate', 
+        objects: objectsForUndo, 
+        rotationDelta: result.rotationDelta,
+        componentCenter: result.componentCenter,
+        perObjectOffsets
+      });
+    }
+    
     if (ctx.undoStack.length > MAX_UNDO_HISTORY) ctx.undoStack.shift();
     ctx.redoStack.length = 0;
     
+    // Send to LSP server
     if (isVSCodeWebview && vscode) {
-      vscode.postMessage({ command: 'MoveObjects', objectIds, deltaX: result.deltaX, deltaY: result.deltaY });
+      if (hasMoved) {
+        vscode.postMessage({ command: 'MoveObjects', objectIds, deltaX: result.deltaX, deltaY: result.deltaY });
+      }
+      if (hasRotated && result.componentCenter) {
+        // Convert perObjectOffsets Map to array for JSON serialization
+        const perObjectOffsets = Array.from(result.perObjectOffsets.entries()).map(([id, offset]) => ({
+          id, dx: offset.dx, dy: offset.dy
+        }));
+        vscode.postMessage({ 
+          command: 'RotateObjects', 
+          objectIds, 
+          rotationDelta: result.rotationDelta,
+          componentCenter: result.componentCenter,
+          perObjectOffsets
+        });
+      }
+    }
+  });
+  
+  // Rotation during move mode - only works for single component selection
+  input.setOnRotate((angleDelta: number) => {
+    // If we have selected objects, rotate them
+    if (ctx.selectedObjects.length === 0) {
+      console.log('[Rotate] No objects selected');
+      return;
+    }
+    
+    // Validate: all selected objects must belong to the same component
+    const firstComponentRef = ctx.selectedObjects[0].component_ref;
+    if (!firstComponentRef) {
+      console.log('[Rotate] Selection does not belong to a component - rotation disabled');
+      return;
+    }
+    
+    for (const obj of ctx.selectedObjects) {
+      if (obj.component_ref !== firstComponentRef) {
+        console.log('[Rotate] Selection contains objects from different components - rotation disabled');
+        return;
+      }
+    }
+    
+    // Check if objects have precomputed polar coordinates
+    const hasPolarCoords = ctx.selectedObjects.some(o => o.polar_radius !== undefined);
+    if (!hasPolarCoords) {
+      console.log('[Rotate] Selected component does not have polar coordinates - rotation disabled');
+      return;
+    }
+    
+    // Track if this is a "rotate in place" (not during drag)
+    const wasAlreadyMoving = input.getIsMoving();
+    
+    // If not already in move mode, start it and set up component rotation
+    if (scene.movingObjects.length === 0) {
+      scene.startMove(ctx.selectedObjects);
+      const success = scene.setupComponentRotation(ctx.selectedObjects);
+      if (!success) {
+        console.log('[Rotate] Failed to set up component rotation');
+        scene.cancelMove();
+        return;
+      }
+    } else if (!scene.hasComponentRotation()) {
+      // Already moving but no component rotation set up - try to set it up
+      const success = scene.setupComponentRotation(ctx.selectedObjects);
+      if (!success) {
+        console.log('[Rotate] Failed to set up component rotation for moving objects');
+        return;
+      }
+    }
+    
+    scene.addRotation(angleDelta);
+    console.log(`[Rotate] Added ${(angleDelta * 180 / Math.PI).toFixed(0)}° rotation for component ${firstComponentRef}`);
+    
+    // If this was a "rotate in place" (R pressed without dragging), finalize immediately
+    // This creates the undo entry and sends to LSP server
+    if (!wasAlreadyMoving) {
+      console.log('[Rotate] Finalizing rotate-in-place with deltaX=0, deltaY=0');
+      // Trigger the same logic as onMoveEnd with zero delta
+      input.triggerMoveEnd(0, 0);
     }
   });
 

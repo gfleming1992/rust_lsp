@@ -176,11 +176,12 @@ export class Renderer {
     this.uniformData[14] = 1;
     this.uniformData[15] = 0;
     
-    // Move offset (xy = offset, zw = unused padding)
+    // Move offset (xy = translation, z = rotation angle delta in radians, w = unused)
     const moveOffset = this.scene.getMoveOffset();
+    const rotationOffset = this.scene.getRotationOffset();
     this.uniformData[16] = moveOffset.x;
     this.uniformData[17] = moveOffset.y;
-    this.uniformData[18] = 0;
+    this.uniformData[18] = rotationOffset;
     this.uniformData[19] = 0;
   }
 

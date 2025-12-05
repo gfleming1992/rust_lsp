@@ -13,7 +13,7 @@ struct Uniforms {
   m0 : vec4<f32>,
   m1 : vec4<f32>,
   m2 : vec4<f32>,
-  moveOffset : vec4<f32>, // xy = offset, zw = unused
+  moveOffset : vec4<f32>, // xy = move offset, z = rotation angle delta (radians), w = unused
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -35,9 +35,15 @@ fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut
     return out;
   }
   
+  // Get stored rotation angle
   let angle_u16 = packed >> 16u;
   let angle_normalized = f32(angle_u16) / 65535.0;
-  let angle = angle_normalized * 6.28318530718; // 2 * PI
+  var angle = angle_normalized * 6.28318530718; // 2 * PI
+  
+  // Add rotation delta if moving
+  if (moving) {
+    angle = angle + U.moveOffset.z;
+  }
   
   let c = cos(angle);
   let s = sin(angle);

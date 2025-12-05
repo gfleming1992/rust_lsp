@@ -70,6 +70,9 @@ pub fn generate_polyline_geometry(
             net_name: polyline.net_name.clone(),
             component_ref: polyline.component_ref.clone(),
             pin_ref: None,
+            component_center: None,
+            polar_radius: None,
+            polar_angle: None,
         });
     }
 

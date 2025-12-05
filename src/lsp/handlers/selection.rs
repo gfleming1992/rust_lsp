@@ -95,11 +95,13 @@ fn triangle_intersects_aabb(
 
 /// Check if a selection box intersects an object's actual geometry (not just bounding box)
 /// `move_delta` is the (dx, dy) to apply if this object was moved
+/// `rotation_delta` is the rotation angle in radians to apply if this object was rotated
 pub fn box_intersects_object(
     min_x: f32, min_y: f32, max_x: f32, max_y: f32,
     range: &ObjectRange, 
     layers: &[LayerJSON], 
-    move_delta: Option<(f32, f32)>
+    move_delta: Option<(f32, f32)>,
+    rotation_delta: Option<f32>
 ) -> bool {
     let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
         Some(l) => l,
@@ -139,12 +141,13 @@ pub fn box_intersects_object(
                 let inst_y = inst_data[base + 1] + dy;
                 let packed = inst_data[base + 2];
                 
-                // Extract rotation for instanced_rot (obj_type == 3)
+                // Extract rotation for instanced_rot (obj_type == 3) and add rotation delta
                 let rotation = if range.obj_type == 3 {
                     let packed_bits = packed.to_bits();
                     let angle_u16 = packed_bits >> 16;
                     let angle_normalized = (angle_u16 as f32) / 65535.0;
-                    angle_normalized * std::f32::consts::TAU
+                    let base_angle = angle_normalized * std::f32::consts::TAU;
+                    base_angle + rotation_delta.unwrap_or(0.0)
                 } else {
                     0.0f32
                 };
@@ -266,7 +269,7 @@ pub fn sort_by_priority(objects: &mut [ObjectRange], layers: &[LayerJSON]) {
 
 /// Check if a point hits an object's actual geometry (not just bounding box)
 /// `move_delta` is the (dx, dy) to apply if this object was moved
-pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON], move_delta: Option<(f32, f32)>) -> bool {
+pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJSON], move_delta: Option<(f32, f32)>, rotation_delta: Option<f32>) -> bool {
     let layer = match layers.iter().find(|l| l.layer_id == range.layer_id) {
         Some(l) => l,
         None => return true,
@@ -305,12 +308,13 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
                 let inst_y = inst_data[base + 1] + dy;
                 let packed = inst_data[base + 2];
                 
-                // Extract rotation for instanced_rot (obj_type == 3)
+                // Extract rotation for instanced_rot (obj_type == 3) and add rotation delta
                 let rotation = if range.obj_type == 3 {
                     let packed_bits = packed.to_bits();
                     let angle_u16 = packed_bits >> 16;
                     let angle_normalized = (angle_u16 as f32) / 65535.0;
-                    angle_normalized * std::f32::consts::TAU
+                    let base_angle = angle_normalized * std::f32::consts::TAU;
+                    base_angle + rotation_delta.unwrap_or(0.0)
                 } else {
                     0.0f32
                 };
@@ -380,12 +384,13 @@ pub fn point_hits_object(px: f32, py: f32, range: &ObjectRange, layers: &[LayerJ
                 let i2 = idx2 * 2;
                 
                 if i2 + 1 < lod0.vertex_data.len() {
-                    let x0 = lod0.vertex_data[i0];
-                    let y0 = lod0.vertex_data[i0 + 1];
-                    let x1 = lod0.vertex_data[i1];
-                    let y1 = lod0.vertex_data[i1 + 1];
-                    let x2 = lod0.vertex_data[i2];
-                    let y2 = lod0.vertex_data[i2 + 1];
+                    // Apply move delta to vertex positions
+                    let x0 = lod0.vertex_data[i0] + dx;
+                    let y0 = lod0.vertex_data[i0 + 1] + dy;
+                    let x1 = lod0.vertex_data[i1] + dx;
+                    let y1 = lod0.vertex_data[i1 + 1] + dy;
+                    let x2 = lod0.vertex_data[i2] + dx;
+                    let y2 = lod0.vertex_data[i2 + 1] + dy;
                     
                     if point_in_triangle(px, py, x0, y0, x1, y1, x2, y2) {
                         return true;
@@ -418,7 +423,10 @@ pub fn find_objects_at_point(state: &ServerState, x: f32, y: f32, only_visible: 
             // Get move delta if this object was moved
             let move_delta = state.moved_objects.get(&obj.range.id)
                 .map(|m| (m.delta_x, m.delta_y));
-            point_hits_object(x, y, &obj.range, &state.layers, move_delta)
+            // Get rotation delta if this object was rotated
+            let rotation_delta = state.rotated_objects.get(&obj.range.id)
+                .map(|r| r.delta_radians);
+            point_hits_object(x, y, &obj.range, &state.layers, move_delta, rotation_delta)
         })
         .map(|obj| obj.range.clone())
         .collect();
@@ -478,7 +486,10 @@ pub fn handle_box_select(
                 // Get move delta if this object was moved
                 let move_delta = state.moved_objects.get(&obj.range.id)
                     .map(|m| (m.delta_x, m.delta_y));
-                box_intersects_object(p.min_x, p.min_y, p.max_x, p.max_y, &obj.range, &state.layers, move_delta)
+                // Get rotation delta if this object was rotated
+                let rotation_delta = state.rotated_objects.get(&obj.range.id)
+                    .map(|r| r.delta_radians);
+                box_intersects_object(p.min_x, p.min_y, p.max_x, p.max_y, &obj.range, &state.layers, move_delta, rotation_delta)
             })
             .map(|obj| obj.range.clone())
             .collect();

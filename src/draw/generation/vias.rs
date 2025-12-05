@@ -126,6 +126,9 @@ pub fn generate_via_geometry(
                     net_name: inst.net_name.clone(),
                     component_ref: inst.component_ref.clone(),
                     pin_ref: None,
+                    component_center: None,
+                    polar_radius: None,
+                    polar_angle: None,
                 });
             }
             

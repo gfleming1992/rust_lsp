@@ -13,7 +13,7 @@ struct Uniforms {
   m0 : vec4<f32>,
   m1 : vec4<f32>,
   m2 : vec4<f32>,
-  moveOffset : vec4<f32>, // xy = offset, zw = unused
+  moveOffset : vec4<f32>, // xy = move offset, z = rotation angle delta (radians), w = unused
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
@@ -34,13 +34,25 @@ fn vs_main(@location(0) pos : vec2<f32>, @location(1) inst : vec3<f32>) -> VSOut
     return out;
   }
   
+  // Apply rotation if moving and rotation delta is non-zero
+  var rotatedPos = pos;
+  if (moving && abs(U.moveOffset.z) > 0.001) {
+    let angle = U.moveOffset.z;
+    let c = cos(angle);
+    let s = sin(angle);
+    rotatedPos = vec2<f32>(
+      pos.x * c - pos.y * s,
+      pos.x * s + pos.y * c
+    );
+  }
+  
   // Apply move offset if moving
   var instanceOffset = inst.xy;
   if (moving) {
     instanceOffset = instanceOffset + U.moveOffset.xy;
   }
   
-  let p = vec3<f32>(pos + instanceOffset, 1.0);
+  let p = vec3<f32>(rotatedPos + instanceOffset, 1.0);
   let t = vec3<f32>( dot(U.m0.xyz, p), dot(U.m1.xyz, p), dot(U.m2.xyz, p) );
   out.Position = vec4<f32>(t.xy, 0.0, 1.0);
   
